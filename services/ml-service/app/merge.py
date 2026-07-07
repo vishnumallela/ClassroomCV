@@ -33,9 +33,24 @@ OVERLAP_TOLERANCE_MS = 1_000
 MAX_GAP_MS = 600_000  # 10 minutes
 MERGE_THRESHOLD = 0.55
 
-W_HIST = 0.6  # appearance weight (histogram OR spatial continuity)
+# Appearance alone cannot separate uniformed students (inter-student histogram
+# correlation runs ~0.9 when shirts repeat), so spatial continuity is ALWAYS a
+# scoring term rather than a fallback, and seated far-apart pairs are hard
+# vetoed regardless of histogram agreement.
+W_HIST = 0.35
+W_SPATIAL = 0.25
 W_SIZE = 0.2
 W_TEMPORAL = 0.2
+
+# A cluster whose interval-endpoint centers span more than this is mobile (the
+# walking teacher); mobile pairs get a spatial floor so long jumps between her
+# fragments still reconnect on appearance + temporal evidence.
+MOBILE_RANGE = 0.15
+MOBILE_SPATIAL_FLOOR = 0.6
+# Seated+seated pairs whose approximate anchor centers sit farther apart than
+# this are different desks, therefore different students: reject outright.
+SEATED_RANGE = 0.02
+SEATED_VETO_DIST = 0.10
 
 # Spatial-continuity tolerance (normalized units): base allowance plus growth
 # per second of gap. Calibrated on real classroom fragments: a stationary
@@ -236,6 +251,33 @@ def _size_similarity(a: float, b: float) -> float:
     return max(0.0, min(1.0, min(a, b) / hi))
 
 
+def _endpoint_centers(cluster: "_Cluster") -> list[tuple[float, float]]:
+    centers: list[tuple[float, float]] = []
+    for _s, _e, sc, ec in cluster.intervals:
+        if sc is not None:
+            centers.append(sc)
+        if ec is not None:
+            centers.append(ec)
+    return centers
+
+
+def _center_stats(cluster: "_Cluster") -> Optional[tuple[float, tuple[float, float]]]:
+    """(spread, mean center) of a cluster's interval-endpoint centers.
+
+    Endpoint centers are a cheap stand-in for the full trajectory: a seated
+    student's endpoints cluster at the desk, the walking teacher's spread
+    across the room. None when the cluster carries no center data (legacy
+    callers).
+    """
+    centers = _endpoint_centers(cluster)
+    if not centers:
+        return None
+    xs = [c[0] for c in centers]
+    ys = [c[1] for c in centers]
+    spread = max(max(xs) - min(xs), max(ys) - min(ys))
+    return spread, (sum(xs) / len(xs), sum(ys) / len(ys))
+
+
 def _score_clusters(
     a: _Cluster,
     b: _Cluster,
@@ -249,14 +291,37 @@ def _score_clusters(
     if gap >= max_gap_ms:
         return None
     temporal = 1.0 - gap / max_gap_ms
+
+    stats_a = _center_stats(a)
+    stats_b = _center_stats(b)
+    # Seat veto: two stationary clusters anchored at different desks are
+    # different students no matter how well their uniforms correlate.
+    if stats_a is not None and stats_b is not None:
+        spread_a, center_a = stats_a
+        spread_b, center_b = stats_b
+        if spread_a <= SEATED_RANGE and spread_b <= SEATED_RANGE:
+            anchor_dist = math.hypot(
+                center_a[0] - center_b[0], center_a[1] - center_b[1]
+            )
+            if anchor_dist > SEATED_VETO_DIST:
+                return None
+
+    spatial = spatial_continuity(ca, cb, gap)
+    mobile = (stats_a is not None and stats_a[0] > MOBILE_RANGE) or (
+        stats_b is not None and stats_b[0] > MOBILE_RANGE
+    )
+    if mobile:
+        spatial = max(spatial, MOBILE_SPATIAL_FLOOR)
+
     if a.hist is not None and b.hist is not None:
         appearance = hist_correlation(a.hist, b.hist)
     else:
         # No appearance evidence (e.g. /rederive from stored detections —
-        # histograms are never persisted): demand spatial continuity instead.
-        appearance = spatial_continuity(ca, cb, gap)
+        # histograms are never persisted): spatial carries the appearance slot.
+        appearance = spatial
     return (
         W_HIST * appearance
+        + W_SPATIAL * spatial
         + W_SIZE * _size_similarity(a.mean_area, b.mean_area)
         + W_TEMPORAL * temporal
     )

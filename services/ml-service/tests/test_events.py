@@ -274,7 +274,7 @@ def test_door_crossing_counted_when_edge_sample_is_within_window():
     dets += [_det(40_000, 1, x=0.07)]  # reappears at the door
     dets += [_det(ts, 1, x=0.5) for ts in range(41_000, 58_000, 1_000)]
     dets += [_det(59_000, 1, x=0.07), _det(60_000, 1, x=0.06)]  # leaves via door
-    events = door_entry_exit(dets, intervals, DOOR, duration_ms=120_000)
+    events = door_entry_exit(dets, intervals, [DOOR], duration_ms=120_000)
     kinds = [e["kind"] for e in events]
     assert kinds == ["enter", "exit", "enter", "exit"]
     # first enter is the video-start rule; the 13s exit is door-adjacent via window
@@ -286,7 +286,7 @@ def test_mid_room_occlusion_gap_produces_no_door_events():
     dets = [_det(ts, 1, x=0.5) for ts in range(0, 20_000, 1_000)]
     dets += [_det(ts, 1, x=0.55) for ts in range(30_000, 50_000, 1_000)]
     intervals = [[0, 19_000], [30_000, 49_000]]
-    events = door_entry_exit(dets, intervals, DOOR, duration_ms=120_000)
+    events = door_entry_exit(dets, intervals, [DOOR], duration_ms=120_000)
     kinds = [e["kind"] for e in events]
     # video-start enter only: the mid-room gap is an occlusion, not a crossing
     assert kinds == ["enter"]

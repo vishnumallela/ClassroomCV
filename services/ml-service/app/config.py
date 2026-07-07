@@ -18,6 +18,16 @@ class Settings(BaseSettings):
     database_url: str = "postgres://postgres:postgres@localhost:5433/classroom"
     model_name: str = "yolo11m-pose.pt"
     device: str = "mps"
+    # Inference: 640 letterboxes the 2560-wide CCTV frame down 4x and destroys
+    # back-row keypoints; 1280 is the single largest quality lever. conf=0.05
+    # pairs with track_low_thresh so faint back-row boxes can EXTEND tracks
+    # (BYTE stage 2) while new_track_thresh keeps them from spawning tracks.
+    imgsz: int = 1280
+    det_conf: float = 0.05
+    max_det: int = 100
+    tracker_cfg: str = str(
+        Path(__file__).resolve().parent / "trackers" / "classroom_botsort.yaml"
+    )
 
 
 @lru_cache

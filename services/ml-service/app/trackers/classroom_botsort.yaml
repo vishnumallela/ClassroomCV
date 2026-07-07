@@ -1,0 +1,33 @@
+# BoT-SORT tuned for a static classroom camera: a mostly-static seated crowd
+# plus one fast-moving teacher, sampled at ~5 fps.
+#
+# Key departures from the stock botsort.yaml and why:
+# - fuse_score false: with fuse_score on, stage-2 (low-conf) association cost
+#   is 1 - IoU*conf against a fixed 0.5 gate; stage-2 detections have
+#   conf < 0.25 by construction so the minimum cost is 0.75 and the recovery
+#   path can never match. Off, back-row students survive confidence dips.
+# - gmc_method none: the camera is bolted down; sparse optical flow costs
+#   10-30 ms per frame and a walking teacher can bias the "camera motion"
+#   estimate, drifting every Kalman state.
+# - track_buffer 60: counted in SAMPLED frames (12 s at 5 fps). Seated
+#   students keep near-zero Kalman velocity, so a lost track's prediction
+#   stays planted at the desk and the reappearing detection reactivates it
+#   instead of spawning a new fragment.
+# - new_track_thresh 0.40: one noisy low-conf frame can no longer mint a raw
+#   track; low-conf boxes still extend existing tracks via stage 1/2.
+# - with_reid + model auto: reuses the pose model's own head features via a
+#   forward pre-hook (no second model). appearance_thresh 0.90 keeps ReID
+#   strictly for near-certain matches (the distinct teacher), so same-uniform
+#   students cannot swap on appearance.
+tracker_type: botsort
+track_high_thresh: 0.25
+track_low_thresh: 0.05
+new_track_thresh: 0.40
+track_buffer: 60
+match_thresh: 0.8
+fuse_score: false
+gmc_method: none
+proximity_thresh: 0.3
+appearance_thresh: 0.90
+with_reid: true
+model: auto

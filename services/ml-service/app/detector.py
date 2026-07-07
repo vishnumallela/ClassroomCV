@@ -38,6 +38,12 @@ HIST_SAMPLE_SPACING_MS = 1_000
 KPT_CONF_LOW = 0.3
 KPT_CONF_VISIBLE = 0.5
 STANDING_ASPECT = 1.6
+# The hip/knee standing fallback needs spatially meaningful keypoints: demand
+# higher keypoint confidence than the general 0.3 gate AND a box at least
+# ~90 px tall on a 1440p frame. Below that the geometry is noise and the
+# aspect-only result is more trustworthy.
+STANDING_KPT_CONF = 0.4
+STANDING_MIN_BOX_H = 90 / 1440
 
 # COCO keypoint indices
 NOSE, L_EYE, R_EYE = 0, 1, 2
@@ -158,28 +164,25 @@ def _reset_tracker(model) -> None:
 def _track_frame(model, frame: np.ndarray, device: str):
     global _fallback_cpu
     effective = "cpu" if _fallback_cpu else device
+    settings = get_settings()
+    kwargs = dict(
+        persist=True,
+        tracker=settings.tracker_cfg,
+        classes=[0],
+        imgsz=settings.imgsz,
+        conf=settings.det_conf,
+        max_det=settings.max_det,
+        verbose=False,
+    )
     try:
-        return model.track(
-            frame,
-            persist=True,
-            tracker="botsort.yaml",
-            classes=[0],
-            device=effective,
-            verbose=False,
-        )
+        # fp16 only on the GPU path; the cpu fallback stays fp32.
+        return model.track(frame, device=effective, half=effective == "mps", **kwargs)
     except Exception as exc:
         if effective == "cpu":
             raise
         logger.warning("device %s failed (%s); falling back to cpu", effective, exc)
         _fallback_cpu = True
-        return model.track(
-            frame,
-            persist=True,
-            tracker="botsort.yaml",
-            classes=[0],
-            device="cpu",
-            verbose=False,
-        )
+        return model.track(frame, device="cpu", half=False, **kwargs)
 
 
 def _validate_video_path(video_path: str) -> str:
@@ -232,8 +235,10 @@ def _is_standing(
         return True
     if kxy is None or kconf is None or len(kconf) < 15:
         return False
-    hip_ys = [float(kxy[i][1]) for i in (L_HIP, R_HIP) if kconf[i] > KPT_CONF_LOW]
-    knee_ys = [float(kxy[i][1]) for i in (L_KNEE, R_KNEE) if kconf[i] > KPT_CONF_LOW]
+    if h < STANDING_MIN_BOX_H:
+        return False
+    hip_ys = [float(kxy[i][1]) for i in (L_HIP, R_HIP) if kconf[i] > STANDING_KPT_CONF]
+    knee_ys = [float(kxy[i][1]) for i in (L_KNEE, R_KNEE) if kconf[i] > STANDING_KPT_CONF]
     if not hip_ys or not knee_ys:
         return False
     hip_y = sum(hip_ys) / len(hip_ys)

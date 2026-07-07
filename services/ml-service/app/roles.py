@@ -107,6 +107,25 @@ def _center(d: Detection) -> tuple[float, float]:
     return d.bbox["x"] + d.bbox["w"] / 2.0, d.bbox["y"] + d.bbox["h"] / 2.0
 
 
+def _smooth_standing(dets: list[Detection]) -> list[bool]:
+    """5-sample sliding majority vote over the chronological standing flags.
+
+    Posture changes last far longer than one second, but _is_standing flickers
+    on bbox-aspect noise and keypoint dropouts (worst when the teacher writes
+    back-turned). The vote removes single-sample flips before the flags feed
+    standing_ratio and the at-board gate.
+    """
+    flags = [d.standing for d in dets]
+    if len(flags) < 5:
+        return flags
+    smoothed: list[bool] = []
+    for i in range(len(flags)):
+        lo = max(0, i - 2)
+        window = flags[lo : i + 3]
+        smoothed.append(sum(window) * 2 > len(window))
+    return smoothed
+
+
 def min_teacher_span_ms(duration_ms: int) -> int:
     """Span gate: 60s absolute, scaled down for clips shorter than 3 minutes."""
     if duration_ms and duration_ms > 0:
@@ -135,7 +154,8 @@ def compute_features(
         first_ms, last_ms = dets[0].video_ts_ms, dets[-1].video_ts_ms
         n = len(dets)
 
-        standing_ratio = sum(1 for d in dets if d.standing) / n
+        standing = _smooth_standing(dets)
+        standing_ratio = sum(standing) / n
 
         centers = [_center(d) for d in dets]
         xs = [c[0] for c in centers]
@@ -151,9 +171,9 @@ def compute_features(
         board_proximity = 0.0
         if board_x0 is not None:
             at_board = 0
-            for d, (cx, _cy) in zip(dets, centers):
+            for d, is_standing, (cx, _cy) in zip(dets, standing, centers):
                 if (
-                    d.standing
+                    is_standing
                     and board_x0 <= cx <= board_x1
                     and d.bbox["y"] + d.bbox["h"] >= board_y1
                 ):

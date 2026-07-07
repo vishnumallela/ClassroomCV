@@ -28,6 +28,11 @@ BUCKET_MS = 5_000
 BOARD_EXPAND = 0.12  # 12% of frame (normalized units) on every side
 BOARD_ON_MS = 2_000
 BOARD_OFF_MS = 3_000
+# Opening tolerance: a candidate run survives brief false flickers (a single
+# occluded sample) instead of resetting; without this, opening needs ~10
+# CONSECUTIVE true samples at 5 fps and short board stints never register.
+BOARD_FLICKER_SAMPLES = 2
+BOARD_FLICKER_BUDGET_MS = 600
 
 
 # --------------------------------------------------------------------------- #
@@ -81,7 +86,7 @@ DOOR_EXPAND = 0.15
 def door_entry_exit(
     teacher_dets: list[Detection],
     intervals: list[list[int]],
-    door_polygon: list[list[float]],
+    door_polygons: list[list[list[float]]],
     duration_ms: int,
     end_margin_ms: int = END_MARGIN_MS,
     window_ms: int = DOOR_WINDOW_MS,
@@ -105,7 +110,8 @@ def door_entry_exit(
 
     def any_near(lo: int, hi: int) -> bool:
         return any(
-            lo <= d.video_ts_ms <= hi and near_zone(d, door_polygon, DOOR_EXPAND)
+            lo <= d.video_ts_ms <= hi
+            and any(near_zone(d, p, DOOR_EXPAND) for p in door_polygons)
             for d in dets
         )
 
@@ -164,6 +170,8 @@ def board_intervals_from_samples(
     last_true: Optional[int] = None
     start: Optional[int] = None
     prev_ts: Optional[int] = None
+    false_streak = 0
+    false_run_ms = 0
 
     for ts, cond in samples:
         if prev_ts is not None and ts - prev_ts >= gap_ms:
@@ -173,17 +181,26 @@ def board_intervals_from_samples(
             run_start = None
             start = None
             last_true = None
-        prev_ts = ts
+            false_streak = 0
+            false_run_ms = 0
         if not on:
             if cond:
+                false_streak = 0
                 if run_start is None:
                     run_start = ts
-                if ts - run_start >= on_ms:
+                    false_run_ms = 0
+                if ts - run_start >= on_ms and false_run_ms <= BOARD_FLICKER_BUDGET_MS:
                     on = True
                     start = run_start
                     last_true = ts
-            else:
-                run_start = None
+            elif run_start is not None:
+                false_streak += 1
+                if prev_ts is not None:
+                    false_run_ms += ts - prev_ts
+                if false_streak >= BOARD_FLICKER_SAMPLES or false_run_ms > BOARD_FLICKER_BUDGET_MS:
+                    run_start = None
+                    false_streak = 0
+                    false_run_ms = 0
         else:
             if cond:
                 last_true = ts
@@ -193,6 +210,7 @@ def board_intervals_from_samples(
                 run_start = None
                 start = None
                 last_true = None
+        prev_ts = ts
 
     if on and start is not None and last_true is not None:
         intervals.append([start, last_true])
@@ -261,9 +279,7 @@ def derive(
     board_polygon = next(
         (z["polygon"] for z in zones if z.get("kind") == "board"), None
     )
-    door_polygon = next(
-        (z["polygon"] for z in zones if z.get("kind") == "door"), None
-    )
+    door_polygons = [z["polygon"] for z in zones if z.get("kind") == "door"]
     teacher_no = next(
         (t for t, (role, _) in roles_map.items() if role == "teacher"), None
     )
@@ -279,8 +295,8 @@ def derive(
         )
         presence = presence_intervals([d.video_ts_ms for d in teacher_dets])
         entry_exit = (
-            door_entry_exit(teacher_dets, presence, door_polygon, duration_ms)
-            if door_polygon is not None
+            door_entry_exit(teacher_dets, presence, door_polygons, duration_ms)
+            if door_polygons
             else entry_exit_from_intervals(presence, duration_ms)
         )
         events.extend(

@@ -31,7 +31,9 @@ def test_pair_score_merges_same_person_fragments():
     score = pair_score(a, b)
     assert score is not None
     assert score > MERGE_THRESHOLD
-    assert score > 0.95  # identical hist, same size, tiny gap
+    # Identical hist, same size, tiny gap; spatial is neutral 0.5 without
+    # endpoint centers, so the ceiling is 0.35 + 0.125 + 0.2 + ~0.2.
+    assert score > 0.85
 
 
 def test_pair_score_rejects_large_temporal_overlap():
