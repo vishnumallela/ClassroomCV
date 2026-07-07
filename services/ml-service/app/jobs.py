@@ -20,16 +20,24 @@ import asyncio
 import logging
 import queue
 import threading
+import time
 import uuid
 from dataclasses import dataclass
 from typing import Callable, Optional
 
 from app import db, detector, events as events_mod, merge, roles
+from app.geometry import rdp_indices
 from app.models import AnalysisResult, Detection, VideoMeta
 
 logger = logging.getLogger(__name__)
 
 ProgressCb = Callable[[str, float], None]
+
+# Permanent overlay tier (plan section 6): per-track RDP center polyline +
+# sparse bbox keyframes stored in tracks.meta, so playback overlays survive
+# detection_events compression/retention.
+OVERLAY_RDP_EPSILON = 0.005
+OVERLAY_KEYFRAME_MS = 2_000
 
 # A video longer than this that decodes to ZERO frames or ZERO detections is
 # a failed analysis (codec/model breakage), not a legitimate empty result:
@@ -52,7 +60,9 @@ class Job:
 _jobs: dict[str, Job] = {}
 # idempotency_key -> job id, guarded by _lock alongside _jobs.
 _jobs_by_key: dict[str, str] = {}
-_queue: "queue.Queue[tuple[Job, dict]]" = queue.Queue()
+# Bounded so a burst of /analyze submits backpressures the caller (put blocks)
+# instead of holding an unbounded backlog of queued videos in memory.
+_queue: "queue.Queue[tuple[Job, dict]]" = queue.Queue(maxsize=4)
 _lock = threading.Lock()
 _worker: Optional[threading.Thread] = None
 
@@ -202,11 +212,13 @@ def run_pipeline(
     cb: ProgressCb = progress_cb or (lambda stage, frac: None)
 
     cb("detecting", 0.0)
+    stage_start = time.perf_counter()
     meta, detections, hists = detector.detect_video(
         video_path,
         sample_fps=sample_fps,
         progress_cb=lambda f: cb("detecting", f * 0.8),
     )
+    detect_s = time.perf_counter() - stage_start
 
     if not detections:
         probed_ms = meta.duration_ms
@@ -223,15 +235,19 @@ def run_pipeline(
             )
 
     cb("merging", 0.8)
+    stage_start = time.perf_counter()
     raw_tracks = merge.build_raw_tracks(detections, hists)
     mapping, identities = merge.merge_tracks(raw_tracks)
     for d in detections:
         d.track_no = mapping.get(d.raw_track_id)
     detections = [d for d in detections if d.track_no is not None]
+    merge_s = time.perf_counter() - stage_start
     cb("merging", 0.9)
 
     cb("deriving", 0.9)
+    stage_start = time.perf_counter()
     result = derive_result(meta, detections, identities, zones)
+    derive_s = time.perf_counter() - stage_start
     cb("deriving", 0.95)
 
     if write_db:
@@ -257,6 +273,13 @@ def run_pipeline(
                 f"database write failed for video {video_id}: {exc}"
             ) from exc
     cb("deriving", 1.0)
+    logger.info(
+        "pipeline stage timings for video %s: detect_s=%.2f merge_s=%.2f derive_s=%.2f",
+        video_id,
+        detect_s,
+        merge_s,
+        derive_s,
+    )
     return result
 
 
@@ -279,6 +302,36 @@ def remerge_from_raw(
     for d in detections:
         d.track_no = mapping.get(d.raw_track_id)
     return identities
+
+
+def _track_overlay(dets: list[Detection]) -> dict:
+    """RDP-simplified center polyline + bbox keyframes for one merged track."""
+    dets = sorted(dets, key=lambda d: d.video_ts_ms)
+    centers = [
+        (d.bbox["x"] + d.bbox["w"] / 2.0, d.bbox["y"] + d.bbox["h"] / 2.0)
+        for d in dets
+    ]
+    polyline = [
+        [dets[i].video_ts_ms, round(centers[i][0], 4), round(centers[i][1], 4)]
+        for i in rdp_indices(centers, OVERLAY_RDP_EPSILON)
+    ]
+    keyframes: list[list[float]] = []
+    next_ts: Optional[int] = None
+    for d in dets:
+        if next_ts is not None and d.video_ts_ms < next_ts:
+            continue
+        b = d.bbox
+        keyframes.append(
+            [
+                d.video_ts_ms,
+                round(b["x"], 4),
+                round(b["y"], 4),
+                round(b["w"], 4),
+                round(b["h"], 4),
+            ]
+        )
+        next_ts = d.video_ts_ms + OVERLAY_KEYFRAME_MS
+    return {"polyline": polyline, "keyframes": keyframes}
 
 
 def derive_result(
@@ -374,6 +427,7 @@ def derive_result(
                     "standing_ratio": round(f.standing_ratio, 4),
                     "movement": round(f.movement, 4),
                     "raw_track_ids": f.raw_track_ids,
+                    "overlay": _track_overlay(dets_by_track.get(f.track_no, [])),
                 },
             }
         )

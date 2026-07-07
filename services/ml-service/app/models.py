@@ -111,10 +111,22 @@ class VideoInfoOut(BaseModel):
     height: int
 
 
+class TrackOverlayOut(BaseModel):
+    """Permanent overlay tier: survives detection_events compression/retention.
+
+    polyline: RDP-simplified [[ts_ms, cx, cy], ...] of bbox centers;
+    keyframes: [[ts_ms, x, y, w, h], ...] sampled at most every 2 s.
+    """
+
+    polyline: list[tuple[int, float, float]]
+    keyframes: list[tuple[int, float, float, float, float]]
+
+
 class TrackMetaOut(BaseModel):
     standing_ratio: float
     movement: float
     raw_track_ids: list[int]
+    overlay: Optional[TrackOverlayOut] = None
 
 
 class TrackOut(BaseModel):

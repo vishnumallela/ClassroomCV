@@ -4,6 +4,11 @@ Reads the video with cv2.VideoCapture, samples frames at
 stride = max(1, round(native_fps / sample_fps)) and runs
 model.track(..., persist=True, tracker='botsort.yaml', classes=[0]).
 
+iter_frames is the frame-source seam (Kafka readiness, plan section 7 K1):
+it owns path validation plus the grab/retrieve/stride loop and yields
+(video_ts_ms, frame); detect_video consumes it, so a future KafkaSource only
+has to reproduce the same (ts_ms, frame) contract.
+
 Per kept frame, per person we emit a Detection with:
 - bbox {x, y, w, h} normalized, top-left based
 - standing: bbox aspect h/w > 1.6 OR hip-above-knee keypoint geometry
@@ -20,8 +25,9 @@ from __future__ import annotations
 import logging
 import math
 import os
+from dataclasses import dataclass
 from pathlib import Path
-from typing import Callable, Optional
+from typing import Callable, Iterator, Optional
 
 import cv2
 import numpy as np
@@ -389,6 +395,75 @@ def _effective_frame_count(metadata_count: int, frames_read: int) -> int:
     return metadata_count
 
 
+@dataclass
+class FrameSourceInfo:
+    """Source properties iter_frames fills in for the caller's meta/progress
+    math: capture properties before the first yield, frames_read once the
+    source is exhausted or closed."""
+
+    native_fps: float = FALLBACK_NATIVE_FPS
+    width: int = 0
+    height: int = 0
+    metadata_frame_count: int = 0
+    frames_to_process: Optional[int] = None
+    frames_read: int = 0
+
+
+def iter_frames(
+    video_path: str,
+    sample_fps: float,
+    info: Optional[FrameSourceInfo] = None,
+) -> Iterator[tuple[int, np.ndarray]]:
+    """File-backed frame source (the Kafka seam, plan section 7 K1).
+
+    Validates video_path via _validate_video_path, then yields
+    (video_ts_ms, BGR frame) for every stride-th decodable frame, with
+    stride = max(1, round(native_fps / effective_sample_fps)) and
+    ts_ms = round(frame_idx / native_fps * 1000): the exact math the
+    detect_video loop always ran. Any future source (Kafka/RTSP) only has to
+    reproduce this (ts_ms, frame) contract. The capture is released when the
+    generator is exhausted, closed, or unwound by an exception.
+    """
+    video_path = _validate_video_path(video_path)
+    cap = cv2.VideoCapture(video_path)
+    if not cap.isOpened():
+        cap.release()
+        raise RuntimeError(f"cannot open video file: {video_path}")
+
+    frame_idx = 0
+    try:
+        native_fps = cap.get(cv2.CAP_PROP_FPS)
+        if not native_fps or native_fps <= 0 or math.isnan(native_fps):
+            native_fps = FALLBACK_NATIVE_FPS
+        frame_count = int(cap.get(cv2.CAP_PROP_FRAME_COUNT) or 0)
+
+        effective_fps = max(0.5, min(float(sample_fps or MAX_SAMPLE_FPS), MAX_SAMPLE_FPS))
+        stride = max(1, round(native_fps / effective_fps))
+
+        if info is not None:
+            info.native_fps = float(native_fps)
+            info.width = int(cap.get(cv2.CAP_PROP_FRAME_WIDTH) or 0)
+            info.height = int(cap.get(cv2.CAP_PROP_FRAME_HEIGHT) or 0)
+            info.metadata_frame_count = frame_count
+            info.frames_to_process = (
+                (frame_count // stride + 1) if frame_count > 0 else None
+            )
+
+        while True:
+            grabbed = cap.grab()
+            if not grabbed:
+                break
+            if frame_idx % stride == 0:
+                ok, frame = cap.retrieve()
+                if ok and frame is not None:
+                    yield int(round(frame_idx / native_fps * 1000.0)), frame
+            frame_idx += 1
+    finally:
+        if info is not None:
+            info.frames_read = frame_idx
+        cap.release()
+
+
 def detect_video(
     video_path: str,
     sample_fps: float = 5.0,
@@ -397,69 +472,43 @@ def detect_video(
     """Run detection+tracking over the video.
 
     video_path must be an absolute path to an existing file (inside DATA_DIR
-    when that env var is set) — see _validate_video_path.
+    when that env var is set); see _validate_video_path.
     Returns (video_meta, detections, torso_hist_samples_by_raw_track_id).
     progress_cb receives the 0..1 fraction of sampled frames processed.
     """
-    video_path = _validate_video_path(video_path)
-    cap = cv2.VideoCapture(video_path)
-    if not cap.isOpened():
-        cap.release()
-        raise RuntimeError(f"cannot open video file: {video_path}")
-
     detections: list[Detection] = []
     hists: dict[int, list[np.ndarray]] = {}
     last_hist_ms: dict[int, int] = {}
     last_ts_ms = 0
 
+    model = _get_model()
+    _reset_tracker(model)
+    device = get_device()
+
+    info = FrameSourceInfo()
+    frames = iter_frames(video_path, sample_fps, info=info)
+    processed = 0
     try:
-        native_fps = cap.get(cv2.CAP_PROP_FPS)
-        if not native_fps or native_fps <= 0 or math.isnan(native_fps):
-            native_fps = FALLBACK_NATIVE_FPS
-        width = int(cap.get(cv2.CAP_PROP_FRAME_WIDTH) or 0)
-        height = int(cap.get(cv2.CAP_PROP_FRAME_HEIGHT) or 0)
-        frame_count = int(cap.get(cv2.CAP_PROP_FRAME_COUNT) or 0)
-
-        effective_fps = max(0.5, min(float(sample_fps or MAX_SAMPLE_FPS), MAX_SAMPLE_FPS))
-        stride = max(1, round(native_fps / effective_fps))
-        frames_to_process = (frame_count // stride + 1) if frame_count > 0 else None
-
-        model = _get_model()
-        _reset_tracker(model)
-        device = get_device()
-
-        frame_idx = 0
-        processed = 0
-        while True:
-            grabbed = cap.grab()
-            if not grabbed:
-                break
-            if frame_idx % stride == 0:
-                ok, frame = cap.retrieve()
-                if ok and frame is not None:
-                    ts_ms = int(round(frame_idx / native_fps * 1000.0))
-                    last_ts_ms = ts_ms
-                    results = _track_frame(model, frame, device)
-                    _extract_frame(
-                        results, frame, ts_ms, detections, hists, last_hist_ms
-                    )
-                    processed += 1
-                    if progress_cb and frames_to_process:
-                        progress_cb(min(1.0, processed / frames_to_process))
-            frame_idx += 1
-
-        frame_count = _effective_frame_count(frame_count, frame_idx)
-        duration_ms = (
-            int(round(frame_count / native_fps * 1000.0)) if frame_count > 0 else last_ts_ms
-        )
-        meta = VideoMeta(
-            duration_ms=duration_ms,
-            fps=round(float(native_fps), 3),
-            width=width,
-            height=height,
-        )
+        for ts_ms, frame in frames:
+            last_ts_ms = ts_ms
+            results = _track_frame(model, frame, device)
+            _extract_frame(results, frame, ts_ms, detections, hists, last_hist_ms)
+            processed += 1
+            if progress_cb and info.frames_to_process:
+                progress_cb(min(1.0, processed / info.frames_to_process))
     finally:
-        cap.release()
+        frames.close()
+
+    frame_count = _effective_frame_count(info.metadata_frame_count, info.frames_read)
+    duration_ms = (
+        int(round(frame_count / info.native_fps * 1000.0)) if frame_count > 0 else last_ts_ms
+    )
+    meta = VideoMeta(
+        duration_ms=duration_ms,
+        fps=round(float(info.native_fps), 3),
+        width=info.width,
+        height=info.height,
+    )
 
     if progress_cb:
         progress_cb(1.0)

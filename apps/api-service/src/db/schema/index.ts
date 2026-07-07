@@ -60,7 +60,9 @@ export const events = pgTable("events", {
 });
 
 // TimescaleDB hypertable, bulk-written by the ML service. No PK, no FK by design;
-// deletion is handled by explicit raw SQL keyed on video_id.
+// deletion is handled by explicit raw SQL keyed on video_id. Partitioned on
+// wall-clock ts (not per-video video_ts_ms) so compression/retention policies
+// can age chunks; the ML COPY omits ts and lets the default fill it.
 export const detectionEvents = pgTable("detection_events", {
   videoTsMs: bigint("video_ts_ms", { mode: "number" }).notNull(),
   videoId: uuid("video_id").notNull(),
@@ -68,6 +70,7 @@ export const detectionEvents = pgTable("detection_events", {
   bbox: jsonb("bbox").$type<Bbox>().notNull(),
   confidence: real("confidence").notNull(),
   meta: jsonb("meta").$type<Record<string, unknown> | null>(),
+  ts: timestamp("ts", { withTimezone: true }).notNull().defaultNow(),
 });
 
 export const videoAnalytics = pgTable("video_analytics", {

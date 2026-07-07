@@ -124,6 +124,17 @@ def test_full_pipeline_shape_and_semantics(monkeypatch):
     assert 0.0 < a.avg_students <= 1.0
     assert a.occupancy[1].students == 1 and a.occupancy[1].teacher is True
 
+    # permanent overlay tier: the walking teacher keeps interior polyline
+    # points, the static student collapses to endpoints; keyframes >= 2s apart
+    t_ov = teachers[0].meta.overlay
+    assert t_ov is not None
+    assert t_ov.polyline[0][0] == 0 and t_ov.polyline[-1][0] == DURATION_MS
+    assert len(t_ov.polyline) > 2
+    key_ts = [k[0] for k in t_ov.keyframes]
+    assert key_ts[0] == 0 and all(b - a >= 2000 for a, b in zip(key_ts, key_ts[1:]))
+    s_ov = students[0].meta.overlay
+    assert s_ov is not None and len(s_ov.polyline) == 2
+
     # events reference the teacher identity and are time-sorted
     assert any(e.kind == "enter" for e in parsed.events)
     assert all(e.track_no == 1 for e in parsed.events)
