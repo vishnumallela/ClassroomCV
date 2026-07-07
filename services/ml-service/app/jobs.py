@@ -311,6 +311,9 @@ def derive_result(
             dets_by_track,
             meta.duration_ms,
             board_polygon=board_polygon,
+            door_polygons=[
+                z["polygon"] for z in zones if z.get("kind") == "door"
+            ],
         )
         if absorbed:
             for track_no in absorbed:

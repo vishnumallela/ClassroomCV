@@ -324,20 +324,27 @@ def absorbable_fragments(
     dets_by_track: dict[int, list[Detection]],
     duration_ms: int,
     board_polygon: Optional[list[list[float]]] = None,
+    door_polygons: Optional[list[list[list[float]]]] = None,
 ) -> list[int]:
-    """track_nos of short fragments to fold into the teacher identity.
+    """track_nos of fragments to fold into the teacher identity.
 
-    A fragment qualifies when ALL hold:
-    - it is short (span below the teacher span gate — too short to have been
-      a candidate itself),
-    - it fits entirely inside one teacher ABSENCE window (gap >= 5s between
-      teacher samples, or before the first / after the last sample),
-    - its mean center is near the board (expanded polygon bbox) OR passes
-      within ABSORB_TRAJECTORY_DIST of the teacher's observed trajectory,
-    - it is not a frame-edge sliver and is at least ABSORB_MIN_AREA_RATIO of
-      the teacher's mean bbox area (it must plausibly BE the teacher),
-    - it does not temporally overlap an already-absorbed fragment (two
-      co-present fragments cannot both be the teacher; the closer one wins).
+    Two kinds of fragment qualify:
+
+    BLIP: short (span below the teacher span gate) and entirely inside one
+    teacher ABSENCE window, near the board or the teacher's trajectory. This
+    recovers mid-absence tracker fragments.
+
+    CONTINUATION: STARTS inside an absence window and keeps going after it,
+    without temporally overlapping the teacher. This is the teacher walking
+    back in: the tracker gives her a fresh id at the door, the merge cannot
+    bridge the long spatial jump, and without this rule the returning teacher
+    is labelled a student for the rest of the lesson. Its START position must
+    be near a door, the board, or the teacher's trajectory; the whole-span
+    mean is useless because she then walks the room.
+
+    All fragments must not be frame-edge slivers, must be at least
+    ABSORB_MIN_AREA_RATIO of the teacher's area, and may not overlap an
+    already-absorbed fragment (two co-present fragments cannot both be her).
     """
     teacher_f = next((f for f in features if f.track_no == teacher_no), None)
     teacher_dets = dets_by_track.get(teacher_no)
@@ -354,25 +361,34 @@ def absorbable_fragments(
     board_box = None
     if board_polygon is not None:
         board_box = expand_bbox(polygon_bbox(board_polygon), BOARD_PROXIMITY_EXPAND)
+    door_boxes = [
+        expand_bbox(polygon_bbox(p), BOARD_PROXIMITY_EXPAND)
+        for p in (door_polygons or [])
+    ]
 
     min_span = min_teacher_span_ms(duration_ms)
 
-    def near_board(f: IdentityFeatures) -> bool:
-        return board_box is not None and (
-            board_box[0] <= f.mean_cx <= board_box[2]
-            and board_box[1] <= f.mean_cy <= board_box[3]
-        )
+    def in_box(box, cx: float, cy: float) -> bool:
+        return box[0] <= cx <= box[2] and box[1] <= cy <= box[3]
 
-    def near_trajectory(f: IdentityFeatures) -> bool:
+    def near_board(cx: float, cy: float) -> bool:
+        return board_box is not None and in_box(board_box, cx, cy)
+
+    def near_door(cx: float, cy: float) -> bool:
+        return any(in_box(b, cx, cy) for b in door_boxes)
+
+    def near_trajectory(cx: float, cy: float) -> bool:
         limit_sq = ABSORB_TRAJECTORY_DIST * ABSORB_TRAJECTORY_DIST
         return any(
-            (cx - f.mean_cx) ** 2 + (cy - f.mean_cy) ** 2 <= limit_sq
-            for cx, cy in centers
+            (tx - cx) ** 2 + (ty - cy) ** 2 <= limit_sq for tx, ty in centers
         )
+
+    def teacher_overlap_samples(first_ms: int, last_ms: int) -> int:
+        return sum(1 for ts in ts_sorted if first_ms <= ts <= last_ms)
 
     qualifying: list[IdentityFeatures] = []
     for f in features:
-        if f.track_no == teacher_no or f.span_ms >= min_span:
+        if f.track_no == teacher_no:
             continue
         near_edge = (
             f.mean_cx <= EDGE_MARGIN
@@ -386,14 +402,32 @@ def absorbable_fragments(
             f.mean_area < ABSORB_MIN_AREA_RATIO * teacher_f.mean_area
         ):
             continue
-        in_window = any(
-            ws <= f.first_ms and f.last_ms <= we for ws, we, _ in windows
-        )
-        if not in_window:
+
+        contained = any(ws <= f.first_ms and f.last_ms <= we for ws, we, _ in windows)
+        starts_in_window = any(ws <= f.first_ms <= we for ws, we, _ in windows)
+
+        if contained and f.span_ms < min_span:
+            if near_board(f.mean_cx, f.mean_cy) or near_trajectory(
+                f.mean_cx, f.mean_cy
+            ):
+                qualifying.append(f)
             continue
-        if not (near_board(f) or near_trajectory(f)):
-            continue
-        qualifying.append(f)
+
+        if starts_in_window:
+            # Continuation: she cannot be in two places, so any real temporal
+            # overlap with the teacher identity disqualifies the fragment.
+            if teacher_overlap_samples(f.first_ms, f.last_ms) > 5:
+                continue
+            frag_dets = sorted(
+                dets_by_track.get(f.track_no, []), key=lambda d: d.video_ts_ms
+            )
+            if not frag_dets:
+                continue
+            head = [_center(d) for d in frag_dets[:3]]
+            hx = sum(c[0] for c in head) / len(head)
+            hy = sum(c[1] for c in head) / len(head)
+            if near_door(hx, hy) or near_board(hx, hy) or near_trajectory(hx, hy):
+                qualifying.append(f)
 
     # Two co-present fragments cannot both be the teacher: keep the earliest
     # non-overlapping set (ties resolved by proximity to the teacher path via

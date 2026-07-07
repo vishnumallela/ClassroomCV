@@ -14,6 +14,11 @@ import { cn } from "@/lib/utils";
 type Mode = "raw" | "detections";
 type LoadState = "idle" | "loading" | "ready" | "empty" | "error";
 
+interface PlayerZone {
+  kind: string;
+  polygon: [number, number][];
+}
+
 interface VideoPlayerProps {
   videoId: string;
   streamUrl: string;
@@ -21,8 +26,14 @@ interface VideoPlayerProps {
   height: number | null;
   analyticsReady: boolean;
   videoRef: React.RefObject<HTMLVideoElement | null>;
+  zones?: PlayerZone[];
   onTimeUpdate?: (ms: number) => void;
 }
+
+const ZONE_COLORS: Record<string, { stroke: string; fill: string; label: string }> = {
+  board: { stroke: "#facc15", fill: "rgba(250,204,21,0.10)", label: "Board" },
+  door: { stroke: "#34d399", fill: "rgba(52,211,153,0.10)", label: "Door" },
+};
 
 const LABEL_FONT = '600 12px ui-sans-serif, system-ui, -apple-system, "Segoe UI", sans-serif';
 
@@ -33,6 +44,7 @@ export function VideoPlayer({
   height,
   analyticsReady,
   videoRef,
+  zones,
   onTimeUpdate,
 }: VideoPlayerProps) {
   const canvasRef = useRef<HTMLCanvasElement>(null);
@@ -107,9 +119,37 @@ export function VideoPlayer({
     const ox = (cw - dw) / 2;
     const oy = (ch - dh) / 2;
 
+    ctx.font = LABEL_FONT;
+
+    for (const zone of zones ?? []) {
+      const style = ZONE_COLORS[zone.kind];
+      if (!style || zone.polygon.length < 3) continue;
+      ctx.beginPath();
+      zone.polygon.forEach(([zx, zy], i) => {
+        const px = ox + zx * dw;
+        const py = oy + zy * dh;
+        if (i === 0) ctx.moveTo(px, py);
+        else ctx.lineTo(px, py);
+      });
+      ctx.closePath();
+      ctx.globalAlpha = 1;
+      ctx.fillStyle = style.fill;
+      ctx.fill();
+      ctx.setLineDash([6, 4]);
+      ctx.lineWidth = 1.5;
+      ctx.strokeStyle = style.stroke;
+      ctx.stroke();
+      ctx.setLineDash([]);
+      const zx0 = ox + Math.min(...zone.polygon.map((p) => p[0])) * dw;
+      const zy0 = oy + Math.min(...zone.polygon.map((p) => p[1])) * dh;
+      ctx.fillStyle = style.stroke;
+      ctx.fillRect(zx0, Math.max(oy, zy0 - 15), ctx.measureText(style.label).width + 10, 15);
+      ctx.fillStyle = "#000000";
+      ctx.fillText(style.label, zx0 + 5, Math.max(oy, zy0 - 15) + 11);
+    }
+
     const frameIdx = findFrameIndex(data.frames, video.currentTime * 1000);
     if (frameIdx < 0) return;
-    ctx.font = LABEL_FONT;
 
     for (const [trackNo, x, y, w, h] of data.frames[frameIdx]!.boxes) {
       const role = data.roles[String(trackNo)] ?? "unknown";
@@ -140,7 +180,7 @@ export function VideoPlayer({
       ctx.fillStyle = "#ffffff";
       ctx.fillText(label, lx + padX, ly + 11);
     }
-  }, [showOverlay, data, width, height, videoRef]);
+  }, [showOverlay, data, width, height, zones, videoRef]);
 
   useEffect(() => {
     const video = videoRef.current;

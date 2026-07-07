@@ -23,23 +23,23 @@ const STAGES = [
   },
   {
     title: "Re-identification",
-    what: "When a person is occluded or walks out and back, the tracker issues a new id, so a merge step reunites the fragments using a torso color histogram, or spatial continuity when color is unavailable.",
-    why: "Without it, a teacher who steps into the hallway and returns becomes two identities and her time is split in half. This is exactly how re-identification solves the leave and return problem.",
+    what: "When a person is occluded or walks out and back, the tracker issues a new id, so a merge step reunites fragments into one identity. Every candidate pair is scored on four terms at once: appearance (torso color histogram, 35 percent), spatial continuity between where one fragment ended and the next began (25 percent), body size similarity (20 percent), and how close in time they are (20 percent). Two extra classroom rules apply: a fast moving person like the teacher gets a relaxed spatial requirement so her long walks still reconnect, and two stationary fragments anchored at different desks are refused outright, no matter how alike their shirts look.",
+    why: "Students wear uniforms, so color alone cannot tell them apart; two students in identical red shirts would otherwise merge into one person across the room. Position is the evidence uniforms cannot fake: a seat is an identity anchor. Without re-identification, a teacher who steps into the hallway and returns becomes two identities and her time is split in half.",
   },
   {
     title: "Teacher and student classification",
-    what: "Each merged identity is scored on four behaviors: how much it stands, how far it moves across the room, how long it is present, and how often it stands at the board. A robust outlier rule promotes the clear leader to teacher, and short walk fragments are folded back into her identity.",
-    why: "The teacher is the person who stands, moves, is present for most of the lesson, and works at the board, so behavior alone identifies her with no faces and no labels.",
+    what: "Each merged identity is scored on four behaviors with fixed weights: how much of the time it stands (30 percent), how far it ranges across the room (25 percent), how long it is present in the video (25 percent), and how often it stands at the board (20 percent). Before scoring, obvious non-candidates are gated out: short lived fragments, frame edge slivers, and boxes far smaller than the median person. The standing signal itself is smoothed with a one second majority vote so single frame pose flickers do not count. The best candidate becomes the teacher only when its score clears an absolute floor and leads the runner up by a clear outlier margin; otherwise everyone stays unlabeled rather than guessing.",
+    why: "The teacher is the person who stands, patrols, is present for most of the lesson, and works at the board. That behavioral signature identifies her with no faces and no manual labels, and the outlier rule means the system degrades gracefully instead of promoting a random student when nothing truly looks like teaching.",
   },
   {
-    title: "Board zone detection",
-    what: "SAM 2 proposes candidate regions and a geometric score selects the one shaped and placed like a board.",
-    why: "Knowing where the board is lets the system measure time spent teaching at it, and the operator can correct the zone by hand.",
+    title: "Board and door zone detection",
+    what: "YOLO World proposes candidate regions from text prompts like chalkboard or classroom door, SAM 2 traces each candidate into a precise outline, and a geometric score picks the winner: boards must be wide, high on the wall, rectangular, and flat colored; doors must be tall, narrow, and reach toward the floor. When the open vocabulary model finds nothing, a grid of SAM 2 probes with the same geometric scoring takes over.",
+    why: "The board zone is what turns standing at the front into measured teaching time, and the door zone is what turns a disappearance into a confirmed exit. The operator can always redraw either zone by hand.",
   },
   {
     title: "Event derivation",
-    what: "The trajectories and zones become presence intervals, board intervals, entries and exits, and per second occupancy counts.",
-    why: "These are the measured analytics the dashboard renders.",
+    what: "Trajectories and zones become the final analytics. Presence intervals split wherever the teacher vanishes for five seconds or more. Board time uses hysteresis, two seconds sustained to open and three to close, and now tolerates single frame occlusion flickers. Entries and exits count only presence edges where the teacher was near a door within four seconds, so a mid room occlusion is not mistaken for leaving. Occupancy counts distinct students per five second bucket.",
+    why: "These are the measured numbers the dashboard renders, and each rule exists to keep a tracking hiccup from becoming a false event.",
   },
 ];
 
@@ -117,12 +117,16 @@ function Architecture() {
       <Section title="How the data is stored">
         <Card className="p-5">
           <p className="text-sm leading-relaxed">
-            The raw per-frame detections land in a TimescaleDB hypertable keyed on video time. A
-            long lecture can produce hundreds of thousands of rows, and the hypertable partitions
-            them by time so that reads for a single video stay fast. The small derived summaries,
-            meaning the tracks, events, and the analytics for each video, live in ordinary
-            relational tables. This keeps the heavy time series data separate from the compact
-            results the dashboard reads on every load.
+            The raw per-frame detections land in a TimescaleDB hypertable. A long lecture produces
+            hundreds of thousands of rows, and a live camera would produce them forever, so the
+            storage follows the standard video analytics split into three tiers. Raw detections
+            are the hot tier: a ring buffer that gets compressed after a day and dropped after a
+            week, enough to audit and re-derive recent footage. Simplified track paths and sparse
+            keyframe boxes are the permanent overlay tier, a few percent of the raw size, which
+            keeps playback overlays working after the raw rows age out. Events, track summaries,
+            and per video analytics are the permanent aggregate tier, kept forever at negligible
+            size. Everything the dashboard shows lives in the two permanent tiers, so retention
+            never erases a number anyone can see.
           </p>
         </Card>
       </Section>

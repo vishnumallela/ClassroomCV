@@ -116,6 +116,9 @@ function VideoDetail() {
         width={video.width}
         height={video.height}
         analyticsReady={done}
+        zones={data.zones.filter((z): z is typeof z & { polygon: [number, number][] } =>
+          Array.isArray(z.polygon),
+        )}
         onTimeUpdate={setCurrentMs}
       />
 

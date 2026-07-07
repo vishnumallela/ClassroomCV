@@ -43,10 +43,14 @@ W_SIZE = 0.2
 W_TEMPORAL = 0.2
 
 # A cluster whose interval-endpoint centers span more than this is mobile (the
-# walking teacher); mobile pairs get a spatial floor so long jumps between her
-# fragments still reconnect on appearance + temporal evidence.
+# walking teacher); mobile pairs evaluate spatial continuity with a widened
+# tolerance so her long jumps between fragments still reconnect. This must
+# stay DISTANCE-BASED: an earlier flat score floor for mobile pairs let one
+# bad merge make a cluster "mobile", which then absorbed every non-overlapping
+# fragment in the room, and every absorption made it more mobile (a chimera
+# cascade that destroyed teacher classification on real footage).
 MOBILE_RANGE = 0.15
-MOBILE_SPATIAL_FLOOR = 0.6
+MOBILE_TOL_SCALE = 3.0
 # Seated+seated pairs whose approximate anchor centers sit farther apart than
 # this are different desks, therefore different students: reject outright.
 SEATED_RANGE = 0.02
@@ -139,17 +143,20 @@ def hist_correlation(a: Optional[np.ndarray], b: Optional[np.ndarray]) -> float:
     return max(0.0, min(1.0, corr))
 
 
-def spatial_continuity(ca: Center, cb: Center, gap_ms: int) -> float:
+def spatial_continuity(
+    ca: Center, cb: Center, gap_ms: int, tol_scale: float = 1.0
+) -> float:
     """exp(-(dist/tol)^2) between the adjacent fragment endpoints.
 
     tol = SPATIAL_BASE_TOL + SPATIAL_TOL_PER_S * gap_seconds: a longer absence
-    allows more drift. Neutral 0.5 when endpoint centers are unavailable
-    (legacy callers constructing RawTrack without centers).
+    allows more drift; tol_scale widens the allowance for mobile clusters.
+    Neutral 0.5 when endpoint centers are unavailable (legacy callers
+    constructing RawTrack without centers).
     """
     if ca is None or cb is None:
         return 0.5
     dist = math.hypot(ca[0] - cb[0], ca[1] - cb[1])
-    tol = SPATIAL_BASE_TOL + SPATIAL_TOL_PER_S * (max(0, gap_ms) / 1000.0)
+    tol = (SPATIAL_BASE_TOL + SPATIAL_TOL_PER_S * (max(0, gap_ms) / 1000.0)) * tol_scale
     return math.exp(-((dist / tol) ** 2))
 
 
@@ -306,12 +313,10 @@ def _score_clusters(
             if anchor_dist > SEATED_VETO_DIST:
                 return None
 
-    spatial = spatial_continuity(ca, cb, gap)
     mobile = (stats_a is not None and stats_a[0] > MOBILE_RANGE) or (
         stats_b is not None and stats_b[0] > MOBILE_RANGE
     )
-    if mobile:
-        spatial = max(spatial, MOBILE_SPATIAL_FLOOR)
+    spatial = spatial_continuity(ca, cb, gap, MOBILE_TOL_SCALE if mobile else 1.0)
 
     if a.hist is not None and b.hist is not None:
         appearance = hist_correlation(a.hist, b.hist)
