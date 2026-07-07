@@ -13,6 +13,10 @@ const server = Bun.serve({
   hostname: env.API_SERVICE__HOST,
   port: env.API_SERVICE__PORT,
   idleTimeout: 120,
+  // Bun.serve caps request bodies at 128 MB by default, which rejects real
+  // classroom recordings with a 413 long before the handler's own size check.
+  // Lift it to the app-level upload limit so handleUpload owns the decision.
+  maxRequestBodySize: env.API_SERVICE__MAX_UPLOAD_BYTES,
   fetch: app.fetch,
 });
 
