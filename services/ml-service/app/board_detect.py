@@ -55,7 +55,7 @@ _SERVICE_DIR = Path(__file__).resolve().parent.parent
 SAM_MODEL_NAMES = ("sam2.1_s.pt", "sam2.1_b.pt")
 WORLD_MODEL_NAME = "yolov8s-worldv2.pt"
 BOARD_PROMPTS = ["blackboard", "whiteboard", "chalkboard", "projection screen"]
-DOOR_PROMPTS = ["door", "doorway"]
+DOOR_PROMPTS = ["door", "doorway", "classroom door", "entrance door", "double door"]
 # One YOLO-World model serves both targets; class indices < N_BOARD_CLASSES are
 # board prompts, the rest are door prompts.
 WORLD_PROMPTS = BOARD_PROMPTS + DOOR_PROMPTS
@@ -378,7 +378,9 @@ def _yolo_world_proposals(frame: np.ndarray) -> list[tuple[list[float], float, i
     xyxy = boxes.xyxy.cpu().numpy()
     confs = boxes.conf.cpu().numpy()
     clss = boxes.cls.cpu().numpy()
-    order = np.argsort(-confs)[:WORLD_MAX_PROPOSALS]
+    # No cap here: callers filter to their class group first, then cap, so
+    # board proposals cannot crowd door proposals out of a shared top-N.
+    order = np.argsort(-confs)
     return [([float(v) for v in xyxy[i]], float(confs[i]), int(clss[i])) for i in order]
 
 
@@ -449,7 +451,9 @@ def _detect_on_frame(
     candidates: list[tuple[float, list[list[float]], str]] = []
 
     # Strategy 1: YOLO-World board proposals refined by SAM 2 (optional).
-    proposals = [p for p in _yolo_world_proposals(frame) if p[2] < N_BOARD_CLASSES]
+    proposals = [p for p in _yolo_world_proposals(frame) if p[2] < N_BOARD_CLASSES][
+        :WORLD_MAX_PROPOSALS
+    ]
     if proposals:
         masks = _sam_segment(frame, bboxes=[box for box, _, _ in proposals])
         for mask in masks:
@@ -569,7 +573,9 @@ def _detect_door_on_frame(
     h, w = frame.shape[:2]
     candidates: list[tuple[float, list[list[float]], str]] = []
 
-    proposals = [p for p in _yolo_world_proposals(frame) if p[2] >= N_BOARD_CLASSES]
+    proposals = [p for p in _yolo_world_proposals(frame) if p[2] >= N_BOARD_CLASSES][
+        :WORLD_MAX_PROPOSALS
+    ]
     if proposals:
         masks = _sam_segment(frame, bboxes=[box for box, _, _ in proposals])
         for mask in masks:

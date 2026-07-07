@@ -135,7 +135,7 @@ def test_chain_prefers_yolo_world_proposal_when_it_wins(monkeypatch):
         return [BOARD_MASK] if bboxes else [TALL_BLOB]
 
     monkeypatch.setattr(
-        bd, "_yolo_world_proposals", lambda frame: [([256.0, 86.0, 960.0, 324.0], 0.4)]
+        bd, "_yolo_world_proposals", lambda frame: [([256.0, 86.0, 960.0, 324.0], 0.4, 0)]
     )
     monkeypatch.setattr(bd, "_sam_segment", fake_sam)
     score, poly, method = bd._detect_on_frame(FRAME)
@@ -148,7 +148,7 @@ def test_chain_falls_back_when_world_proposal_scores_worse(monkeypatch):
         return [TALL_BLOB] if bboxes else [BOARD_MASK]
 
     monkeypatch.setattr(
-        bd, "_yolo_world_proposals", lambda frame: [([500.0, 400.0, 700.0, 690.0], 0.9)]
+        bd, "_yolo_world_proposals", lambda frame: [([500.0, 400.0, 700.0, 690.0], 0.9, 0)]
     )
     monkeypatch.setattr(bd, "_sam_segment", fake_sam)
     score, poly, method = bd._detect_on_frame(FRAME)
