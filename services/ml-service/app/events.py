@@ -74,30 +74,48 @@ def near_zone(det: Detection, polygon: list[list[float]], expand: float = 0.12) 
     return bboxes_intersect(det_box, expanded)
 
 
+DOOR_WINDOW_MS = 4_000
+DOOR_EXPAND = 0.15
+
+
 def door_entry_exit(
     teacher_dets: list[Detection],
     intervals: list[list[int]],
     door_polygon: list[list[float]],
     duration_ms: int,
     end_margin_ms: int = END_MARGIN_MS,
+    window_ms: int = DOOR_WINDOW_MS,
 ) -> list[dict]:
-    """Enter/exit events counted only when the teacher is at the door zone.
+    """Enter/exit events counted only for presence edges at the door zone.
 
-    An entry is a presence interval whose first sample is at the door; an exit
-    is one whose last sample is at the door. Presence changes elsewhere (a
-    mid-room occlusion) are not door crossings and are dropped, so the counts
-    reflect actual movement through the door.
+    Tracking usually loses a person a beat before they physically reach the
+    door (door-frame occlusion, partial exit from view), so the door test is
+    WINDOWED: an interval edge is a crossing when ANY sample within window_ms
+    of that edge is near the door. Single-sample tests miss most true
+    crossings on real footage.
+
+    Video-edge semantics match the presence-based rule: an interval that
+    starts the video counts as an enter (the teacher was already inside), and
+    the final interval running into the last end_margin_ms of the video does
+    not produce an exit. Interior presence gaps away from the door (mid-room
+    occlusions) produce no events, so counts reflect real door crossings.
     """
-    by_ts = {d.video_ts_ms: d for d in teacher_dets}
+    dets = sorted(teacher_dets, key=lambda d: d.video_ts_ms)
     events: list[dict] = []
+
+    def any_near(lo: int, hi: int) -> bool:
+        return any(
+            lo <= d.video_ts_ms <= hi and near_zone(d, door_polygon, DOOR_EXPAND)
+            for d in dets
+        )
+
     for i, (start, end) in enumerate(intervals):
-        start_det = by_ts.get(start)
-        if start_det is not None and near_zone(start_det, door_polygon):
+        at_video_start = i == 0 and start <= end_margin_ms
+        if at_video_start or any_near(start, start + window_ms):
             events.append({"kind": "enter", "ts_ms": start})
         is_last = i == len(intervals) - 1
         if not is_last or end < duration_ms - end_margin_ms:
-            end_det = by_ts.get(end)
-            if end_det is not None and near_zone(end_det, door_polygon):
+            if any_near(end - window_ms, end):
                 events.append({"kind": "exit", "ts_ms": end})
     return events
 

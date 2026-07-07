@@ -1,0 +1,25 @@
+{
+  "videos": {
+    "2449c0c5-62a0-4a42-ac23-59fd44d638ed": {
+      "label": "teacher_track_demo (4:46, 2560x1440 CCTV, ~30 uniformed students)",
+      "gates": {
+        "teacher_present_ms": { "value": 161800, "tol": 8000 },
+        "teacher_board_ms": { "value": 41200, "tol": 6000 },
+        "entries": { "value": 4, "tol": 1 },
+        "exits": { "value": 4, "tol": 1 },
+        "teacher_tracks": { "value": 1, "tol": 0 },
+        "max_students": { "value": 30, "tol": 2 },
+        "avg_students": { "value": 25.5, "tol": 1.5 }
+      },
+      "report_only": {
+        "total_tracks": 42,
+        "note": "fewer tracks with unchanged gates = better re-ID (less fragmentation); more = regression"
+      }
+    }
+  },
+  "budgets": {
+    "remerge_seconds_gate": 300,
+    "remerge_seconds_target": 30,
+    "derive_seconds_gate": 15
+  }
+}

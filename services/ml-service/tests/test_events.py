@@ -2,6 +2,7 @@
 
 from app.events import (
     board_condition,
+    door_entry_exit,
     board_intervals_from_samples,
     derive,
     entry_exit_from_intervals,
@@ -255,3 +256,37 @@ def test_derive_no_board_zone_means_null_board_ms():
     _, analytics = derive(dets, roles, duration_ms=30_000, zones=[])
     assert analytics["teacher_board_ms"] is None
     assert analytics["board_intervals"] == []
+
+
+# --------------------------------------------------------------------------- #
+# Door-based entry/exit (windowed)
+# --------------------------------------------------------------------------- #
+
+DOOR = [[0.0, 0.2], [0.1, 0.2], [0.1, 0.8], [0.0, 0.8]]
+
+
+def test_door_crossing_counted_when_edge_sample_is_within_window():
+    # Teacher walks toward the door, tracking drops her 2s before the gap edge.
+    dets = [_det(ts, 1, x=0.5) for ts in range(0, 10_000, 1_000)]
+    dets += [_det(10_000, 1, x=0.06), _det(11_000, 1, x=0.06)]  # near door
+    dets += [_det(12_000, 1, x=0.3), _det(13_000, 1, x=0.35)]   # walked away, lost
+    intervals = [[0, 13_000], [40_000, 60_000]]
+    dets += [_det(40_000, 1, x=0.07)]  # reappears at the door
+    dets += [_det(ts, 1, x=0.5) for ts in range(41_000, 58_000, 1_000)]
+    dets += [_det(59_000, 1, x=0.07), _det(60_000, 1, x=0.06)]  # leaves via door
+    events = door_entry_exit(dets, intervals, DOOR, duration_ms=120_000)
+    kinds = [e["kind"] for e in events]
+    assert kinds == ["enter", "exit", "enter", "exit"]
+    # first enter is the video-start rule; the 13s exit is door-adjacent via window
+    assert events[1]["ts_ms"] == 13_000
+    assert events[2]["ts_ms"] == 40_000
+
+
+def test_mid_room_occlusion_gap_produces_no_door_events():
+    dets = [_det(ts, 1, x=0.5) for ts in range(0, 20_000, 1_000)]
+    dets += [_det(ts, 1, x=0.55) for ts in range(30_000, 50_000, 1_000)]
+    intervals = [[0, 19_000], [30_000, 49_000]]
+    events = door_entry_exit(dets, intervals, DOOR, duration_ms=120_000)
+    kinds = [e["kind"] for e in events]
+    # video-start enter only: the mid-room gap is an occlusion, not a crossing
+    assert kinds == ["enter"]
