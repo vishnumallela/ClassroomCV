@@ -55,12 +55,23 @@ _SERVICE_DIR = Path(__file__).resolve().parent.parent
 SAM_MODEL_NAMES = ("sam2.1_s.pt", "sam2.1_b.pt")
 WORLD_MODEL_NAME = "yolov8s-worldv2.pt"
 BOARD_PROMPTS = ["blackboard", "whiteboard", "chalkboard", "projection screen"]
+DOOR_PROMPTS = ["door", "doorway"]
+# One YOLO-World model serves both targets; class indices < N_BOARD_CLASSES are
+# board prompts, the rest are door prompts.
+WORLD_PROMPTS = BOARD_PROMPTS + DOOR_PROMPTS
+N_BOARD_CLASSES = len(BOARD_PROMPTS)
 WORLD_MIN_CONF = 0.05  # open-vocab proposals are low-confidence by nature
 WORLD_MAX_PROPOSALS = 5
 
 # SAM point-prompt grid over the candidate (upper) region of the frame
 GRID_X = (0.15, 0.30, 0.50, 0.70, 0.85)
 GRID_Y = (0.15, 0.30, 0.45, 0.60)
+
+# Door grid: doors span floor to ceiling and usually sit at the sides, so this
+# covers more horizontal positions and the mid-to-lower band.
+DOOR_GRID_X = (0.08, 0.22, 0.38, 0.50, 0.62, 0.78, 0.92)
+DOOR_GRID_Y = (0.28, 0.45, 0.62, 0.78)
+DOOR_MIN_SCORE = 0.22
 
 _sam = None
 _world = None
@@ -284,7 +295,7 @@ def _get_world():
         from ultralytics import YOLOWorld
 
         model = YOLOWorld(_weight_path(WORLD_MODEL_NAME))
-        model.set_classes(BOARD_PROMPTS)
+        model.set_classes(WORLD_PROMPTS)
         _world = model
     except Exception:
         logger.warning(
@@ -332,8 +343,8 @@ def _sam_segment(
     return [m.astype(bool) for m in masks.data.cpu().numpy()]
 
 
-def _yolo_world_proposals(frame: np.ndarray) -> list[tuple[list[float], float]]:
-    """Open-vocab board proposals as ([x0, y0, x1, y1] pixels, conf) pairs."""
+def _yolo_world_proposals(frame: np.ndarray) -> list[tuple[list[float], float, int]]:
+    """Open-vocab proposals as ([x0, y0, x1, y1] pixels, conf, class_index)."""
     global _world_fallback_cpu
     model = _get_world()
     if model is None:
@@ -366,8 +377,9 @@ def _yolo_world_proposals(frame: np.ndarray) -> list[tuple[list[float], float]]:
         return []
     xyxy = boxes.xyxy.cpu().numpy()
     confs = boxes.conf.cpu().numpy()
+    clss = boxes.cls.cpu().numpy()
     order = np.argsort(-confs)[:WORLD_MAX_PROPOSALS]
-    return [([float(v) for v in xyxy[i]], float(confs[i])) for i in order]
+    return [([float(v) for v in xyxy[i]], float(confs[i]), int(clss[i])) for i in order]
 
 
 # --------------------------------------------------------------------------- #
@@ -436,10 +448,10 @@ def _detect_on_frame(
     h, w = frame.shape[:2]
     candidates: list[tuple[float, list[list[float]], str]] = []
 
-    # Strategy 1: YOLO-World proposals refined by SAM 2 (optional).
-    proposals = _yolo_world_proposals(frame)
+    # Strategy 1: YOLO-World board proposals refined by SAM 2 (optional).
+    proposals = [p for p in _yolo_world_proposals(frame) if p[2] < N_BOARD_CLASSES]
     if proposals:
-        masks = _sam_segment(frame, bboxes=[box for box, _ in proposals])
+        masks = _sam_segment(frame, bboxes=[box for box, _, _ in proposals])
         for mask in masks:
             polygon = mask_to_polygon(mask)
             if polygon:
@@ -506,6 +518,121 @@ def detect_board(video_id: str, video_path: str) -> dict:
     )
     return {
         "polygon": polygon if score >= MIN_SCORE else None,
+        "confidence": confidence,
+        "method": method,
+        "frame_ts_ms": int(best_ts),
+    }
+
+
+# --------------------------------------------------------------------------- #
+# Door detection (same model layer, door-shaped scoring)
+# --------------------------------------------------------------------------- #
+
+
+def score_door(mask: np.ndarray, frame: Optional[np.ndarray] = None) -> float:
+    """Door-likeness score in 0..1 for a binary mask (optionally + frame).
+
+    A door is a TALL, narrow, rectangular panel reaching toward the floor, the
+    opposite geometry to a board. Wide blobs, slivers, and full-width bands are
+    penalised; color uniformity is a softer factor than for boards because
+    doors often carry a handle, a window, or a poster.
+    """
+    stats = mask_stats(mask)
+    if stats is None:
+        return 0.0
+
+    aspect = stats["aspect"]  # width / height
+    aspect_s = _ramp(aspect, 0.12, 0.28, 0.70, 1.05)
+    position_s = _ramp(stats["cy"], 0.18, 0.32, 0.82, 0.96)
+    area_s = _ramp(stats["area_frac"], 0.012, 0.025, 0.18, 0.32)
+    rect_s = _clamp01((stats["rectangularity"] - 0.60) / 0.30)
+
+    geom = 0.34 * aspect_s + 0.22 * position_s + 0.18 * area_s + 0.26 * rect_s
+
+    if aspect > 1.1:  # wider than tall is not a door
+        geom *= 0.3
+    if stats["span_frac"] > 0.45:  # a door does not span most of the width
+        geom *= 0.5
+    if stats["area_frac"] < 0.01 or stats["area_frac"] > 0.40:
+        geom *= 0.5
+
+    if frame is not None:
+        geom *= 0.55 + 0.45 * _color_score(mask, frame)
+
+    return float(_clamp01(geom))
+
+
+def _detect_door_on_frame(
+    frame: np.ndarray,
+) -> Optional[tuple[float, list[list[float]], str]]:
+    """Door strategy chain for one frame -> (score, polygon, method) | None."""
+    h, w = frame.shape[:2]
+    candidates: list[tuple[float, list[list[float]], str]] = []
+
+    proposals = [p for p in _yolo_world_proposals(frame) if p[2] >= N_BOARD_CLASSES]
+    if proposals:
+        masks = _sam_segment(frame, bboxes=[box for box, _, _ in proposals])
+        for mask in masks:
+            polygon = mask_to_polygon(mask)
+            if polygon:
+                candidates.append((score_door(mask, frame), polygon, "yolo_world_sam2"))
+
+    points = [[gx * w, gy * h] for gy in DOOR_GRID_Y for gx in DOOR_GRID_X]
+    for mask in _dedupe_masks(_sam_segment(frame, points=points)):
+        polygon = mask_to_polygon(mask)
+        if polygon:
+            candidates.append((score_door(mask, frame), polygon, "sam2_geometric"))
+
+    if not candidates:
+        return None
+    return max(candidates, key=lambda c: c[0])
+
+
+def detect_door(video_id: str, video_path: str) -> dict:
+    """Full door chain over sampled frames -> the same response contract.
+
+    {"polygon": ...|None, "confidence": 0..1, "method": str, "frame_ts_ms": int}.
+    polygon is None when nothing scores >= DOOR_MIN_SCORE.
+    """
+    video_path = _validate_video_path(video_path)
+    frames = _sample_frames(video_path)
+
+    best: Optional[tuple[float, list[list[float]], str]] = None
+    best_ts = frames[0][0] if frames else 0
+    for ts_ms, frame in frames:
+        try:
+            candidate = _detect_door_on_frame(frame)
+        except Exception:
+            logger.warning(
+                "[door-detect] video %s: frame ts=%sms failed",
+                video_id,
+                ts_ms,
+                exc_info=True,
+            )
+            continue
+        if candidate is not None and (best is None or candidate[0] > best[0]):
+            best = candidate
+            best_ts = ts_ms
+
+    if best is None:
+        return {
+            "polygon": None,
+            "confidence": 0.0,
+            "method": "sam2_geometric",
+            "frame_ts_ms": int(best_ts),
+        }
+
+    score, polygon, method = best
+    confidence = round(float(_clamp01(score)), 4)
+    logger.info(
+        "[door-detect] video %s: method=%s confidence=%.3f ts=%sms",
+        video_id,
+        method,
+        confidence,
+        best_ts,
+    )
+    return {
+        "polygon": polygon if score >= DOOR_MIN_SCORE else None,
         "confidence": confidence,
         "method": method,
         "frame_ts_ms": int(best_ts),

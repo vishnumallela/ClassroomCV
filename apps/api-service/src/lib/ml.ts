@@ -123,6 +123,10 @@ export function mlDetectBoard(videoId: string, videoPath: string): Promise<Board
   return post("/detect-board", { video_id: videoId, video_path: videoPath });
 }
 
+export function mlDetectDoor(videoId: string, videoPath: string): Promise<BoardDetectResult> {
+  return post("/detect-door", { video_id: videoId, video_path: videoPath });
+}
+
 export function mlRederive(videoId: string, zones: MlZone[]): Promise<AnalysisResult> {
   return post("/rederive", { video_id: videoId, zones });
 }

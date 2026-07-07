@@ -65,6 +65,43 @@ def entry_exit_from_intervals(
     return events
 
 
+def near_zone(det: Detection, polygon: list[list[float]], expand: float = 0.12) -> bool:
+    """True when the detection bbox intersects the polygon bbox expanded by `expand`."""
+    poly_box = polygon_bbox(polygon)
+    expanded = expand_bbox(poly_box, expand)
+    b = det.bbox
+    det_box = (b["x"], b["y"], b["x"] + b["w"], b["y"] + b["h"])
+    return bboxes_intersect(det_box, expanded)
+
+
+def door_entry_exit(
+    teacher_dets: list[Detection],
+    intervals: list[list[int]],
+    door_polygon: list[list[float]],
+    duration_ms: int,
+    end_margin_ms: int = END_MARGIN_MS,
+) -> list[dict]:
+    """Enter/exit events counted only when the teacher is at the door zone.
+
+    An entry is a presence interval whose first sample is at the door; an exit
+    is one whose last sample is at the door. Presence changes elsewhere (a
+    mid-room occlusion) are not door crossings and are dropped, so the counts
+    reflect actual movement through the door.
+    """
+    by_ts = {d.video_ts_ms: d for d in teacher_dets}
+    events: list[dict] = []
+    for i, (start, end) in enumerate(intervals):
+        start_det = by_ts.get(start)
+        if start_det is not None and near_zone(start_det, door_polygon):
+            events.append({"kind": "enter", "ts_ms": start})
+        is_last = i == len(intervals) - 1
+        if not is_last or end < duration_ms - end_margin_ms:
+            end_det = by_ts.get(end)
+            if end_det is not None and near_zone(end_det, door_polygon):
+                events.append({"kind": "exit", "ts_ms": end})
+    return events
+
+
 # --------------------------------------------------------------------------- #
 # Board intervals (hysteresis)
 # --------------------------------------------------------------------------- #
@@ -206,6 +243,9 @@ def derive(
     board_polygon = next(
         (z["polygon"] for z in zones if z.get("kind") == "board"), None
     )
+    door_polygon = next(
+        (z["polygon"] for z in zones if z.get("kind") == "door"), None
+    )
     teacher_no = next(
         (t for t, (role, _) in roles_map.items() if role == "teacher"), None
     )
@@ -220,7 +260,11 @@ def derive(
             dets_by_track[teacher_no], key=lambda d: d.video_ts_ms
         )
         presence = presence_intervals([d.video_ts_ms for d in teacher_dets])
-        entry_exit = entry_exit_from_intervals(presence, duration_ms)
+        entry_exit = (
+            door_entry_exit(teacher_dets, presence, door_polygon, duration_ms)
+            if door_polygon is not None
+            else entry_exit_from_intervals(presence, duration_ms)
+        )
         events.extend(
             {"kind": e["kind"], "video_ts_ms": e["ts_ms"], "track_no": teacher_no}
             for e in entry_exit

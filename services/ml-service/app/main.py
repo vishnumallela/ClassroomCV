@@ -91,6 +91,21 @@ def detect_board(req: DetectBoardRequest) -> DetectBoardResponse:
     return DetectBoardResponse(**result)
 
 
+@app.post("/detect-door", response_model=DetectBoardResponse)
+def detect_door(req: DetectBoardRequest) -> DetectBoardResponse:
+    """Propose a door zone polygon for a stored video.
+
+    Same SAM 2 / YOLO-World chain and response contract as /detect-board, with
+    door-shaped geometric scoring (tall, narrow, reaching toward the floor).
+    """
+    try:
+        video_path = detector._validate_video_path(req.video_path)
+    except ValueError as exc:
+        raise HTTPException(status_code=400, detail=str(exc))
+    result = board_detect.detect_door(req.video_id, video_path)
+    return DetectBoardResponse(**result)
+
+
 @app.post("/rederive", response_model=AnalysisResult)
 async def rederive(req: RederiveRequest) -> dict:
     """Re-derive identities + roles + events from stored detection_events.

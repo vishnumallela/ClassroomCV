@@ -84,24 +84,22 @@ export function ZoneEditor({
     return () => window.removeEventListener("keydown", onKey);
   }, []);
 
-  const detectBoard = async () => {
+  const detectZone = async () => {
     setDetecting(true);
     setNote(null);
+    const kind = activeKind;
+    const label = ZONE_STYLE[kind].label;
     try {
-      const res = await orpcClient.board.detect({ id: videoId });
+      const res = await orpcClient.board.detect({ id: videoId, kind });
       if (res.polygon && res.polygon.length >= 3) {
         const poly = res.polygon.map(([x, y]) => [clamp01(x), clamp01(y)] as Point);
-        setZones((zs) => [
-          ...zs.filter((z) => z.kind !== "board"),
-          { kind: "board", polygon: poly },
-        ]);
-        setActiveKind("board");
-        setNote(`Board detected at ${Math.round(res.confidence * 100)}% confidence.`);
+        setZones((zs) => [...zs.filter((z) => z.kind !== kind), { kind, polygon: poly }]);
+        setNote(`${label} detected at ${Math.round(res.confidence * 100)}% confidence.`);
       } else {
-        setNote("No board found automatically. Draw it by hand.");
+        setNote(`No ${label.toLowerCase()} found automatically. Draw it by hand.`);
       }
     } catch {
-      setNote("Board detection failed.");
+      setNote(`${label} detection failed.`);
     } finally {
       setDetecting(false);
     }
@@ -214,8 +212,8 @@ export function ZoneEditor({
               </button>
             ))}
           </div>
-          <Button variant="outline" size="sm" disabled={detecting} onClick={detectBoard}>
-            {detecting ? "Detecting" : "Auto-detect board"}
+          <Button variant="outline" size="sm" disabled={detecting} onClick={detectZone}>
+            {detecting ? "Detecting" : `Auto-detect ${ZONE_STYLE[activeKind].label.toLowerCase()}`}
           </Button>
           {zones.map((z) => (
             <Button
