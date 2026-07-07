@@ -27,7 +27,9 @@ import uuid
 from dataclasses import dataclass
 from typing import Callable, Optional
 
-from app import db, detector, events as events_mod, merge, roles
+import numpy as np
+
+from app import db, detector, events as events_mod, merge, roles, teacher_chain
 from app.geometry import rdp_indices
 from app.models import AnalysisResult, Detection, VideoMeta
 
@@ -250,7 +252,13 @@ def run_pipeline(
 
     cb("deriving", 0.9)
     stage_start = time.perf_counter()
-    result = derive_result(meta, detections, identities, zones)
+    result = derive_result(
+        meta,
+        detections,
+        identities,
+        zones,
+        track_embeds={rid: list(e) for rid, e in embeds.items()},
+    )
     derive_s = time.perf_counter() - stage_start
     cb("deriving", 0.95)
 
@@ -351,13 +359,16 @@ def derive_result(
     detections: list[Detection],
     identities: list[dict],
     zones: list[dict],
+    track_embeds: Optional[dict[int, list[float]]] = None,
 ) -> dict:
     """roles + events + analytics from merged detections. Shared by analyze & rederive.
 
-    After the teacher is chosen, short unassigned fragments that fit the
-    teacher's absence windows near its trajectory/board are folded into the
-    teacher identity (roles.absorbable_fragments): their Detection.track_no
-    is rewritten IN PLACE so callers persisting `detections` store the same
+    After the teacher is chosen, her timeline is rebuilt by
+    teacher_chain.stitch_teacher: detection ranges stolen by student raw ids
+    (crouch handoffs, merge chimeras) are claimed back, and ranges of her
+    merged identity the chain rejects (e.g. a corner student folded in by a
+    bad merge) are evicted to fresh student tracks. Detection.track_no is
+    rewritten IN PLACE so callers persisting `detections` store the same
     identity view the analytics were computed from.
     """
     dets_by_track: dict[int, list[Detection]] = {}
@@ -384,36 +395,50 @@ def derive_result(
         (t for t, (role, _) in roles_map.items() if role == "teacher"), None
     )
     if teacher_no is not None:
-        absorbed = roles.absorbable_fragments(
-            teacher_no,
-            features,
-            dets_by_track,
-            meta.duration_ms,
-            board_polygon=board_polygon,
-            door_polygons=[
-                z["polygon"] for z in zones if z.get("kind") == "door"
-            ],
+        embeds_by_raw = None
+        if track_embeds:
+            embeds_by_raw = {
+                int(rid): np.asarray(e, dtype=np.float64).ravel()
+                for rid, e in track_embeds.items()
+            }
+        stitched = teacher_chain.stitch_teacher(
+            teacher_no, dets_by_track, embeds_by_raw
         )
-        if absorbed:
-            for track_no in absorbed:
-                fragment_dets = dets_by_track.pop(track_no, [])
-                for d in fragment_dets:
+        if stitched is not None:
+            claims, evictions = stitched
+            next_no = max(dets_by_track, default=0) + 1
+            for frag, lo, hi in evictions:
+                for d in frag.dets[lo:hi]:
+                    d.track_no = next_no
+                roles_map[next_no] = ("student", None)
+                next_no += 1
+            for c in claims:
+                for d in c.dets:
                     d.track_no = teacher_no
-                dets_by_track[teacher_no].extend(fragment_dets)
-                raw_ids_by_track[teacher_no] = sorted(
-                    set(raw_ids_by_track.get(teacher_no, []))
-                    | set(raw_ids_by_track.pop(track_no, []))
-                )
-                roles_map.pop(track_no, None)
-            dets_by_track[teacher_no].sort(key=lambda d: d.video_ts_ms)
+            # The chain moved detections between identities: rebuild the
+            # per-track views from the rewritten track_nos, drop identities
+            # the chain fully consumed, and recompute features so spans,
+            # overlays, and analytics all describe the stitched timeline.
+            dets_by_track = {}
+            for d in detections:
+                if d.track_no is not None:
+                    dets_by_track.setdefault(d.track_no, []).append(d)
+            for dets in dets_by_track.values():
+                dets.sort(key=lambda d: d.video_ts_ms)
+            raw_ids_by_track = {
+                no: sorted({d.raw_track_id for d in dets})
+                for no, dets in dets_by_track.items()
+            }
+            roles_map = {
+                no: role for no, role in roles_map.items() if no in dets_by_track
+            }
             logger.info(
-                "absorbed %d teacher fragment(s) %s into track %d",
-                len(absorbed),
-                absorbed,
+                "teacher chain: %d claim(s) %s, %d evicted range(s) from track %d",
+                len(claims),
+                [(c.fragment.raw_id, c.fragment.dets[c.from_idx].video_ts_ms) for c in claims],
+                len(evictions),
                 teacher_no,
             )
-            # Recompute features so the teacher's span/meta cover the
-            # absorbed fragments; roles keep their already-assigned labels.
             features = roles.compute_features(
                 dets_by_track,
                 meta.duration_ms,

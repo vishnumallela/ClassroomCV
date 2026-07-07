@@ -1,40 +1,41 @@
 {
   "videos": {
-    "b4f172e8-7317-4891-b436-4c05968f49e2": {
-      "label": "teacher_track_demo v2 (4:46, imgsz 1280 + continuation absorption + door zone)",
+    "fe49a1a4-38a6-472b-8a34-7d9f6d79e235": {
+      "label": "teacher_track_demo v3 (4:46, re-uploaded id; teacher-chain re-bless, see note)",
+      "note": "Re-blessed 2026-07-07 after the teacher-chain stitch (app/teacher_chain.py) recovered the spans the round-1 pixel audit flagged as the KNOWN GAP. Pixel-verified on frames at 152/165/172/185/200/205/245/265/275s: the one adult is labelled teacher throughout. teacher_present_ms 208600->282000: her fragments stolen by student tracks (crouch handoffs raw 325, mid-track swaps raw 404/450/522) are reclaimed, so presence is continuous 0-282000 (last detection 282.0s, within the 5s end margin). The 214.8-222.2s off-camera moment (she steps to a near-camera bottom-left corner desk) is bridged by events.bridge_offscreen_gaps because both edges are clear of the door, so it is NOT a spurious exit/enter -> entries stay 1 (video start), exits 0. teacher_board_ms 42800->53600: board visits at ~163-169s (raw 325) and ~274-276s (raw 522, the old track-17 tail steal) are now hers; all board intervals pixel-verified at-board. total_tracks 40->42: evicting the wrongly-merged corner student splits it back out (more identities, but each now correct).",
       "gates": {
         "teacher_present_ms": {
-          "value": 208600,
+          "value": 282000,
           "tol": 10000
         },
         "teacher_board_ms": {
-          "value": 46600,
+          "value": 53600,
           "tol": 6000
         },
         "entries": {
-          "value": 2,
-          "tol": 1
+          "value": 1,
+          "tol": 0
         },
         "exits": {
-          "value": 1,
-          "tol": 1
+          "value": 0,
+          "tol": 0
         },
         "teacher_tracks": {
           "value": 1,
           "tol": 0
         },
         "max_students": {
-          "value": 31,
+          "value": 30,
           "tol": 2
         },
         "avg_students": {
-          "value": 26.9,
+          "value": 26.7,
           "tol": 1.5
         }
       },
       "report_only": {
-        "total_tracks": 44,
-        "note": "fewer tracks with unchanged gates = better re-ID (less fragmentation); more = regression"
+        "total_tracks": 42,
+        "note": "fewer tracks with unchanged gates = better re-ID (less fragmentation); more = regression. 40->42 here is intentional: the teacher chain evicted 2 wrongly-merged student fragments into their own identities."
       }
     }
   },

@@ -77,7 +77,11 @@ async def evaluate(video_id: str, spec: dict) -> bool:
     t_merge = time.perf_counter() - t0
 
     t0 = time.perf_counter()
-    result = jobs.derive_result(meta, detections, identities, zones)
+    # Feed embeds to derive so the teacher-chain stitch uses the same
+    # different-person veto the production /rederive path does.
+    result = jobs.derive_result(
+        meta, detections, identities, zones, track_embeds=track_embeds
+    )
     t_derive = time.perf_counter() - t0
 
     analytics = result["analytics"]

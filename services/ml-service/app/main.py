@@ -148,7 +148,11 @@ async def rederive(req: RederiveRequest) -> dict:
             track_embeds = {}
         identities = jobs.remerge_from_raw(detections, track_hists, track_embeds)
     result = jobs.derive_result(
-        meta, detections, identities, [z.model_dump() for z in req.zones]
+        meta,
+        detections,
+        identities,
+        [z.model_dump() for z in req.zones],
+        track_embeds=track_embeds,
     )
     if detections:
         # Persist the rebuilt identity numbers (including teacher-fragment

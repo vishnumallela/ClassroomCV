@@ -6,10 +6,10 @@
   presence ends before duration - 5000 ms.
 - Board intervals (only when a board zone exists): per-sample condition =
   teacher bbox intersects polygon bbox expanded by 12% of the frame AND
-  (back_to_camera OR bbox-center within the polygon x-range). Hysteresis:
-  2 s sustained ON to open, 3 s sustained OFF to close; a sampling gap
-  >= 5 s (teacher absent, no samples) hard-closes the interval so board
-  time never bridges an absence.
+  bbox-center within the polygon x-range. Hysteresis: 2 s sustained ON to
+  open, 3 s sustained OFF to close; a sampling gap >= 5 s (teacher absent,
+  no samples) hard-closes the interval so board time never bridges an
+  absence.
 - Occupancy: 5000 ms buckets; students = distinct non-teacher identities
   detected in the bucket; teacher = bool.
 """
@@ -17,6 +17,7 @@
 from __future__ import annotations
 
 import math
+from bisect import bisect_left, bisect_right
 from typing import Optional
 
 from app.geometry import bboxes_intersect, expand_bbox, polygon_bbox
@@ -25,6 +26,11 @@ from app.models import Detection
 PRESENCE_GAP_MS = 5_000
 END_MARGIN_MS = 5_000
 BUCKET_MS = 5_000
+# A presence gap no longer than this whose bounding detections are BOTH away
+# from every door is a camera blind spot (the teacher stepped to a near-camera
+# corner desk, out of view), not a door exit: presence is bridged so a walk
+# past the door followed by an off-camera moment is not mislabelled a crossing.
+OFFSCREEN_BRIDGE_MS = 12_000
 BOARD_EXPAND = 0.12  # 12% of frame (normalized units) on every side
 BOARD_ON_MS = 2_000
 BOARD_OFF_MS = 3_000
@@ -71,15 +77,26 @@ def entry_exit_from_intervals(
 
 
 def near_zone(det: Detection, polygon: list[list[float]], expand: float = 0.12) -> bool:
-    """True when the detection bbox intersects the polygon bbox expanded by `expand`."""
-    poly_box = polygon_bbox(polygon)
-    expanded = expand_bbox(poly_box, expand)
+    """True when the detection bbox CENTER lies inside the expanded polygon bbox.
+
+    Center containment, not bbox intersection: a person walking out of the
+    camera's view grows a frame-corner box wide enough to clip any generously
+    expanded zone, which turned a bottom-left camera-edge disappearance into a
+    door crossing on verified footage. Someone genuinely at the zone has their
+    center inside the expanded box.
+    """
+    x0, y0, x1, y1 = expand_bbox(polygon_bbox(polygon), expand)
     b = det.bbox
-    det_box = (b["x"], b["y"], b["x"] + b["w"], b["y"] + b["h"])
-    return bboxes_intersect(det_box, expanded)
+    cx = b["x"] + b["w"] / 2.0
+    cy = b["y"] + b["h"] / 2.0
+    return x0 <= cx <= x1 and y0 <= cy <= y1
 
 
-DOOR_WINDOW_MS = 4_000
+# Window anchoring the door test at the presence edge (the vanish/appear
+# samples). 4s reached back far enough to catch the teacher merely WALKING
+# PAST the door on her way out of frame (pixel-verified false exit at 250.8s);
+# 2s still covers door-frame occlusion dropping the track a beat early.
+DOOR_WINDOW_MS = 2_000
 DOOR_EXPAND = 0.15
 
 
@@ -126,20 +143,68 @@ def door_entry_exit(
     return events
 
 
+def bridge_offscreen_gaps(
+    intervals: list[list[int]],
+    teacher_dets: list[Detection],
+    door_polygons: list[list[list[float]]],
+    bridge_ms: int = OFFSCREEN_BRIDGE_MS,
+    expand: float = DOOR_EXPAND,
+) -> list[list[int]]:
+    """Merge presence intervals split by a short away-from-door gap.
+
+    The teacher constantly walks to pupils' desks, and a near-camera corner
+    desk sits in the lens blind spot: she vanishes for a few seconds and
+    reappears at the same corner without ever touching the door. Left split,
+    that gap becomes a spurious exit/enter pair (worse, a walk PAST the door on
+    the way there lands inside the door window). A gap is bridged only when it
+    is short AND the detections bounding it are both clear of every door; a gap
+    whose vanish or reappearance is door-adjacent is a real crossing and kept.
+    """
+    if not door_polygons or len(intervals) < 2 or not teacher_dets:
+        return intervals
+    dets = sorted(teacher_dets, key=lambda d: d.video_ts_ms)
+    ts = [d.video_ts_ms for d in dets]
+
+    def at_door(i: int) -> bool:
+        return 0 <= i < len(dets) and any(
+            near_zone(dets[i], p, expand) for p in door_polygons
+        )
+
+    merged = [list(intervals[0])]
+    for start, end in intervals[1:]:
+        prev_end = merged[-1][1]
+        gap = start - prev_end
+        vanished_at_door = at_door(bisect_right(ts, prev_end) - 1)
+        appeared_at_door = at_door(bisect_left(ts, start))
+        if 0 < gap <= bridge_ms and not vanished_at_door and not appeared_at_door:
+            merged[-1][1] = end
+        else:
+            merged.append([start, end])
+    return merged
+
+
 # --------------------------------------------------------------------------- #
 # Board intervals (hysteresis)
 # --------------------------------------------------------------------------- #
 
 
 def board_condition(det: Detection, board_polygon: list[list[float]]) -> bool:
+    """Teacher-at-board test: bbox clips the expanded board AND center-x is in
+    the board's x-range.
+
+    back_to_camera used to bypass the x-range gate, but any back-turned box
+    within the 12% expansion counted as at-board: pixel-verified board_enter
+    fired at 225.0s with the teacher standing among desks 0.28 of the frame
+    LEFT of the board. Standing at the board puts the bbox center inside the
+    board's x-range anyway (the zone spans the board's full width), so the
+    bypass only ever admitted false positives.
+    """
     poly_box = polygon_bbox(board_polygon)
     expanded = expand_bbox(poly_box, BOARD_EXPAND)
     b = det.bbox
     det_box = (b["x"], b["y"], b["x"] + b["w"], b["y"] + b["h"])
     if not bboxes_intersect(det_box, expanded):
         return False
-    if det.back_to_camera:
-        return True
     cx = b["x"] + b["w"] / 2.0
     return poly_box[0] <= cx <= poly_box[2]
 
@@ -294,11 +359,13 @@ def derive(
             dets_by_track[teacher_no], key=lambda d: d.video_ts_ms
         )
         presence = presence_intervals([d.video_ts_ms for d in teacher_dets])
-        entry_exit = (
-            door_entry_exit(teacher_dets, presence, door_polygons, duration_ms)
-            if door_polygons
-            else entry_exit_from_intervals(presence, duration_ms)
-        )
+        if door_polygons:
+            presence = bridge_offscreen_gaps(presence, teacher_dets, door_polygons)
+            entry_exit = door_entry_exit(
+                teacher_dets, presence, door_polygons, duration_ms
+            )
+        else:
+            entry_exit = entry_exit_from_intervals(presence, duration_ms)
         events.extend(
             {"kind": e["kind"], "video_ts_ms": e["ts_ms"], "track_no": teacher_no}
             for e in entry_exit

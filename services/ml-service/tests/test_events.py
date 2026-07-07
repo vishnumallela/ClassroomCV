@@ -2,6 +2,7 @@
 
 from app.events import (
     board_condition,
+    bridge_offscreen_gaps,
     door_entry_exit,
     board_intervals_from_samples,
     derive,
@@ -150,8 +151,10 @@ def test_board_condition_geometry():
     side_btc = _det(0, 1, x=0.45, y=0.1, w=0.2, h=0.3, btc=True)
     assert board_condition(near, poly) is True
     assert board_condition(far, poly) is False
-    assert board_condition(side, poly) is False  # center outside x-range, facing camera
-    assert board_condition(side_btc, poly) is True  # back to camera counts
+    assert board_condition(side, poly) is False  # center outside x-range
+    # back_to_camera no longer bypasses the x-range gate: on audited footage
+    # the bypass fired board_enter with the teacher mid-room, far off-board
+    assert board_condition(side_btc, poly) is False
 
 
 # --------------------------------------------------------------------------- #
@@ -290,3 +293,28 @@ def test_mid_room_occlusion_gap_produces_no_door_events():
     kinds = [e["kind"] for e in events]
     # video-start enter only: the mid-room gap is an occlusion, not a crossing
     assert kinds == ["enter"]
+
+
+def test_bridge_offscreen_gap_away_from_door():
+    # A short presence gap whose bounding samples are both away from the door
+    # is a camera blind spot (corner desk): presence is bridged continuous.
+    dets = [_det(ts, 1, x=0.5) for ts in range(0, 10_001, 500)]
+    dets += [_det(ts, 1, x=0.5) for ts in range(18_000, 30_001, 500)]
+    intervals = [[0, 10_000], [18_000, 30_000]]
+    assert bridge_offscreen_gaps(intervals, dets, [DOOR]) == [[0, 30_000]]
+
+
+def test_no_bridge_when_vanish_is_at_the_door():
+    # Vanishing at the door is a real crossing and must not be bridged away.
+    dets = [_det(ts, 1, x=0.5) for ts in range(0, 9_001, 500)]
+    dets += [_det(10_000, 1, x=0.05)]  # last sample at the door
+    dets += [_det(ts, 1, x=0.5) for ts in range(18_000, 30_001, 500)]
+    intervals = [[0, 10_000], [18_000, 30_000]]
+    assert bridge_offscreen_gaps(intervals, dets, [DOOR]) == [[0, 10_000], [18_000, 30_000]]
+
+
+def test_no_bridge_when_gap_too_long():
+    dets = [_det(ts, 1, x=0.5) for ts in range(0, 10_001, 500)]
+    dets += [_det(ts, 1, x=0.5) for ts in range(30_000, 40_001, 500)]
+    intervals = [[0, 10_000], [30_000, 40_000]]  # 20s gap > bridge window
+    assert bridge_offscreen_gaps(intervals, dets, [DOOR]) == [[0, 10_000], [30_000, 40_000]]
