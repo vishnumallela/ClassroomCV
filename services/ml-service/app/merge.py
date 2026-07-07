@@ -5,15 +5,27 @@ frame. We merge fragments into stable identities:
 
 - candidate pairs only when temporal overlap is tiny (< 1s) and the gap
   between them is < 10 min,
-- score = 0.6 * appearance + 0.2 * size_similarity + 0.2 * temporal_proximity,
-- appearance = torso-histogram correlation when BOTH fragments carry a
-  histogram; otherwise SPATIAL CONTINUITY between the temporally-adjacent
-  endpoints: exp(-(endpoint_dist / (0.04 + 0.004 * gap_s))^2). A missing
+- CLIP embed veto (plan M5): when both fragments carry a CLIP embedding and
+  their cosine is < 0.35 they are different people, full stop,
+- appearance = 0.5 * cosine (mapped from [0.35, 1] to [0, 1]) + 0.5 *
+  torso-histogram correlation when both embeds AND both histograms exist;
+  hist-only pairs keep the plain correlation; otherwise SPATIAL CONTINUITY
+  between the temporally-adjacent endpoints:
+  exp(-(endpoint_dist / (0.04 + 0.004 * gap_s))^2). A missing
   histogram must NOT score a neutral 0.5 — on real classroom footage that
   floor (0.3 + 0.2*size + 0.2*temporal ~ 0.68) chains any two non-overlapping
   similar-size fragments with gap <= ~7.5 min into full-frame chimeras.
   Seated students reconnect at endpoint distances ~0.02 (84% < 0.10), so the
   gaussian gate keeps true reconnects and rejects cross-room jumps.
+- adult-size prior: two clusters that are BOTH adult-tall (mean bbox height
+  >= the 90th percentile) AND mobile get an appearance floor of 0.75 when
+  their embeds agree (cos >= 0.5) or no appearance evidence exists — the
+  walking teacher who leaves the frame and returns far away reconnects even
+  though her spatial continuity is near zero, while seated students (even
+  the perspective-tall front row) never qualify; a one-adult mobile pair
+  also qualifies when the two fragments are a near-instant same-spot
+  re-acquisition (gap <= 1.5s, endpoint dist <= 0.10) — the crouching
+  teacher whose bbox falls below the height cut mid-fragment,
 - greedy: repeatedly merge the highest-scoring candidate pair >= threshold (0.55),
 - final identities get track_no 1..N ordered by first appearance.
 """
@@ -67,6 +79,35 @@ SEATED_VETO_DIST = 0.10
 SPATIAL_BASE_TOL = 0.08
 SPATIAL_TOL_PER_S = 0.004
 
+# CLIP embed agreement (embeddings are stored L2-normalized, so a dot product
+# IS the cosine). Below 0.35 two upper-body crops are different people no
+# matter what hist/size/temporal say — the seat-swap veto from plan M5.
+EMBED_VETO_COS = 0.35
+
+# Adult-size prior: clusters whose mean bbox height reaches the 90th
+# percentile across tracks are adult-tall candidates, but height alone is NOT
+# adult on CCTV — perspective makes stationary front-row students just as
+# tall (measured on the demo: 16 of 151 tracks reach p90, most of them seated
+# kids near the camera, and flooring their pairwise appearance broke the
+# teacher's role margin). The prior therefore only fires when BOTH clusters
+# are also mobile (walking), which is exactly the leave-and-return teacher
+# case it exists for. Appearance gets a 0.75 floor, and only when the CLIP
+# embeds agree (cos >= 0.5) or there is no appearance evidence at all — a
+# computable hist contradiction without embed confirmation must stand (the
+# demo's verified teacher_present_ms regressed when the prior overrode it).
+ADULT_HEIGHT_PERCENTILE = 90.0
+ADULT_PRIOR_MIN_COS = 0.5
+ADULT_PRIOR_APPEARANCE = 0.75
+# Crouch re-acquisition: a teacher kneeling at a desk shrinks below the p90
+# height cut exactly when the tracker tends to drop her, so her return
+# fragment fails the both-adult test through posture, not identity. A
+# one-adult pair is admitted to the adult tier anyway when the fragments are
+# a near-instant same-spot re-acquisition (the tracker would have kept the id
+# but for a momentary blip); long-gap one-adult pairs stay excluded because
+# a genuinely absent teacher stands to walk, which restores her height.
+CROUCH_REACQUIRE_MAX_GAP_MS = 1_500
+CROUCH_REACQUIRE_MAX_DIST = 0.10
+
 Center = Optional[tuple[float, float]]
 # Cluster interval: (start_ms, end_ms, start_center, end_center)
 Interval = tuple[int, int, Center, Center]
@@ -84,6 +125,8 @@ class RawTrack:
     n_dets: int
     first_center: Center = None  # bbox center at first_ms (spatial continuity)
     last_center: Center = None  # bbox center at last_ms
+    embed: Optional[np.ndarray] = None  # L2-normalized median CLIP embedding
+    mean_height: float = 0.0  # mean normalized bbox height (adult-size prior)
 
 
 def _bbox_center(d: Detection) -> tuple[float, float]:
@@ -91,9 +134,17 @@ def _bbox_center(d: Detection) -> tuple[float, float]:
 
 
 def build_raw_tracks(
-    detections: list[Detection], hists: dict[int, list[np.ndarray]]
+    detections: list[Detection],
+    hists: dict[int, list[np.ndarray]],
+    embeds: Optional[dict[int, list]] = None,
 ) -> list[RawTrack]:
-    """Group per-frame detections by raw_track_id into RawTrack summaries."""
+    """Group per-frame detections by raw_track_id into RawTrack summaries.
+
+    embeds maps raw_track_id to a list of CLIP embedding samples (usually a
+    single median from the detector or the persisted copy); like hists, the
+    per-track summary is the median over samples, re-normalized so downstream
+    dot products stay true cosines.
+    """
     by_id: dict[int, list[Detection]] = {}
     for d in detections:
         by_id.setdefault(d.raw_track_id, []).append(d)
@@ -101,12 +152,24 @@ def build_raw_tracks(
     tracks: list[RawTrack] = []
     for raw_id, dets in by_id.items():
         areas = [max(0.0, d.bbox["w"] * d.bbox["h"]) for d in dets]
+        heights = [max(0.0, d.bbox["h"]) for d in dets]
         first_det = min(dets, key=lambda d: d.video_ts_ms)
         last_det = max(dets, key=lambda d: d.video_ts_ms)
         samples = hists.get(raw_id) or []
         hist = None
         if samples:
             hist = np.median(np.stack([np.asarray(s).ravel() for s in samples]), axis=0)
+        embed_samples = (embeds or {}).get(raw_id) or []
+        embed = None
+        if embed_samples:
+            embed = np.median(
+                np.stack(
+                    [np.asarray(e, dtype=np.float64).ravel() for e in embed_samples]
+                ),
+                axis=0,
+            )
+            norm = float(np.linalg.norm(embed))
+            embed = embed / norm if norm > 0 else None
         tracks.append(
             RawTrack(
                 raw_id=raw_id,
@@ -117,6 +180,8 @@ def build_raw_tracks(
                 n_dets=len(dets),
                 first_center=_bbox_center(first_det),
                 last_center=_bbox_center(last_det),
+                embed=embed,
+                mean_height=float(np.mean(heights)) if heights else 0.0,
             )
         )
     tracks.sort(key=lambda t: t.first_ms)
@@ -168,6 +233,12 @@ class _Cluster:
     hist_weight: float
     mean_area: float
     n_dets: int
+    embed: Optional[np.ndarray] = None
+    embed_weight: float = 0.0
+    mean_height: float = 0.0
+    # Stamped by merge_tracks against the video-wide height p90; pair_score
+    # (no population context) leaves it False, disabling the adult prior.
+    adult: bool = False
     first_ms: int = field(init=False)
 
     def __post_init__(self) -> None:
@@ -182,6 +253,9 @@ def _cluster_from_track(t: RawTrack) -> _Cluster:
         hist_weight=float(t.n_dets if t.hist is not None else 0),
         mean_area=t.mean_area,
         n_dets=t.n_dets,
+        embed=None if t.embed is None else np.asarray(t.embed, dtype=np.float64).ravel(),
+        embed_weight=float(t.n_dets if t.embed is not None else 0),
+        mean_height=t.mean_height,
     )
 
 
@@ -313,17 +387,54 @@ def _score_clusters(
             if anchor_dist > SEATED_VETO_DIST:
                 return None
 
-    mobile = (stats_a is not None and stats_a[0] > MOBILE_RANGE) or (
-        stats_b is not None and stats_b[0] > MOBILE_RANGE
-    )
+    mobile_a = stats_a is not None and stats_a[0] > MOBILE_RANGE
+    mobile_b = stats_b is not None and stats_b[0] > MOBILE_RANGE
+    mobile = mobile_a or mobile_b
     spatial = spatial_continuity(ca, cb, gap, MOBILE_TOL_SCALE if mobile else 1.0)
 
-    if a.hist is not None and b.hist is not None:
+    cos = None
+    if a.embed is not None and b.embed is not None:
+        # Embeddings are stored L2-normalized, so the dot product IS cosine.
+        cos = float(np.dot(a.embed, b.embed))
+        if cos < EMBED_VETO_COS:
+            # Different faces/hair/build: different people regardless of how
+            # well uniforms correlate or how close the seats are.
+            return None
+
+    if cos is not None and a.hist is not None and b.hist is not None:
+        # Map cos from the surviving [veto, 1] band onto [0, 1] so a
+        # barely-above-veto pair does not still score 0.35 appearance credit.
+        cos_mapped = min(1.0, (cos - EMBED_VETO_COS) / (1.0 - EMBED_VETO_COS))
+        appearance = 0.5 * cos_mapped + 0.5 * hist_correlation(a.hist, b.hist)
+    elif a.hist is not None and b.hist is not None:
         appearance = hist_correlation(a.hist, b.hist)
     else:
-        # No appearance evidence (e.g. /rederive from stored detections —
-        # histograms are never persisted): spatial carries the appearance slot.
+        # No appearance evidence (e.g. /rederive from rows persisted before
+        # hists/embeds were stashed): spatial carries the appearance slot.
         appearance = spatial
+
+    # Adult-size prior: two adult-tall WALKING fragments are almost certainly
+    # the one teacher, whose leave-and-return breaks spatial continuity. Both
+    # sides must be mobile (stationary front-row students reach p90 height on
+    # perspective CCTV), and the prior may only override appearance when the
+    # embeds agree (cos >= 0.5) or when no appearance evidence exists at all;
+    # a contradicting hist without embed confirmation, or a cos in
+    # [0.35, 0.5), still keeps different adults apart.
+    if mobile_a and mobile_b:
+        adult_pair = a.adult and b.adult
+        if not adult_pair and (a.adult or b.adult) and ca is not None and cb is not None:
+            # Crouch re-acquisition (see CROUCH_REACQUIRE_*): the non-adult
+            # side joins the adult tier only through a near-instant same-spot
+            # re-acquisition, never through appearance alone.
+            adult_pair = (
+                gap <= CROUCH_REACQUIRE_MAX_GAP_MS
+                and math.hypot(ca[0] - cb[0], ca[1] - cb[1]) <= CROUCH_REACQUIRE_MAX_DIST
+            )
+        if adult_pair:
+            embeds_agree = cos is not None and cos >= ADULT_PRIOR_MIN_COS
+            no_appearance_evidence = cos is None and (a.hist is None or b.hist is None)
+            if embeds_agree or no_appearance_evidence:
+                appearance = max(appearance, ADULT_PRIOR_APPEARANCE)
     return (
         W_HIST * appearance
         + W_SPATIAL * spatial
@@ -348,8 +459,23 @@ def _merge_clusters(a: _Cluster, b: _Cluster) -> _Cluster:
         wa, wb = max(a.hist_weight, 1.0), max(b.hist_weight, 1.0)
         hist = (a.hist * wa + b.hist * wb) / (wa + wb)
         weight = wa + wb
+    if a.embed is None and b.embed is None:
+        embed, embed_weight = None, 0.0
+    elif a.embed is None:
+        embed, embed_weight = b.embed, b.embed_weight
+    elif b.embed is None:
+        embed, embed_weight = a.embed, a.embed_weight
+    else:
+        ea, eb = max(a.embed_weight, 1.0), max(b.embed_weight, 1.0)
+        embed = (a.embed * ea + b.embed * eb) / (ea + eb)
+        norm = float(np.linalg.norm(embed))
+        # A blend of unit vectors is not unit; re-normalize so future dot
+        # products against this cluster stay true cosines.
+        embed = embed / norm if norm > 0 else None
+        embed_weight = ea + eb
     n = a.n_dets + b.n_dets
     area = (a.mean_area * a.n_dets + b.mean_area * b.n_dets) / max(n, 1)
+    height = (a.mean_height * a.n_dets + b.mean_height * b.n_dets) / max(n, 1)
     return _Cluster(
         raw_ids=sorted(a.raw_ids + b.raw_ids),
         intervals=_coalesce(
@@ -359,6 +485,9 @@ def _merge_clusters(a: _Cluster, b: _Cluster) -> _Cluster:
         hist_weight=weight,
         mean_area=area,
         n_dets=n,
+        embed=embed,
+        embed_weight=embed_weight,
+        mean_height=height,
     )
 
 
@@ -381,9 +510,18 @@ def merge_tracks(
     scoring. Total cost drops from ~O(merges * n^2 * k) to ~O(n^2 log n),
     which keeps heavily fragmented long videos out of multi-hour merge stalls.
     """
-    alive: dict[int, _Cluster] = {
-        cid: _cluster_from_track(t) for cid, t in enumerate(raw_tracks)
-    }
+    # Adult-size prior population cut: the classroom height distribution is
+    # bimodal (many seated children, one walking adult), so the 90th
+    # percentile of per-track mean heights isolates the adult tier. Legacy
+    # callers whose RawTracks carry no heights (all 0) disable the prior.
+    heights = [t.mean_height for t in raw_tracks if t.mean_height > 0.0]
+    p90 = float(np.percentile(heights, ADULT_HEIGHT_PERCENTILE)) if heights else 0.0
+
+    alive: dict[int, _Cluster] = {}
+    for cid, t in enumerate(raw_tracks):
+        cluster = _cluster_from_track(t)
+        cluster.adult = p90 > 0.0 and cluster.mean_height >= p90
+        alive[cid] = cluster
     next_id = len(raw_tracks)
     heap: list[tuple[float, int, int]] = []  # (-score, cid_a, cid_b)
 
@@ -403,6 +541,10 @@ def merge_tracks(
         if i not in alive or j not in alive:
             continue  # stale entry: one side was already merged away
         merged = _merge_clusters(alive.pop(i), alive.pop(j))
+        # Re-derive adulthood from the merged mean height against the fixed
+        # population p90 (absorbing a short misdetection fragment can demote
+        # a cluster; two adult halves stay adult).
+        merged.adult = p90 > 0.0 and merged.mean_height >= p90
         mid = next_id
         next_id += 1
         others = list(alive)

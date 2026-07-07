@@ -45,7 +45,13 @@ def _student_det(ts: int) -> Detection:
     )
 
 
-def _synthetic() -> tuple[VideoMeta, list[Detection], dict]:
+def _embed(seed: int) -> list[float]:
+    rng = np.random.default_rng(seed)
+    v = rng.normal(size=512)
+    return [float(x) for x in v / np.linalg.norm(v)]
+
+
+def _synthetic() -> tuple[VideoMeta, list[Detection], dict, dict]:
     dets: list[Detection] = []
     # teacher fragmented into raw tracks 1 (0..20s) and 7 (22..60s), same torso hist
     for ts in range(0, 20_001, 200):
@@ -56,19 +62,21 @@ def _synthetic() -> tuple[VideoMeta, list[Detection], dict]:
     for ts in range(5_000, 58_001, 500):
         dets.append(_student_det(ts))
     hists = {1: [_hist(1)] * 3, 7: [_hist(1)] * 3, 2: [_hist(500)] * 3}
+    # CLIP embeds mirror the hists: teacher fragments share one embedding
+    embeds = {1: _embed(1), 7: _embed(1), 2: _embed(2)}
     meta = VideoMeta(duration_ms=DURATION_MS, fps=30.0, width=1280, height=720)
-    return meta, dets, hists
+    return meta, dets, hists, embeds
 
 
 def test_full_pipeline_shape_and_semantics(monkeypatch):
-    meta, dets, hists = _synthetic()
+    meta, dets, hists, embeds = _synthetic()
 
     def fake_detect(video_path, sample_fps=5.0, progress_cb=None):
         assert video_path == "/fake/classroom.mp4"
         if progress_cb:
             progress_cb(0.5)
             progress_cb(1.0)
-        return meta, dets, hists
+        return meta, dets, hists, embeds
 
     written: dict = {}
 
@@ -158,7 +166,7 @@ def test_pipeline_short_empty_video_yields_valid_empty_result(monkeypatch):
     (the zero-detection failure guard only fires on longer videos)."""
 
     def fake_detect(video_path, sample_fps=5.0, progress_cb=None):
-        return VideoMeta(duration_ms=4_000, fps=30.0, width=640, height=480), [], {}
+        return VideoMeta(duration_ms=4_000, fps=30.0, width=640, height=480), [], {}, {}
 
     monkeypatch.setattr(detector, "detect_video", fake_detect)
     result = jobs.run_pipeline(VIDEO_ID, "/fake.mp4", 5.0, [], write_db=False)
@@ -177,7 +185,7 @@ def test_pipeline_empty_over_5s_video_is_failure(monkeypatch):
     import pytest
 
     def fake_detect(video_path, sample_fps=5.0, progress_cb=None):
-        return VideoMeta(duration_ms=10_000, fps=30.0, width=640, height=480), [], {}
+        return VideoMeta(duration_ms=10_000, fps=30.0, width=640, height=480), [], {}, {}
 
     monkeypatch.setattr(detector, "detect_video", fake_detect)
     with pytest.raises(RuntimeError, match="zero detections"):

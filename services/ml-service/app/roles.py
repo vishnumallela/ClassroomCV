@@ -70,7 +70,13 @@ MIN_RELATIVE_AREA = 0.3
 # --- robust teacher rule ----------------------------------------------------
 TEACHER_MIN_SCORE = 0.5  # best must at least look teacher-like in absolute terms
 TEACHER_ABS_MARGIN = 0.08  # floor on the lead over the runner-up
-TEACHER_REL_MARGIN = 0.2  # lead must also be >= 20% of the best score
+# Lead must also be >= this fraction of the best score. Recalibrated from 0.2
+# after CLIP re-ID started attaching the teacher's SEATED return segment
+# (demo: standing_ratio 0.74 -> 0.66, composite 0.766 -> 0.710, lead 26.6% ->
+# 17.6%): a correct re-ID must not un-classify the teacher. Chains of student
+# fragments ride the union-inflated movement+presence terms to ~0.59, so the
+# guard against declaring a teacher among lookalikes still holds at 15%.
+TEACHER_REL_MARGIN = 0.15
 
 # --- board proximity / absorption -------------------------------------------
 # Expansion of the board polygon bbox used when testing whether an absorbed

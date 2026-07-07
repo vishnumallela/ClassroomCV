@@ -62,6 +62,7 @@ async def evaluate(video_id: str, spec: dict) -> bool:
     # Same appearance evidence the production /rederive path feeds the merge;
     # without it the replay degrades to spatial-only scoring and diverges.
     track_hists = await db.fetch_track_hists(video_id)
+    track_embeds = await db.fetch_track_embeds(video_id)
     max_ts = max(d.video_ts_ms for d in detections)
     meta = VideoMeta(
         duration_ms=int(info.get("duration_ms") or max_ts),
@@ -72,7 +73,7 @@ async def evaluate(video_id: str, spec: dict) -> bool:
     print(f"  detections={len(detections)} zones={[z['kind'] for z in zones]} duration_ms={meta.duration_ms}")
 
     t0 = time.perf_counter()
-    identities = jobs.remerge_from_raw(detections, track_hists)
+    identities = jobs.remerge_from_raw(detections, track_hists, track_embeds)
     t_merge = time.perf_counter() - t0
 
     t0 = time.perf_counter()

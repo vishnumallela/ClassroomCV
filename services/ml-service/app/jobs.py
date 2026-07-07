@@ -7,10 +7,12 @@ deriving + DB write = 0.9..1.0.
 run_pipeline / derive_result are also directly callable (used by /rederive and
 by tests, which monkeypatch app.detector.detect_video / app.db.replace_detections).
 Module boundaries:
-- /analyze merges with torso histograms collected during detection;
+- /analyze merges with torso histograms + CLIP track embeddings collected
+  during detection;
 - /rederive REBUILDS identities from stored detections' meta.raw_track_id via
-  remerge_from_raw (histograms are never persisted, so the merge falls back
-  to spatial continuity — see merge.spatial_continuity) and then rewrites
+  remerge_from_raw, feeding back the per-track hists/embeds persisted in the
+  first-row meta (rows written before that persistence existed fall back to
+  spatial continuity — see merge.spatial_continuity) and then rewrites
   detection_events.track_no through the same replace machinery.
 """
 
@@ -213,7 +215,7 @@ def run_pipeline(
 
     cb("detecting", 0.0)
     stage_start = time.perf_counter()
-    meta, detections, hists = detector.detect_video(
+    meta, detections, hists, embeds = detector.detect_video(
         video_path,
         sample_fps=sample_fps,
         progress_cb=lambda f: cb("detecting", f * 0.8),
@@ -236,7 +238,9 @@ def run_pipeline(
 
     cb("merging", 0.8)
     stage_start = time.perf_counter()
-    raw_tracks = merge.build_raw_tracks(detections, hists)
+    raw_tracks = merge.build_raw_tracks(
+        detections, hists, {rid: [e] for rid, e in embeds.items()}
+    )
     mapping, identities = merge.merge_tracks(raw_tracks)
     for d in detections:
         d.track_no = mapping.get(d.raw_track_id)
@@ -262,6 +266,11 @@ def run_pipeline(
                         for t in raw_tracks
                         if t.hist is not None
                     },
+                    track_embeds={
+                        t.raw_id: [float(v) for v in t.embed.ravel()]
+                        for t in raw_tracks
+                        if t.embed is not None
+                    },
                 )
             )
         except (db.VideoDeletedError, db.StaleRunError):
@@ -286,17 +295,20 @@ def run_pipeline(
 def remerge_from_raw(
     detections: list[Detection],
     track_hists: Optional[dict[int, list[float]]] = None,
+    track_embeds: Optional[dict[int, list[float]]] = None,
 ) -> list[dict]:
     """Rebuild identities from stored detections' raw_track_id (for /rederive).
 
-    When persisted per-track histograms are available they are fed back into
-    the merge so /rederive scores appearance exactly like /analyze did;
-    otherwise spatial continuity carries the appearance slot. Mutates each
-    Detection's track_no to the fresh identity number and returns the
-    identity summaries.
+    When persisted per-track histograms / CLIP embeddings are available they
+    are fed back into the merge so /rederive scores appearance exactly like
+    /analyze did; otherwise spatial continuity carries the appearance slot.
+    Mutates each Detection's track_no to the fresh identity number and
+    returns the identity summaries.
     """
     raw_tracks = merge.build_raw_tracks(
-        detections, {rid: [h] for rid, h in (track_hists or {}).items()}
+        detections,
+        {rid: [h] for rid, h in (track_hists or {}).items()},
+        {rid: [e] for rid, e in (track_embeds or {}).items()},
     )
     mapping, identities = merge.merge_tracks(raw_tracks)
     for d in detections:

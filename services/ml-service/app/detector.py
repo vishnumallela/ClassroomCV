@@ -13,8 +13,10 @@ Per kept frame, per person we emit a Detection with:
 - bbox {x, y, w, h} normalized, top-left based
 - standing: bbox aspect h/w > 1.6 OR hip-above-knee keypoint geometry
 - back_to_camera: nose/eyes keypoints low-confidence while shoulders visible
-and collect up to 10 torso HSV histogram samples per raw track (>= 1 s apart)
-for the identity merge stage.
+and collect up to 10 torso HSV histogram samples plus up to 10 upper-body
+crops per raw track (>= 1 s apart) for the identity merge stage. The crops
+are batch-embedded with CLIP ViT-B/32 AFTER the frame loop (plan M5) so the
+per-frame sampling cadence stays untouched.
 
 Robustness: MPS failures fall back to CPU with a warning; effective sample
 fps is capped at 5; the capture is always released.
@@ -41,6 +43,14 @@ MAX_SAMPLE_FPS = 5.0
 FALLBACK_NATIVE_FPS = 30.0
 MAX_HIST_SAMPLES_PER_TRACK = 10
 HIST_SAMPLE_SPACING_MS = 1_000
+# CLIP re-ID crops (plan M5): upper 60% keeps head+shoulders+torso (the parts
+# that separate same-uniform people) and drops legs/desk clutter; 224 matches
+# CLIP's input resolution, so bigger crops only waste memory while they wait
+# for the post-loop batch embed.
+CLIP_CROP_UPPER_FRAC = 0.6
+CLIP_CROP_MAX_SIDE = 224
+CLIP_BATCH_SIZE = 64
+CLIP_MODEL_NAME = "ViT-B/32"
 KPT_CONF_LOW = 0.3
 KPT_CONF_VISIBLE = 0.5
 STANDING_ASPECT = 1.6
@@ -59,6 +69,7 @@ L_KNEE, R_KNEE = 13, 14
 
 _model = None
 _fallback_cpu = False
+_clip_bundle = None  # (model, preprocess, device), lazy like _model
 
 
 def _lapjv_shim(cost, extend_cost=False, cost_limit=None, return_cost=True):
@@ -300,6 +311,99 @@ def _torso_hist(
     return hist.astype(np.float32)
 
 
+def _get_clip():
+    """Lazily load + cache CLIP ViT-B/32 on the detection device.
+
+    Loaded on first use only (the frame loop never touches it), so videos
+    processed before any re-ID work pay no startup cost, and tests that fake
+    detect_video never trigger the checkpoint load.
+    """
+    global _clip_bundle
+    if _clip_bundle is None:
+        import clip
+
+        device = get_device()
+        model, preprocess = clip.load(CLIP_MODEL_NAME, device=device)
+        model.eval()
+        _clip_bundle = (model, preprocess, device)
+    return _clip_bundle
+
+
+def _upper_crop(frame: np.ndarray, bbox: dict) -> Optional[np.ndarray]:
+    """BGR crop of the upper 60% of the bbox, downscaled to <= 224 px."""
+    fh, fw = frame.shape[:2]
+    px0 = max(0, min(fw - 1, int(bbox["x"] * fw)))
+    px1 = max(0, min(fw, int((bbox["x"] + bbox["w"]) * fw)))
+    py0 = max(0, min(fh - 1, int(bbox["y"] * fh)))
+    py1 = max(0, min(fh, int((bbox["y"] + bbox["h"] * CLIP_CROP_UPPER_FRAC) * fh)))
+    # Below ~8 px the crop is compression mush that embeds as noise.
+    if px1 - px0 < 8 or py1 - py0 < 8:
+        return None
+    crop = frame[py0:py1, px0:px1]
+    scale = CLIP_CROP_MAX_SIDE / max(crop.shape[:2])
+    if scale < 1.0:
+        crop = cv2.resize(
+            crop,
+            (
+                max(1, int(round(crop.shape[1] * scale))),
+                max(1, int(round(crop.shape[0] * scale))),
+            ),
+            interpolation=cv2.INTER_AREA,
+        )
+    return crop
+
+
+def _embed_tracks(crops: dict[int, list[np.ndarray]]) -> dict[int, list[float]]:
+    """L2-normalized median CLIP embedding (512 floats) per raw track.
+
+    One batched post-pass over all sampled crops (~1560 for the demo video at
+    batch 64), so the 5 fps detection loop stays untouched. Failures degrade
+    to {} instead of raising: losing re-ID evidence must never discard a
+    completed multi-minute YOLO pass — the merge falls back to hist+spatial.
+    """
+    flat: list[tuple[int, np.ndarray]] = [
+        (raw_id, crop) for raw_id, samples in crops.items() for crop in samples
+    ]
+    if not flat:
+        return {}
+    try:
+        import torch
+        from PIL import Image
+
+        model, preprocess, device = _get_clip()
+        tensors = [
+            # cv2 frames are BGR; CLIP's preprocess expects an RGB PIL image.
+            preprocess(Image.fromarray(cv2.cvtColor(crop, cv2.COLOR_BGR2RGB)))
+            for _raw_id, crop in flat
+        ]
+        feats: list[np.ndarray] = []
+        with torch.no_grad():
+            for i in range(0, len(tensors), CLIP_BATCH_SIZE):
+                batch = torch.stack(tensors[i : i + CLIP_BATCH_SIZE]).to(device)
+                feats.append(model.encode_image(batch).float().cpu().numpy())
+        all_feats = np.concatenate(feats, axis=0)
+    except Exception:
+        logger.warning("CLIP track embedding failed; merge will run without embeds", exc_info=True)
+        return {}
+
+    by_id: dict[int, list[np.ndarray]] = {}
+    for (raw_id, _crop), feat in zip(flat, all_feats):
+        norm = float(np.linalg.norm(feat))
+        if norm > 0:
+            # Normalize per sample so the median averages directions, not
+            # magnitudes (CLIP feature norms vary with crop content).
+            by_id.setdefault(raw_id, []).append(feat / norm)
+    out: dict[int, list[float]] = {}
+    for raw_id, samples in by_id.items():
+        med = np.median(np.stack(samples), axis=0)
+        norm = float(np.linalg.norm(med))
+        if norm > 0:
+            # Median of unit vectors is not unit; re-normalize so downstream
+            # dot products are true cosines.
+            out[raw_id] = [float(v) for v in med / norm]
+    return out
+
+
 def _clip_bbox(cx: float, cy: float, w: float, h: float) -> dict:
     """Clamp a normalized center-format box to the frame as an interval.
 
@@ -327,6 +431,8 @@ def _extract_frame(
     detections: list[Detection],
     hists: dict[int, list[np.ndarray]],
     last_hist_ms: dict[int, int],
+    crops: dict[int, list[np.ndarray]],
+    last_crop_ms: dict[int, int],
 ) -> None:
     r = results[0]
     boxes = r.boxes
@@ -379,6 +485,19 @@ def _extract_frame(
             if hist is not None:
                 samples.append(hist)
                 last_hist_ms[int(raw_id)] = ts_ms
+
+        # CLIP crop sampling mirrors the hist cadence but tracks its own
+        # last-sample time: a failed torso hist (tiny box) must not stall or
+        # accelerate crop collection, and vice versa.
+        crop_samples = crops.setdefault(int(raw_id), [])
+        if len(crop_samples) < MAX_HIST_SAMPLES_PER_TRACK and (
+            int(raw_id) not in last_crop_ms
+            or ts_ms - last_crop_ms[int(raw_id)] >= HIST_SAMPLE_SPACING_MS
+        ):
+            crop = _upper_crop(frame, bbox)
+            if crop is not None:
+                crop_samples.append(crop)
+                last_crop_ms[int(raw_id)] = ts_ms
 
 
 def _effective_frame_count(metadata_count: int, frames_read: int) -> int:
@@ -468,17 +587,21 @@ def detect_video(
     video_path: str,
     sample_fps: float = 5.0,
     progress_cb: Optional[Callable[[float], None]] = None,
-) -> tuple[VideoMeta, list[Detection], dict[int, list[np.ndarray]]]:
+) -> tuple[VideoMeta, list[Detection], dict[int, list[np.ndarray]], dict[int, list[float]]]:
     """Run detection+tracking over the video.
 
     video_path must be an absolute path to an existing file (inside DATA_DIR
     when that env var is set); see _validate_video_path.
-    Returns (video_meta, detections, torso_hist_samples_by_raw_track_id).
+    Returns (video_meta, detections, torso_hist_samples_by_raw_track_id,
+    clip_embed_by_raw_track_id) where each embed is the L2-normalized median
+    CLIP ViT-B/32 vector of the track's sampled upper-body crops.
     progress_cb receives the 0..1 fraction of sampled frames processed.
     """
     detections: list[Detection] = []
     hists: dict[int, list[np.ndarray]] = {}
     last_hist_ms: dict[int, int] = {}
+    crops: dict[int, list[np.ndarray]] = {}
+    last_crop_ms: dict[int, int] = {}
     last_ts_ms = 0
 
     model = _get_model()
@@ -492,12 +615,16 @@ def detect_video(
         for ts_ms, frame in frames:
             last_ts_ms = ts_ms
             results = _track_frame(model, frame, device)
-            _extract_frame(results, frame, ts_ms, detections, hists, last_hist_ms)
+            _extract_frame(
+                results, frame, ts_ms, detections, hists, last_hist_ms, crops, last_crop_ms
+            )
             processed += 1
             if progress_cb and info.frames_to_process:
                 progress_cb(min(1.0, processed / info.frames_to_process))
     finally:
         frames.close()
+
+    embeds = _embed_tracks(crops)
 
     frame_count = _effective_frame_count(info.metadata_frame_count, info.frames_read)
     duration_ms = (
@@ -512,4 +639,4 @@ def detect_video(
 
     if progress_cb:
         progress_cb(1.0)
-    return meta, detections, hists
+    return meta, detections, hists, embeds

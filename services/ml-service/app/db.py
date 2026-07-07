@@ -60,6 +60,7 @@ async def replace_detections(
     batch_size: int = COPY_BATCH_SIZE,
     run_tokens: Optional[list[str]] = None,
     track_hists: Optional[dict[int, list[float]]] = None,
+    track_embeds: Optional[dict[int, list[float]]] = None,
 ) -> int:
     """Delete prior detection_events for video_id, COPY the new ones. Returns row count.
 
@@ -85,12 +86,13 @@ async def replace_detections(
     """
     conn = await _connect(dsn)
     try:
-        # Appearance persistence: the median torso histogram of each raw track
-        # rides in the meta of that track's FIRST row (one ~960-float payload
-        # per raw track, not per detection), so /rederive can merge with the
-        # same appearance evidence /analyze had instead of degrading to
-        # spatial-only scoring.
+        # Appearance persistence: the median torso histogram and CLIP embed of
+        # each raw track ride in the meta of that track's FIRST row (one
+        # ~960-float + one 512-float payload per raw track, not per
+        # detection), so /rederive can merge with the same appearance evidence
+        # /analyze had instead of degrading to spatial-only scoring.
         hist_pending = dict(track_hists) if track_hists else {}
+        embed_pending = dict(track_embeds) if track_embeds else {}
         records = []
         for d in detections:
             meta: dict = {
@@ -101,6 +103,9 @@ async def replace_detections(
             hist = hist_pending.pop(int(d.raw_track_id), None)
             if hist is not None:
                 meta["hist"] = hist
+            embed = embed_pending.pop(int(d.raw_track_id), None)
+            if embed is not None:
+                meta["embed"] = embed
             records.append(
                 (
                     d.video_ts_ms,
@@ -195,6 +200,28 @@ async def fetch_track_hists(
         meta = json.loads(meta) if isinstance(meta, str) else (meta or {})
         if "hist" in meta and "raw_track_id" in meta:
             out[int(meta["raw_track_id"])] = [float(v) for v in meta["hist"]]
+    return out
+
+
+async def fetch_track_embeds(
+    video_id: str, dsn: Optional[str] = None
+) -> dict[int, list[float]]:
+    """Median CLIP embedding per raw_track_id, from rows that carry one."""
+    conn = await _connect(dsn)
+    try:
+        rows = await conn.fetch(
+            "SELECT meta FROM detection_events "
+            "WHERE video_id = $1 AND meta ? 'embed'",
+            video_id,
+        )
+    finally:
+        await conn.close()
+    out: dict[int, list[float]] = {}
+    for r in rows:
+        meta = r["meta"]
+        meta = json.loads(meta) if isinstance(meta, str) else (meta or {})
+        if "embed" in meta and "raw_track_id" in meta:
+            out[int(meta["raw_track_id"])] = [float(v) for v in meta["embed"]]
     return out
 
 

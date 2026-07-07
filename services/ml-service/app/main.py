@@ -136,12 +136,17 @@ async def rederive(req: RederiveRequest) -> dict:
     )
     identities: list[dict] = []
     track_hists: dict[int, list[float]] = {}
+    track_embeds: dict[int, list[float]] = {}
     if detections:
         try:
             track_hists = await db.fetch_track_hists(req.video_id)
         except Exception:
             track_hists = {}
-        identities = jobs.remerge_from_raw(detections, track_hists)
+        try:
+            track_embeds = await db.fetch_track_embeds(req.video_id)
+        except Exception:
+            track_embeds = {}
+        identities = jobs.remerge_from_raw(detections, track_hists, track_embeds)
     result = jobs.derive_result(
         meta, detections, identities, [z.model_dump() for z in req.zones]
     )
@@ -150,7 +155,12 @@ async def rederive(req: RederiveRequest) -> dict:
         # absorption applied by derive_result) so detection_events.track_no
         # matches the tracks/analytics we return.
         try:
-            await db.replace_detections(req.video_id, detections, track_hists=track_hists)
+            await db.replace_detections(
+                req.video_id,
+                detections,
+                track_hists=track_hists,
+                track_embeds=track_embeds,
+            )
         except db.VideoDeletedError:
             raise HTTPException(
                 status_code=409, detail="video was deleted during rederive"
