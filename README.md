@@ -1,4 +1,4 @@
-# Classroom Analytics
+# ClassroomCV
 
 Upload a classroom recording and get structured teaching analytics: teacher
 presence, entries and exits, time at the board, and student occupancy over time.

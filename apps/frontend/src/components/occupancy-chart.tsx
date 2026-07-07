@@ -15,6 +15,33 @@ import { msToClock } from "@/lib/format";
 type Analytics = NonNullable<RouterOutputs["videos"]["get"]["analytics"]>;
 
 const EMERALD = "#10b981";
+const AXIS = "#71717a";
+const GRID = "rgba(113,113,122,0.18)";
+
+interface TooltipEntry {
+  value?: number;
+}
+
+function ChartTooltip({
+  active,
+  payload,
+  label,
+}: {
+  active?: boolean;
+  payload?: TooltipEntry[];
+  label?: string | number;
+}) {
+  if (!active || !payload || payload.length === 0) return null;
+  return (
+    <div className="rounded-lg border border-border bg-popover/85 px-3 py-2 text-xs shadow-lg backdrop-blur">
+      <div className="font-medium tabular-nums">{msToClock(Number(label))}</div>
+      <div className="mt-0.5 flex items-center gap-1.5 text-muted-foreground">
+        <span className="size-2 rounded-full" style={{ backgroundColor: EMERALD }} />
+        {payload[0]?.value ?? 0} students
+      </div>
+    </div>
+  );
+}
 
 export function OccupancyChart({
   analytics,
@@ -31,73 +58,70 @@ export function OccupancyChart({
 
   return (
     <Card className="p-4">
-      <div className="mb-3 text-sm font-medium text-muted-foreground">
-        Student occupancy over time
-      </div>
-      <div className="h-56 w-full">
+      <div className="mb-3 text-sm font-medium text-muted-foreground">Student occupancy over time</div>
+      <div className="relative h-60 w-full">
+        <div
+          className="pointer-events-none absolute inset-0"
+          style={{
+            backgroundImage: "radial-gradient(rgba(113,113,122,0.22) 1px, transparent 1px)",
+            backgroundSize: "16px 16px",
+          }}
+        />
         <ResponsiveContainer width="100%" height="100%">
           <AreaChart
             data={data}
-            margin={{ top: 4, right: 8, bottom: 0, left: 0 }}
+            margin={{ top: 6, right: 10, bottom: 0, left: 0 }}
             onClick={(state: { activeLabel?: string | number }) => {
               if (state?.activeLabel !== undefined) onSeek(Number(state.activeLabel));
             }}
           >
             <defs>
               <linearGradient id="occ-fill" x1="0" y1="0" x2="0" y2="1">
-                <stop offset="0%" stopColor={EMERALD} stopOpacity={0.35} />
+                <stop offset="0%" stopColor={EMERALD} stopOpacity={0.45} />
+                <stop offset="75%" stopColor={EMERALD} stopOpacity={0.06} />
                 <stop offset="100%" stopColor={EMERALD} stopOpacity={0} />
               </linearGradient>
             </defs>
-            <CartesianGrid strokeDasharray="3 3" stroke="rgba(161,161,170,0.14)" vertical={false} />
             {analytics.presenceIntervals.map((iv) => (
-              <ReferenceArea
-                key={`${iv[0]}-${iv[1]}`}
-                x1={iv[0]}
-                x2={iv[1]}
-                fill={EMERALD}
-                fillOpacity={0.07}
-              />
+              <ReferenceArea key={`${iv[0]}-${iv[1]}`} x1={iv[0]} x2={iv[1]} fill={EMERALD} fillOpacity={0.05} />
             ))}
+            <CartesianGrid strokeDasharray="2 6" stroke={GRID} vertical={false} />
             <XAxis
               dataKey="ts"
               type="number"
               domain={[0, domainMax]}
               tickFormatter={(v) => msToClock(Number(v))}
-              stroke="#71717a"
+              stroke={AXIS}
               fontSize={11}
               tickLine={false}
+              axisLine={false}
+              minTickGap={40}
             />
             <YAxis
               allowDecimals={false}
-              stroke="#71717a"
+              stroke={AXIS}
               fontSize={11}
               tickLine={false}
+              axisLine={false}
               width={28}
             />
             <Tooltip
-              contentStyle={{
-                background: "#18181b",
-                border: "1px solid #27272a",
-                borderRadius: 8,
-                fontSize: 12,
-              }}
-              labelFormatter={(v) => msToClock(Number(v))}
-              formatter={(v) => [String(v), "students"]}
+              cursor={{ stroke: EMERALD, strokeOpacity: 0.3, strokeWidth: 1 }}
+              content={<ChartTooltip />}
             />
             <Area
-              type="stepAfter"
+              type="monotone"
               dataKey="students"
               stroke={EMERALD}
-              strokeWidth={2}
+              strokeWidth={2.5}
               fill="url(#occ-fill)"
+              activeDot={{ r: 4, fill: EMERALD, stroke: "#ffffff", strokeWidth: 2 }}
+              animationDuration={700}
             />
           </AreaChart>
         </ResponsiveContainer>
       </div>
-      <p className="mt-2 text-xs text-muted-foreground">
-        Shaded bands mark when the teacher is present.
-      </p>
+      <p className="mt-2 text-xs text-muted-foreground">Shaded bands mark when the teacher is present.</p>
     </Card>
   );
 }
