@@ -133,6 +133,7 @@ function VideoDetail() {
             durationMs={video.durationMs}
             presenceIntervals={analytics.presenceIntervals}
             boardIntervals={analytics.boardIntervals}
+            events={events}
             currentMs={currentMs}
             onSeek={seek}
           />

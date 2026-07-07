@@ -1,32 +1,78 @@
+import type { RouterOutputs } from "@classroom/api-contracts";
+import { KIND_LABEL } from "@/components/events-table";
 import { Card } from "@/components/ui/card";
+import { msToClock } from "@/lib/format";
 
 type Interval = [number, number];
+type VideoEvent = RouterOutputs["videos"]["get"]["events"][number];
+
+const TICK_COLOR: Record<string, string> = {
+  enter: "bg-emerald-500",
+  exit: "bg-red-500",
+  board_enter: "bg-amber-600",
+  board_leave: "bg-amber-600",
+};
+
+// Lane bars start after the w-24 (6rem) label column and its gap-3 (0.75rem);
+// every strip-wide absolutely positioned element (seek overlay, playhead) must
+// skip the same offset or its x-axis drifts away from the lane segments.
+const LANE_OFFSET = "6rem + 0.75rem";
 
 function Lane({
   label,
   intervals,
   color,
   durationMs,
+  ticks,
+  onSeek,
 }: {
   label: string;
   intervals: Interval[];
   color: string;
   durationMs: number;
+  ticks: VideoEvent[];
+  onSeek: (ms: number) => void;
 }) {
   return (
     <div className="flex items-center gap-3">
       <span className="w-24 shrink-0 text-xs text-muted-foreground">{label}</span>
-      <div className="relative h-3 flex-1 overflow-hidden rounded-full bg-muted">
-        {intervals.map((iv) => (
-          <div
-            key={`${iv[0]}-${iv[1]}`}
-            className={`absolute inset-y-0 rounded-full ${color}`}
-            style={{
-              left: `${(iv[0] / durationMs) * 100}%`,
-              width: `${Math.max(0.4, ((iv[1] - iv[0]) / durationMs) * 100)}%`,
-            }}
-          />
-        ))}
+      {/* Ticks live outside the overflow-hidden bar so they can extend past it. */}
+      <div className="relative h-3 flex-1">
+        <div className="absolute inset-0 overflow-hidden rounded-full bg-muted">
+          {intervals.map((iv) => (
+            <div
+              key={`${iv[0]}-${iv[1]}`}
+              className={`absolute inset-y-0 rounded-full ${color}`}
+              style={{
+                left: `${(iv[0] / durationMs) * 100}%`,
+                width: `${Math.max(0.4, ((iv[1] - iv[0]) / durationMs) * 100)}%`,
+              }}
+            />
+          ))}
+        </div>
+        {ticks.map((e) => {
+          const title = `${KIND_LABEL[e.kind] ?? e.kind} at ${msToClock(e.videoTsMs)}`;
+          return (
+            <button
+              key={`${e.kind}-${e.videoTsMs}-${e.trackNo}`}
+              type="button"
+              title={title}
+              aria-label={title}
+              // z-20 beats the strip-wide seek overlay (z-10); the button is
+              // wider than the 2px line purely as a click target, with the
+              // visible line centered on the exact videoTsMs position.
+              className="absolute -inset-y-1 z-20 w-2 -translate-x-1/2 cursor-pointer"
+              style={{ left: `${(e.videoTsMs / durationMs) * 100}%` }}
+              onClick={() => onSeek(e.videoTsMs)}
+            >
+              <span
+                className={`absolute inset-y-0 left-1/2 w-0.5 -translate-x-1/2 rounded-full ${
+                  TICK_COLOR[e.kind] ?? "bg-foreground"
+                }`}
+              />
+            </button>
+          );
+        })}
       </div>
     </div>
   );
@@ -36,17 +82,21 @@ export function TimelineStrip({
   durationMs,
   presenceIntervals,
   boardIntervals,
+  events,
   currentMs,
   onSeek,
 }: {
   durationMs: number | null;
   presenceIntervals: Interval[];
   boardIntervals: Interval[];
+  events: VideoEvent[];
   currentMs: number;
   onSeek: (ms: number) => void;
 }) {
   if (!durationMs || durationMs <= 0) return null;
   const playheadPct = Math.max(0, Math.min(1, currentMs / durationMs)) * 100;
+  const roomTicks = events.filter((e) => e.kind === "enter" || e.kind === "exit");
+  const boardTicks = events.filter((e) => e.kind === "board_enter" || e.kind === "board_leave");
 
   return (
     <Card className="p-4">
@@ -55,7 +105,8 @@ export function TimelineStrip({
         <button
           type="button"
           aria-label="Seek"
-          className="absolute inset-0 z-10 cursor-pointer"
+          className="absolute inset-y-0 right-0 z-10 cursor-pointer"
+          style={{ left: `calc(${LANE_OFFSET})` }}
           onClick={(e) => {
             const rect = e.currentTarget.getBoundingClientRect();
             onSeek(((e.clientX - rect.left) / rect.width) * durationMs);
@@ -67,17 +118,23 @@ export function TimelineStrip({
             intervals={presenceIntervals}
             color="bg-primary"
             durationMs={durationMs}
+            ticks={roomTicks}
+            onSeek={onSeek}
           />
           <Lane
             label="At board"
             intervals={boardIntervals}
             color="bg-amber-400"
             durationMs={durationMs}
+            ticks={boardTicks}
+            onSeek={onSeek}
           />
         </div>
         <div
           className="pointer-events-none absolute inset-y-0 z-20 w-px bg-foreground"
-          style={{ left: `calc(6rem + 0.75rem + (100% - 6rem - 0.75rem) * ${playheadPct / 100})` }}
+          style={{
+            left: `calc(${LANE_OFFSET} + (100% - (${LANE_OFFSET})) * ${playheadPct / 100})`,
+          }}
         />
       </div>
     </Card>

@@ -13,7 +13,9 @@ import { msToClock } from "@/lib/format";
 
 type VideoEvent = RouterOutputs["videos"]["get"]["events"][number];
 
-const KIND_LABEL: Record<string, string> = {
+// Exported so the timeline ticks describe each moment with the same wording
+// as this table; the two views must never drift apart.
+export const KIND_LABEL: Record<string, string> = {
   enter: "Entered room",
   exit: "Left room",
   board_enter: "Arrived at board",
