@@ -59,6 +59,7 @@ async def replace_detections(
     dsn: Optional[str] = None,
     batch_size: int = COPY_BATCH_SIZE,
     run_tokens: Optional[list[str]] = None,
+    track_hists: Optional[dict[int, list[float]]] = None,
 ) -> int:
     """Delete prior detection_events for video_id, COPY the new ones. Returns row count.
 
@@ -84,23 +85,32 @@ async def replace_detections(
     """
     conn = await _connect(dsn)
     try:
-        records = [
-            (
-                d.video_ts_ms,
-                video_id,
-                d.track_no,
-                json.dumps(d.bbox),
-                float(d.conf),
-                json.dumps(
-                    {
-                        "standing": bool(d.standing),
-                        "back_to_camera": bool(d.back_to_camera),
-                        "raw_track_id": int(d.raw_track_id),
-                    }
-                ),
+        # Appearance persistence: the median torso histogram of each raw track
+        # rides in the meta of that track's FIRST row (one ~960-float payload
+        # per raw track, not per detection), so /rederive can merge with the
+        # same appearance evidence /analyze had instead of degrading to
+        # spatial-only scoring.
+        hist_pending = dict(track_hists) if track_hists else {}
+        records = []
+        for d in detections:
+            meta: dict = {
+                "standing": bool(d.standing),
+                "back_to_camera": bool(d.back_to_camera),
+                "raw_track_id": int(d.raw_track_id),
+            }
+            hist = hist_pending.pop(int(d.raw_track_id), None)
+            if hist is not None:
+                meta["hist"] = hist
+            records.append(
+                (
+                    d.video_ts_ms,
+                    video_id,
+                    d.track_no,
+                    json.dumps(d.bbox),
+                    float(d.conf),
+                    json.dumps(meta),
+                )
             )
-            for d in detections
-        ]
         async with conn.transaction():
             row = await conn.fetchrow(
                 "SELECT workflow_run_id FROM videos WHERE id = $1 FOR SHARE",
@@ -164,6 +174,28 @@ async def fetch_detections(
             )
         )
     return detections
+
+
+async def fetch_track_hists(
+    video_id: str, dsn: Optional[str] = None
+) -> dict[int, list[float]]:
+    """Median torso histogram per raw_track_id, from rows that carry one."""
+    conn = await _connect(dsn)
+    try:
+        rows = await conn.fetch(
+            "SELECT meta FROM detection_events "
+            "WHERE video_id = $1 AND meta ? 'hist'",
+            video_id,
+        )
+    finally:
+        await conn.close()
+    out: dict[int, list[float]] = {}
+    for r in rows:
+        meta = r["meta"]
+        meta = json.loads(meta) if isinstance(meta, str) else (meta or {})
+        if "hist" in meta and "raw_track_id" in meta:
+            out[int(meta["raw_track_id"])] = [float(v) for v in meta["hist"]]
+    return out
 
 
 async def fetch_video_info(

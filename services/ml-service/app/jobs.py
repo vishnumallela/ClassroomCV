@@ -237,7 +237,16 @@ def run_pipeline(
     if write_db:
         try:
             asyncio.run(
-                db.replace_detections(video_id, detections, run_tokens=run_tokens)
+                db.replace_detections(
+                    video_id,
+                    detections,
+                    run_tokens=run_tokens,
+                    track_hists={
+                        t.raw_id: [float(v) for v in t.hist.ravel()]
+                        for t in raw_tracks
+                        if t.hist is not None
+                    },
+                )
             )
         except (db.VideoDeletedError, db.StaleRunError):
             # Propagate untouched: the worker loop turns these into graceful
@@ -251,16 +260,21 @@ def run_pipeline(
     return result
 
 
-def remerge_from_raw(detections: list[Detection]) -> list[dict]:
+def remerge_from_raw(
+    detections: list[Detection],
+    track_hists: Optional[dict[int, list[float]]] = None,
+) -> list[dict]:
     """Rebuild identities from stored detections' raw_track_id (for /rederive).
 
-    Histograms are never persisted, so merge_tracks scores candidate pairs
-    with spatial continuity between fragment endpoints instead of a neutral
-    appearance term (which chains cross-room chimeras). Mutates each
+    When persisted per-track histograms are available they are fed back into
+    the merge so /rederive scores appearance exactly like /analyze did;
+    otherwise spatial continuity carries the appearance slot. Mutates each
     Detection's track_no to the fresh identity number and returns the
     identity summaries.
     """
-    raw_tracks = merge.build_raw_tracks(detections, {})
+    raw_tracks = merge.build_raw_tracks(
+        detections, {rid: [h] for rid, h in (track_hists or {}).items()}
+    )
     mapping, identities = merge.merge_tracks(raw_tracks)
     for d in detections:
         d.track_no = mapping.get(d.raw_track_id)

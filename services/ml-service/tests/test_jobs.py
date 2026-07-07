@@ -100,7 +100,7 @@ def test_run_pipeline_propagates_video_deleted_unwrapped(monkeypatch):
         meta = VideoMeta(duration_ms=1000, fps=5.0, width=100, height=100)
         return meta, [], {}
 
-    async def fake_replace(video_id, detections, dsn=None, batch_size=5000, run_tokens=None):
+    async def fake_replace(video_id, detections, dsn=None, batch_size=5000, run_tokens=None, track_hists=None):
         raise db.VideoDeletedError(f"video {video_id} deleted during analysis")
 
     monkeypatch.setattr(jobs.detector, "detect_video", fake_detect)
