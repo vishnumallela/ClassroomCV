@@ -1,0 +1,52 @@
+{
+  "$schema": "https://raw.githubusercontent.com/oxc-project/oxc/main/npm/oxlint/configuration_schema.json",
+  "plugins": ["typescript", "react", "react-perf", "jsx-a11y", "import", "promise", "unicorn"],
+  "categories": {
+    "correctness": "error",
+    "suspicious": "error",
+    "perf": "warn",
+    "pedantic": "warn",
+    "restriction": "off",
+    "style": "off",
+    "nursery": "off"
+  },
+  "rules": {
+    "no-console": "off",
+    "no-debugger": "error",
+    "no-eval": "error",
+    "no-var": "error",
+    "eqeqeq": ["error", "always"],
+    "no-unused-vars": "off",
+    "typescript/no-unused-vars": "warn",
+    "typescript/no-explicit-any": "error",
+    "import/no-cycle": "error",
+    "react/react-in-jsx-scope": "off",
+    "react/jsx-key": "error",
+    "react/no-danger": "error",
+    "react/no-array-index-key": "warn",
+    "jsx-a11y/alt-text": "error",
+    "jsx-a11y/anchor-is-valid": "error",
+    "unicorn/filename-case": "off",
+    "unicorn/no-null": "off",
+    "unicorn/prefer-top-level-await": "off",
+    "import/no-default-export": "off",
+    "import/no-unassigned-import": "off",
+    "jsx-a11y/prefer-tag-over-role": "off"
+  },
+  "overrides": [
+    {
+      "files": ["apps/frontend/src/components/ui/**/*.tsx"],
+      "rules": { "typescript/no-explicit-any": "off", "react/no-array-index-key": "off" }
+    }
+  ],
+  "env": { "browser": true, "node": true, "es2024": true },
+  "ignorePatterns": [
+    "**/dist/**",
+    "**/.turbo/**",
+    "**/.output/**",
+    "**/node_modules/**",
+    "**/routeTree.gen.ts",
+    "**/drizzle/**",
+    "**/components/ui/**"
+  ]
+}

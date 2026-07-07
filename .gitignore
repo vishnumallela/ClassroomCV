@@ -1,0 +1,14 @@
+node_modules/
+data/
+.env
+.next/
+__pycache__/
+*.pt
+.venv/
+.workflow-data/
+.DS_Store
+dist/
+.turbo/
+.output/
+*.tsbuildinfo
+routeTree.gen.ts

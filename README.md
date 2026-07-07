@@ -1,0 +1,72 @@
+# Classroom Analytics
+
+Upload a classroom recording and get structured teaching analytics: teacher
+presence, entries and exits, time at the board, and student occupancy over time.
+The detection pipeline (YOLO11m-pose, BoT-SORT, re-identification, SAM 2 board
+detection) runs in a durable background worker; the dashboard reads the results
+over a typed API.
+
+## Layout
+
+```
+apps/frontend/       Vite + TanStack Router SPA, shadcn UI, oRPC client
+apps/api-service/    Bun + Hono + oRPC, BullMQ pipeline, Drizzle + postgres.js
+packages/api-contracts/  Shared, type-only oRPC router types
+services/ml-service/     Python FastAPI, YOLO11m-pose + SAM 2 (uv-managed)
+data/                    Uploaded videos, thumbnails
+docker-compose.yml       TimescaleDB (5433) and Redis (6379)
+```
+
+## Prerequisites
+
+- Docker (TimescaleDB + Redis)
+- Bun 1.2+
+- Python 3.12 and [uv](https://docs.astral.sh/uv/) for the ML service
+- ffmpeg on PATH
+
+## Running
+
+```bash
+# 1. Infrastructure (TimescaleDB on :5433, Redis on :6379)
+docker compose up -d
+
+# 2. ML service on :8000
+cd services/ml-service && uv run uvicorn app.main:app --port 8000
+
+# 3. JS dependencies and dev servers (from the repo root)
+bun install
+bun run db:migrate          # first run only, on a fresh database
+bun run dev                 # api-service on :8787, frontend on :3001
+```
+
+Open http://localhost:3001. The BullMQ queue dashboard is at
+http://localhost:8787/admin/queues.
+
+## Ports
+
+| Service              | Port |
+| -------------------- | ---- |
+| Frontend (Vite)      | 3001 |
+| API (Hono)           | 8787 |
+| ML service (FastAPI) | 8000 |
+| TimescaleDB          | 5433 |
+| Redis                | 6379 |
+
+## Commands
+
+| Command               | What it does                                    |
+| --------------------- | ----------------------------------------------- |
+| `bun run dev`         | Run api-service and frontend together via Turbo |
+| `bun run build`       | Production build of every workspace             |
+| `bun run typecheck`   | Typecheck every workspace                       |
+| `bun run lint`        | oxlint across the repo                          |
+| `bun run format`      | Format with oxfmt                               |
+| `bun run db:migrate`  | Apply Drizzle migrations                        |
+| `docker compose down` | Stop infrastructure (data persists in volumes)  |
+
+## Configuration
+
+The api-service reads `API_SERVICE__*` variables with sensible local defaults
+(database on `localhost:5433`, Redis on `localhost:6379`, ML service on
+`localhost:8000`). The frontend reads `FRONTEND__API_URL`, defaulting to
+`http://localhost:8787`.

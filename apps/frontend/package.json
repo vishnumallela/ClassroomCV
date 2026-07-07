@@ -1,0 +1,49 @@
+{
+  "name": "@classroom/frontend",
+  "version": "0.1.0",
+  "private": true,
+  "type": "module",
+  "scripts": {
+    "dev": "vite",
+    "start": "vite preview --port 3001",
+    "build": "tsr generate && vite build",
+    "typecheck": "tsr generate && tsc --noEmit",
+    "lint": "oxlint",
+    "format": "oxfmt --write .",
+    "format:check": "oxfmt --check .",
+    "test:e2e": "playwright test",
+    "clean": "rm -rf dist .turbo .tsbuildinfo"
+  },
+  "dependencies": {
+    "@classroom/api-contracts": "workspace:*",
+    "@orpc/client": "1.14.6",
+    "@orpc/server": "1.14.6",
+    "@orpc/tanstack-query": "1.14.6",
+    "@radix-ui/react-slot": "1.1.1",
+    "@t3-oss/env-core": "0.13.11",
+    "@tanstack/react-query": "5.101.2",
+    "@tanstack/react-router": "1.170.16",
+    "class-variance-authority": "0.7.1",
+    "clsx": "2.1.1",
+    "lucide-react": "0.460.0",
+    "react": "19.0.0",
+    "react-dom": "19.0.0",
+    "recharts": "^3.1.0",
+    "tailwind-merge": "2.6.0",
+    "zod": "4.4.3"
+  },
+  "devDependencies": {
+    "@playwright/test": "1.49.1",
+    "@tailwindcss/vite": "4.0.9",
+    "@tanstack/react-query-devtools": "5.101.2",
+    "@tanstack/react-router-devtools": "1.167.0",
+    "@tanstack/router-cli": "1.167.17",
+    "@tanstack/router-plugin": "1.168.18",
+    "@types/react": "19.0.7",
+    "@types/react-dom": "19.0.3",
+    "@vitejs/plugin-react": "4.3.4",
+    "tailwindcss": "4.0.9",
+    "typescript": "5.7.3",
+    "vite": "6.0.7"
+  }
+}

@@ -1,0 +1,22 @@
+{
+  "$schema": "https://turborepo.com/schema.json",
+  "ui": "tui",
+  "globalDependencies": ["tsconfig.base.json", ".oxlintrc.json", ".oxfmtrc.toml"],
+  "globalEnv": ["NODE_ENV", "API_SERVICE__*", "FRONTEND__*"],
+  "tasks": {
+    "build": {
+      "dependsOn": ["^build"],
+      "inputs": ["$TURBO_DEFAULT$", "!**/*.md"],
+      "outputs": ["dist/**", ".output/**"]
+    },
+    "dev": { "cache": false, "persistent": true },
+    "start": { "cache": false, "persistent": true },
+    "typecheck": { "dependsOn": ["^build"], "outputs": ["*.tsbuildinfo"] },
+    "lint": { "outputs": [] },
+    "format": { "cache": false, "outputs": [] },
+    "format:check": { "outputs": [] },
+    "db:generate": { "cache": false },
+    "db:migrate": { "cache": false },
+    "clean": { "cache": false }
+  }
+}
