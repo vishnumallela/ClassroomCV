@@ -183,6 +183,29 @@ def bridge_offscreen_gaps(
     return merged
 
 
+def bridge_short_gaps(
+    intervals: list[list[int]], max_gap_ms: int = OFFSCREEN_BRIDGE_MS
+) -> list[list[int]]:
+    """Merge presence intervals separated by a gap no larger than max_gap_ms.
+
+    Used ONLY when there is no door zone, so we cannot tell a crossing from a
+    blind spot by position. A gap of a few seconds is far more likely a
+    tracking dropout than the teacher leaving and returning that fast, so
+    bridging stops a brief gap from fabricating an enter/exit pair (the no-door
+    path counts every interval edge as a crossing) and from undercounting
+    presence. A longer gap stays split as a genuine absence.
+    """
+    if len(intervals) < 2:
+        return intervals
+    merged = [list(intervals[0])]
+    for start, end in intervals[1:]:
+        if start - merged[-1][1] <= max_gap_ms:
+            merged[-1][1] = end
+        else:
+            merged.append([start, end])
+    return merged
+
+
 # --------------------------------------------------------------------------- #
 # Board intervals (hysteresis)
 # --------------------------------------------------------------------------- #
@@ -407,6 +430,10 @@ def derive(
                 teacher_dets, presence, door_polygons, duration_ms
             )
         else:
+            # No door to distinguish a crossing from a blind spot: bridge brief
+            # gaps so a tracking dropout is not reported as leaving and
+            # re-entering the room.
+            presence = bridge_short_gaps(presence)
             entry_exit = entry_exit_from_intervals(presence, duration_ms)
         events.extend(
             {"kind": e["kind"], "video_ts_ms": e["ts_ms"], "track_no": teacher_no}

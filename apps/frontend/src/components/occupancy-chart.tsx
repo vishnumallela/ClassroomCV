@@ -4,17 +4,20 @@ import {
   AreaChart,
   CartesianGrid,
   ReferenceArea,
+  ReferenceDot,
   ResponsiveContainer,
   Tooltip,
   XAxis,
   YAxis,
 } from "recharts";
 import { Card } from "@/components/ui/card";
+import { peakOccupancy } from "@/lib/analytics";
 import { msToClock } from "@/lib/format";
 
 type Analytics = NonNullable<RouterOutputs["videos"]["get"]["analytics"]>;
 
 const EMERALD = "#10b981";
+const AMBER = "#f59e0b";
 const AXIS = "#71717a";
 const GRID = "rgba(113,113,122,0.18)";
 
@@ -55,10 +58,13 @@ export function OccupancyChart({
   const data = analytics.occupancy.map((p) => ({ ts: p.ts_ms, students: p.students }));
   if (data.length === 0) return null;
   const domainMax = durationMs && durationMs > 0 ? durationMs : (data.at(-1)?.ts ?? 0);
+  const peak = peakOccupancy(analytics.occupancy);
 
   return (
     <Card className="p-4">
-      <div className="mb-3 text-sm font-medium text-muted-foreground">Student occupancy over time</div>
+      <div className="mb-3 text-sm font-medium text-muted-foreground">
+        Student occupancy over time
+      </div>
       <div className="relative h-60 w-full">
         <div
           className="pointer-events-none absolute inset-0"
@@ -83,7 +89,13 @@ export function OccupancyChart({
               </linearGradient>
             </defs>
             {analytics.presenceIntervals.map((iv) => (
-              <ReferenceArea key={`${iv[0]}-${iv[1]}`} x1={iv[0]} x2={iv[1]} fill={EMERALD} fillOpacity={0.05} />
+              <ReferenceArea
+                key={`${iv[0]}-${iv[1]}`}
+                x1={iv[0]}
+                x2={iv[1]}
+                fill={EMERALD}
+                fillOpacity={0.05}
+              />
             ))}
             <CartesianGrid strokeDasharray="2 6" stroke={GRID} vertical={false} />
             <XAxis
@@ -118,10 +130,28 @@ export function OccupancyChart({
               activeDot={{ r: 4, fill: EMERALD, stroke: "#ffffff", strokeWidth: 2 }}
               animationDuration={700}
             />
+            {peak && (
+              <ReferenceDot
+                x={peak.ts_ms}
+                y={peak.students}
+                r={5}
+                fill={AMBER}
+                stroke="#ffffff"
+                strokeWidth={2}
+                label={{
+                  value: `Peak ${peak.students} @ ${msToClock(peak.ts_ms)}`,
+                  position: "top",
+                  fontSize: 11,
+                  fill: AXIS,
+                }}
+              />
+            )}
           </AreaChart>
         </ResponsiveContainer>
       </div>
-      <p className="mt-2 text-xs text-muted-foreground">Shaded bands mark when the teacher is present.</p>
+      <p className="mt-2 text-xs text-muted-foreground">
+        Shaded bands mark when the teacher is present; the amber dot marks peak occupancy.
+      </p>
     </Card>
   );
 }

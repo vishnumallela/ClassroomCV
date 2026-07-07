@@ -1,9 +1,11 @@
 import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
 import { Link, createFileRoute, useNavigate } from "@tanstack/react-router";
 import { Suspense, lazy, useRef, useState } from "react";
+import { BoardSessions } from "@/components/board-sessions";
 import { EventsTable } from "@/components/events-table";
 import { HeatmapCard } from "@/components/heatmap-card";
 import { KpiCards } from "@/components/kpi-cards";
+import { LessonBreakdown } from "@/components/lesson-breakdown";
 import { StatusBadge } from "@/components/status-badge";
 import { TimelineStrip } from "@/components/timeline-strip";
 import { Button } from "@/components/ui/button";
@@ -136,6 +138,7 @@ function VideoDetail() {
               data.tracks.find((t) => t.role === "teacher")?.roleConfidence ?? null
             }
           />
+          <LessonBreakdown analytics={analytics} durationMs={video.durationMs} />
           <TimelineStrip
             durationMs={video.durationMs}
             presenceIntervals={analytics.presenceIntervals}
@@ -152,6 +155,7 @@ function VideoDetail() {
             thumbnailUrl={video.thumbnailUrl ? `${API_URL}${video.thumbnailUrl}` : null}
             aspect={video.width && video.height ? video.width / video.height : 16 / 9}
           />
+          <BoardSessions boardIntervals={analytics.boardIntervals} onSeek={seek} />
           <div>
             <h2 className="mb-3 text-sm font-medium text-muted-foreground">Teacher events</h2>
             <EventsTable events={events} onSeek={seek} />

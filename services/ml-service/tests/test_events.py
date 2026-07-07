@@ -348,3 +348,28 @@ def test_spatial_heatmap_unknown_counts_as_students():
     dbt = {3: [_det(0, 3, x=0.1, y=0.1)]}
     hm = spatial_heatmap(dbt, {3: ("unknown", None)}, grid_w=4, grid_h=4)
     assert sum(hm["students"]) == 1 and sum(hm["teacher"]) == 0
+
+
+# --------------------------------------------------------------------------- #
+# No-door short-gap bridge
+# --------------------------------------------------------------------------- #
+
+
+def test_bridge_short_gaps_merges_brief_and_keeps_long():
+    from app.events import bridge_short_gaps
+
+    # 6s gap (brief) bridges; 20s gap (real absence) stays split.
+    ivs = [[0, 10_000], [16_000, 30_000], [50_000, 60_000]]
+    assert bridge_short_gaps(ivs) == [[0, 30_000], [50_000, 60_000]]
+
+
+def test_derive_no_door_bridges_blind_spot_no_phantom_crossing():
+    # Teacher present 0-10s, 6s blind-spot gap, present 16-58s. With no door,
+    # the brief gap must NOT become an exit+enter and presence must include it.
+    dets = [_det(t, 1, standing=True) for t in range(0, 10_001, 500)]
+    dets += [_det(t, 1, standing=True) for t in range(16_000, 58_001, 500)]
+    _events, analytics = derive(
+        {1: dets}, {1: ("teacher", 0.9)}, duration_ms=60_000, zones=[]
+    )
+    assert analytics["presence_intervals"] == [[0, 58_000]]
+    assert analytics["entries"] == 1 and analytics["exits"] == 0

@@ -51,7 +51,7 @@ export function KpiCards({
     {
       label: "Avg students",
       value: analytics.avgStudents !== null ? analytics.avgStudents.toFixed(1) : "n/a",
-      sub: "present per second",
+      sub: "avg concurrent (per 5s)",
       badge: null,
     },
     {

@@ -1,10 +1,57 @@
 import type { RouterOutputs } from "@classroom/api-contracts";
 import { KIND_LABEL } from "@/components/events-table";
 import { Card } from "@/components/ui/card";
+import { type TeacherState, teacherStateSegments } from "@/lib/analytics";
 import { msToClock } from "@/lib/format";
 
 type Interval = [number, number];
 type VideoEvent = RouterOutputs["videos"]["get"]["events"][number];
+
+const STATE_COLOR: Record<TeacherState, string> = {
+  absent: "bg-zinc-300 dark:bg-zinc-700",
+  circulating: "bg-primary",
+  board: "bg-amber-400",
+};
+const STATE_LABEL: Record<TeacherState, string> = {
+  absent: "Out of room",
+  circulating: "Circulating",
+  board: "At board",
+};
+
+function StateLane({
+  presenceIntervals,
+  boardIntervals,
+  durationMs,
+  onSeek,
+}: {
+  presenceIntervals: Interval[];
+  boardIntervals: Interval[];
+  durationMs: number;
+  onSeek: (ms: number) => void;
+}) {
+  const segments = teacherStateSegments(presenceIntervals, boardIntervals, durationMs);
+  return (
+    <div className="flex items-center gap-3">
+      <span className="w-24 shrink-0 text-xs text-muted-foreground">Teacher state</span>
+      <div className="relative h-3 flex-1 overflow-hidden rounded-full bg-zinc-300 dark:bg-zinc-700">
+        {segments.map((s) => (
+          <button
+            key={`${s.state}-${s.start}`}
+            type="button"
+            title={`${STATE_LABEL[s.state]} · ${msToClock(s.start)}–${msToClock(s.end)}`}
+            aria-label={`${STATE_LABEL[s.state]} at ${msToClock(s.start)}`}
+            className={`absolute inset-y-0 ${STATE_COLOR[s.state]}`}
+            style={{
+              left: `${(s.start / durationMs) * 100}%`,
+              width: `${Math.max(0.3, ((s.end - s.start) / durationMs) * 100)}%`,
+            }}
+            onClick={() => onSeek(s.start)}
+          />
+        ))}
+      </div>
+    </div>
+  );
+}
 
 const TICK_COLOR: Record<string, string> = {
   enter: "bg-emerald-500",
@@ -113,6 +160,12 @@ export function TimelineStrip({
           }}
         />
         <div className="space-y-2">
+          <StateLane
+            presenceIntervals={presenceIntervals}
+            boardIntervals={boardIntervals}
+            durationMs={durationMs}
+            onSeek={onSeek}
+          />
           <Lane
             label="Teacher present"
             intervals={presenceIntervals}
@@ -136,6 +189,14 @@ export function TimelineStrip({
             left: `calc(${LANE_OFFSET} + (100% - (${LANE_OFFSET})) * ${playheadPct / 100})`,
           }}
         />
+      </div>
+      <div className="mt-3 flex flex-wrap gap-x-4 gap-y-1 pl-[calc(6rem+0.75rem)] text-xs text-muted-foreground">
+        {(["board", "circulating", "absent"] as const).map((s) => (
+          <span key={s} className="flex items-center gap-1.5">
+            <span className={`size-2 rounded-full ${STATE_COLOR[s]}`} />
+            {STATE_LABEL[s]}
+          </span>
+        ))}
       </div>
     </Card>
   );

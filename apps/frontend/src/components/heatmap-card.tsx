@@ -55,9 +55,7 @@ export function HeatmapCard({
   // A mode with no samples (e.g. no teacher detected) should not be selectable
   // as the only view; fall back to whichever channel has data.
   const effectiveMode: Mode =
-    mode === "teacher" && totals.teacher === 0 && totals.students > 0
-      ? "students"
-      : mode;
+    mode === "teacher" && totals.teacher === 0 && totals.students > 0 ? "students" : mode;
 
   useEffect(() => {
     const canvas = canvasRef.current;
@@ -94,11 +92,7 @@ export function HeatmapCard({
   }, [hm, effectiveMode]);
 
   if (!hm || hm.grid_w === 0 || (totals.teacher === 0 && totals.students === 0)) {
-    return (
-      <Card className="p-6 text-sm text-muted-foreground">
-        No movement data to map yet.
-      </Card>
-    );
+    return <Card className="p-6 text-sm text-muted-foreground">No movement data to map yet.</Card>;
   }
 
   const renderH = Math.round(RENDER_W / (aspect || 16 / 9));
@@ -134,10 +128,7 @@ export function HeatmapCard({
         </div>
       </div>
 
-      <div
-        className="relative w-full bg-muted"
-        style={{ aspectRatio: String(aspect || 16 / 9) }}
-      >
+      <div className="relative w-full bg-muted" style={{ aspectRatio: String(aspect || 16 / 9) }}>
         {thumbnailUrl && (
           <img
             src={thumbnailUrl}

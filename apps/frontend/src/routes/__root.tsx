@@ -27,7 +27,9 @@ function RootLayout() {
               to={to}
               activeOptions={{ exact }}
               className="flex items-center gap-2.5 rounded-md px-3 py-2 text-sm transition-colors"
-              inactiveProps={{ className: "text-muted-foreground hover:bg-accent hover:text-foreground" }}
+              inactiveProps={{
+                className: "text-muted-foreground hover:bg-accent hover:text-foreground",
+              }}
               activeProps={{ className: "bg-accent font-medium text-foreground" }}
             >
               <Icon className="size-4" />

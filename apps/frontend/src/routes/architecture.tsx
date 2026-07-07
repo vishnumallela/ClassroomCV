@@ -119,14 +119,14 @@ function Architecture() {
           <p className="text-sm leading-relaxed">
             The raw per-frame detections land in a TimescaleDB hypertable. A long lecture produces
             hundreds of thousands of rows, and a live camera would produce them forever, so the
-            storage follows the standard video analytics split into three tiers. Raw detections
-            are the hot tier: a ring buffer that gets compressed after a day and dropped after a
-            week, enough to audit and re-derive recent footage. Simplified track paths and sparse
-            keyframe boxes are the permanent overlay tier, a few percent of the raw size, which
-            keeps playback overlays working after the raw rows age out. Events, track summaries,
-            and per video analytics are the permanent aggregate tier, kept forever at negligible
-            size. Everything the dashboard shows lives in the two permanent tiers, so retention
-            never erases a number anyone can see.
+            storage follows the standard video analytics split into three tiers. Raw detections are
+            the hot tier: a ring buffer that gets compressed after a day and dropped after a week,
+            enough to audit and re-derive recent footage. Simplified track paths and sparse keyframe
+            boxes are the permanent overlay tier, a few percent of the raw size, which keeps
+            playback overlays working after the raw rows age out. Events, track summaries, and per
+            video analytics are the permanent aggregate tier, kept forever at negligible size.
+            Everything the dashboard shows lives in the two permanent tiers, so retention never
+            erases a number anyone can see.
           </p>
         </Card>
       </Section>
