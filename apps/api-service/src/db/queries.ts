@@ -236,6 +236,7 @@ export async function replaceDerived(
       boardIntervals: a.board_intervals ?? [],
       entryExit: a.entry_exit ?? [],
       occupancy: a.occupancy ?? [],
+      heatmap: a.heatmap ?? { grid_w: 0, grid_h: 0, teacher: [], students: [] },
       computedAt: new Date(),
     });
 

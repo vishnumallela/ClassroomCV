@@ -327,6 +327,48 @@ def occupancy_buckets(
 
 
 # --------------------------------------------------------------------------- #
+# Spatial heatmap
+# --------------------------------------------------------------------------- #
+
+HEATMAP_GRID_W = 32
+HEATMAP_GRID_H = 18  # 16:9, matches the CCTV aspect
+
+
+def spatial_heatmap(
+    dets_by_track: dict[int, list[Detection]],
+    roles_map: dict[int, tuple[str, Optional[float]]],
+    grid_w: int = HEATMAP_GRID_W,
+    grid_h: int = HEATMAP_GRID_H,
+) -> dict:
+    """Row-major dwell histograms of bbox centers, split teacher vs students.
+
+    Each detection drops one sample into the grid cell its bbox center falls
+    in; sampled at a fixed rate, a cell's count is proportional to time spent
+    there, so the teacher grid traces her teaching path (board, aisles, the
+    desks she visits) and the students grid shows seating density. Non-teacher
+    identities (students AND unknowns) go in the students grid, matching
+    occupancy_buckets.
+    """
+    teacher = [0] * (grid_w * grid_h)
+    students = [0] * (grid_w * grid_h)
+    for track_no, dets in dets_by_track.items():
+        role = roles_map.get(track_no, ("unknown", None))[0]
+        grid = teacher if role == "teacher" else students
+        for d in dets:
+            cx = d.bbox["x"] + d.bbox["w"] / 2.0
+            cy = d.bbox["y"] + d.bbox["h"] / 2.0
+            gx = min(grid_w - 1, max(0, int(cx * grid_w)))
+            gy = min(grid_h - 1, max(0, int(cy * grid_h)))
+            grid[gy * grid_w + gx] += 1
+    return {
+        "grid_w": grid_w,
+        "grid_h": grid_h,
+        "teacher": teacher,
+        "students": students,
+    }
+
+
+# --------------------------------------------------------------------------- #
 # Full derivation
 # --------------------------------------------------------------------------- #
 
@@ -396,6 +438,7 @@ def derive(
     counts = [b["students"] for b in occupancy]
     avg_students = round(sum(counts) / len(counts), 2) if counts else 0.0
     max_students = max(counts) if counts else 0
+    heatmap = spatial_heatmap(dets_by_track, roles_map)
 
     events.sort(key=lambda e: (e["video_ts_ms"], e["kind"]))
 
@@ -410,5 +453,6 @@ def derive(
         "occupancy": occupancy,
         "avg_students": avg_students,
         "max_students": max_students,
+        "heatmap": heatmap,
     }
     return events, analytics

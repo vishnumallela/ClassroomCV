@@ -1,0 +1,1 @@
+ALTER TABLE "video_analytics" ADD COLUMN "heatmap" jsonb DEFAULT '{"grid_w":0,"grid_h":0,"teacher":[],"students":[]}'::jsonb NOT NULL;

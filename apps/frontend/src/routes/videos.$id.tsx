@@ -2,6 +2,7 @@ import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
 import { Link, createFileRoute, useNavigate } from "@tanstack/react-router";
 import { Suspense, lazy, useRef, useState } from "react";
 import { EventsTable } from "@/components/events-table";
+import { HeatmapCard } from "@/components/heatmap-card";
 import { KpiCards } from "@/components/kpi-cards";
 import { StatusBadge } from "@/components/status-badge";
 import { TimelineStrip } from "@/components/timeline-strip";
@@ -128,7 +129,13 @@ function VideoDetail() {
         </Card>
       ) : analytics ? (
         <div className="space-y-6">
-          <KpiCards analytics={analytics} durationMs={video.durationMs} />
+          <KpiCards
+            analytics={analytics}
+            durationMs={video.durationMs}
+            teacherConfidence={
+              data.tracks.find((t) => t.role === "teacher")?.roleConfidence ?? null
+            }
+          />
           <TimelineStrip
             durationMs={video.durationMs}
             presenceIntervals={analytics.presenceIntervals}
@@ -140,6 +147,11 @@ function VideoDetail() {
           <Suspense fallback={<Skeleton className="h-64 w-full rounded-xl" />}>
             <OccupancyChart analytics={analytics} durationMs={video.durationMs} onSeek={seek} />
           </Suspense>
+          <HeatmapCard
+            analytics={analytics}
+            thumbnailUrl={video.thumbnailUrl ? `${API_URL}${video.thumbnailUrl}` : null}
+            aspect={video.width && video.height ? video.width / video.height : 16 / 9}
+          />
           <div>
             <h2 className="mb-3 text-sm font-medium text-muted-foreground">Teacher events</h2>
             <EventsTable events={events} onSeek={seek} />

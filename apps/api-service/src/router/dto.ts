@@ -45,6 +45,7 @@ export function toDetailDto(d: Detail) {
           boardIntervals: d.analytics.boardIntervals,
           entryExit: d.analytics.entryExit,
           occupancy: d.analytics.occupancy,
+          heatmap: d.analytics.heatmap,
         }
       : null,
   };

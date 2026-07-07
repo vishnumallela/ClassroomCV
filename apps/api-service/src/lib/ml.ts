@@ -40,6 +40,7 @@ export interface AnalysisResultAnalytics {
   occupancy: { ts_ms: number; students: number; teacher: boolean }[];
   avg_students: number | null;
   max_students: number | null;
+  heatmap: { grid_w: number; grid_h: number; teacher: number[]; students: number[] };
 }
 
 export interface AnalysisResult {

@@ -9,6 +9,7 @@ from app.events import (
     entry_exit_from_intervals,
     occupancy_buckets,
     presence_intervals,
+    spatial_heatmap,
 )
 from app.models import Detection
 
@@ -196,6 +197,7 @@ _ANALYTICS_KEYS = {
     "occupancy",
     "avg_students",
     "max_students",
+    "heatmap",
 }
 
 
@@ -318,3 +320,31 @@ def test_no_bridge_when_gap_too_long():
     dets += [_det(ts, 1, x=0.5) for ts in range(30_000, 40_001, 500)]
     intervals = [[0, 10_000], [30_000, 40_000]]  # 20s gap > bridge window
     assert bridge_offscreen_gaps(intervals, dets, [DOOR]) == [[0, 10_000], [30_000, 40_000]]
+
+
+# --------------------------------------------------------------------------- #
+# Spatial heatmap
+# --------------------------------------------------------------------------- #
+
+
+def test_spatial_heatmap_splits_teacher_and_students_by_cell():
+    # bbox x/y is the top-left corner, so a w=0.1,h=0.3 box at (0.5,0.5) centers
+    # at (0.55, 0.65) -> col 5, row 6; the corner student clamps to (9, 9).
+    dbt = {
+        1: [_det(ts, 1, x=0.5, y=0.5) for ts in range(0, 5_001, 500)],
+        2: [_det(ts, 2, x=0.95, y=0.95) for ts in range(0, 5_001, 500)],
+    }
+    roles = {1: ("teacher", 0.9), 2: ("student", 0.5)}
+    hm = spatial_heatmap(dbt, roles, grid_w=10, grid_h=10)
+    assert hm["grid_w"] == 10 and hm["grid_h"] == 10
+    assert len(hm["teacher"]) == 100 and len(hm["students"]) == 100
+    assert hm["teacher"][6 * 10 + 5] == 11 and sum(hm["teacher"]) == 11
+    assert hm["students"][9 * 10 + 9] == 11 and sum(hm["students"]) == 11
+    # channels are disjoint: no teacher mass in the student cell.
+    assert hm["teacher"][9 * 10 + 9] == 0
+
+
+def test_spatial_heatmap_unknown_counts_as_students():
+    dbt = {3: [_det(0, 3, x=0.1, y=0.1)]}
+    hm = spatial_heatmap(dbt, {3: ("unknown", None)}, grid_w=4, grid_h=4)
+    assert sum(hm["students"]) == 1 and sum(hm["teacher"]) == 0

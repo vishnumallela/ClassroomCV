@@ -155,6 +155,20 @@ class OccupancyOut(BaseModel):
     teacher: bool
 
 
+class HeatmapOut(BaseModel):
+    """Spatial dwell histogram over a grid_w x grid_h grid of the frame.
+
+    teacher / students are row-major flattened per-cell sample counts (grid_h
+    rows, grid_w cols); at a fixed sample rate a cell's count is proportional
+    to time spent there. Empty lists when no teacher / no detections.
+    """
+
+    grid_w: int
+    grid_h: int
+    teacher: list[int]
+    students: list[int]
+
+
 class AnalyticsOut(BaseModel):
     teacher_present_ms: int
     teacher_board_ms: Optional[int]
@@ -166,6 +180,7 @@ class AnalyticsOut(BaseModel):
     occupancy: list[OccupancyOut]
     avg_students: float
     max_students: int
+    heatmap: HeatmapOut
 
 
 class AnalysisResult(BaseModel):

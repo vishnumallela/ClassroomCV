@@ -6,6 +6,9 @@ export type ZoneMeta = { auto?: boolean; confidence?: number; method?: string };
 export type OccupancyPoint = { ts_ms: number; students: number; teacher: boolean };
 export type EntryExitItem = { kind: string; ts_ms: number };
 export type Interval = [number, number];
+// Spatial dwell histograms (row-major grid_h x grid_w per-cell sample counts).
+export type Heatmap = { grid_w: number; grid_h: number; teacher: number[]; students: number[] };
+const EMPTY_HEATMAP: Heatmap = { grid_w: 0, grid_h: 0, teacher: [], students: [] };
 
 export const videos = pgTable("videos", {
   id: uuid("id").primaryKey().defaultRandom(),
@@ -87,5 +90,6 @@ export const videoAnalytics = pgTable("video_analytics", {
   boardIntervals: jsonb("board_intervals").$type<Interval[]>().notNull().default([]),
   entryExit: jsonb("entry_exit").$type<EntryExitItem[]>().notNull().default([]),
   occupancy: jsonb("occupancy").$type<OccupancyPoint[]>().notNull().default([]),
+  heatmap: jsonb("heatmap").$type<Heatmap>().notNull().default(EMPTY_HEATMAP),
   computedAt: timestamp("computed_at", { withTimezone: true }).defaultNow(),
 });
