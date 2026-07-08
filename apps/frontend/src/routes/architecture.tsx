@@ -1,566 +1,375 @@
 import { createFileRoute } from "@tanstack/react-router";
-import {
-  Ban,
-  Boxes,
-  Camera,
-  Fingerprint,
-  Footprints,
-  Layers,
-  MapPin,
-  Ruler,
-  ScanFace,
-  Scale,
-  Sparkles,
-  Timer,
-  UserSearch,
-} from "lucide-react";
 import type { CSSProperties } from "react";
-import { FlowDiagram } from "@/components/flow-diagram";
-import { LuminaryMark } from "@/components/luminary-logo";
 import { Card } from "@/components/ui/card";
 
 export const Route = createFileRoute("/architecture")({ component: Architecture });
 
 // --------------------------------------------------------------------------- //
-// The models. Each is explained plainly first, then named and specified, so a
-// curious head teacher and a curious engineer both leave satisfied.
+// Technical reference for the ML pipeline. Values are the real constants from
+// services/ml-service (detector.py, merge.py, roles.py, events.py, quality.py)
+// and apps/api-service/drizzle. Terse by intent: this is a spec, not a story.
 // --------------------------------------------------------------------------- //
+
+const SUMMARY: [string, string][] = [
+  ["Input", "classroom video (H.264/H.265, any length), + optional board/door zones"],
+  [
+    "Output",
+    "teacher presence / board / entry-exit intervals, 5 s occupancy series, 32x18 dwell heatmap, per-lesson analytics, data-quality report",
+  ],
+  [
+    "Sampling",
+    "~5 fps (stride = round(native_fps / 5)); full frame rate is redundant for behaviour",
+  ],
+  ["Compute", "NVIDIA GPU (CUDA fp16 / TensorRT); MPS for dev; one durable worker per video"],
+  ["Privacy", "no facial recognition; skeleton + ephemeral re-ID only; aggregate persistence"],
+];
+
+// Ordered data-flow. Each stage consumes the previous stage's output.
+const PIPELINE: { n: string; stage: string; module: string; io: string }[] = [
+  {
+    n: "0",
+    stage: "Decode + sample",
+    module: "detector.iter_frames",
+    io: "video file -> (ts_ms, BGR frame) at ~5 fps",
+  },
+  {
+    n: "1",
+    stage: "Detect + pose",
+    module: "YOLO26-pose",
+    io: "frame -> N x {bbox, conf, 17 keypoints}",
+  },
+  { n: "2", stage: "Track", module: "BoT-SORT", io: "per-frame boxes -> boxes + raw_track_id" },
+  {
+    n: "3",
+    stage: "Per-detection features",
+    module: "detector._extract_frame",
+    io: "box + keypoints -> standing, back_to_camera, torso HSV hist, CLIP crop",
+  },
+  {
+    n: "4",
+    stage: "Embed",
+    module: "detector._embed_tracks (CLIP ViT-B/32)",
+    io: "crops -> 512-d L2-normalised median embedding per raw track",
+  },
+  {
+    n: "5",
+    stage: "Merge (re-ID)",
+    module: "merge.merge_tracks",
+    io: "raw tracks + hists + embeds -> raw_id -> identity map (1..N)",
+  },
+  {
+    n: "6",
+    stage: "Teacher-chain stitch",
+    module: "teacher_chain.stitch_teacher",
+    io: "reclaim teacher spans stolen by student ids; evict bad merges",
+  },
+  {
+    n: "7",
+    stage: "Role assignment",
+    module: "roles.assign_roles",
+    io: "identity features -> teacher | student | unknown + confidence",
+  },
+  {
+    n: "8",
+    stage: "Event derivation",
+    module: "events.derive",
+    io: "roles + zones -> presence / board / entry-exit / occupancy / heatmap",
+  },
+  {
+    n: "9",
+    stage: "Data quality",
+    module: "quality.assess",
+    io: "detections + roles -> coverage, fragmentation, concurrent count, tiers",
+  },
+  {
+    n: "10",
+    stage: "Persist",
+    module: "db.replace_detections + API",
+    io: "TimescaleDB hypertable (tiered) + typed analytics tables",
+  },
+];
+
 const MODELS = [
   {
-    icon: Camera,
-    name: "The Spotter",
-    grownup: "YOLO26-pose",
-    plain:
-      "A single neural network that looks at one still frame and, in one pass, draws a tight box around every person and places 17 labelled dots on each body: eyes, nose, shoulders, elbows, wrists, hips, knees, ankles.",
-    does: "It answers two questions per frame at once: where is each person, and what shape is their body making. The 17 dots (a skeleton) are what later let the system tell a standing adult apart from a seated child without ever looking at a face.",
-    detail:
-      "Ultralytics YOLO26-pose, the latest generation (NMS-free, up to +7.2 keypoint AP over YOLO11). It runs at 1280 to 1536 px so a 40 px back-row head survives the downscale, in half precision. It is device-aware: the large yolo26x variant on a production GPU (exported to TensorRT for roughly a 5x fp16 speedup), a lighter yolo26m for laptop development. A confidence floor and a 100-detection cap per frame keep the far rows in without flooding the tracker.",
+    name: "YOLO26-pose",
+    family: "Detection + 2D pose, single-stage",
+    task: "Per frame, locate every person and estimate their 17-keypoint skeleton in one forward pass.",
+    mechanism:
+      "YOLO family: whole-image single pass, no region proposals. YOLO26 is NMS-free (one-to-one head, no duplicate-suppression step) and uses RLE keypoint regression for tighter joint localisation. +up to 7.2 pose AP over YOLO11.",
+    solves:
+      "The only stage that reads raw pixels. The 17 keypoints are load-bearing: hip-above-knee geometry and box aspect drive the standing/seated signal, so teacher vs student is decided with no face and no name.",
+    input: "1 BGR frame, 2560x1440",
+    output: "<=100 detections x { bbox[x,y,w,h] norm, conf, keypoints[17][x,y,conf] }",
+    params: "imgsz 1280-1536 · fp16 · conf>=0.1 · max_det 100 · yolo26x (GPU) / yolo26m (dev)",
   },
   {
-    icon: Boxes,
-    name: "The Tracker",
-    grownup: "BoT-SORT",
-    plain:
-      "A short-term memory. In every new frame it compares the fresh boxes to the ones from the previous frame and decides which box is the same person continuing to move, then keeps a numbered sticker on them.",
-    does: "It turns thousands of disconnected boxes into one continuous path per person. Without it there is no notion of a person over time, only a blizzard of unrelated rectangles.",
-    detail:
-      "A Kalman motion filter predicts where each person moves next, and boxes are matched to predictions by overlap (IoU). Because the camera is bolted to the wall, camera-motion compensation is switched off, and a lost track is held for several seconds so a person who ducks behind a desk is re-attached rather than renumbered.",
+    name: "BoT-SORT",
+    family: "Multi-object tracking (tracking-by-detection)",
+    task: "Assign a temporally stable id to each person by linking boxes across frames. Never reads pixels.",
+    mechanism:
+      "Kalman filter predicts each track's next state from motion; detections are matched to predictions by IoU via the Hungarian algorithm; a ByteTrack second pass associates low-confidence boxes. GMC (camera-motion comp.) disabled: static camera.",
+    solves:
+      "Same-person-over-time. Every temporal metric (presence, movement, entries, board time) needs a continuous trajectory, not disconnected boxes.",
+    input: "per-frame boxes",
+    output: "boxes + raw_track_id (trajectories)",
+    params:
+      "gmc none · track_buffer 60 (~12 s) · new_track_thresh 0.40 · match_thresh 0.8 · fuse_score false",
   },
   {
-    icon: UserSearch,
-    name: "The Reuniter",
-    grownup: "CLIP embedding + seat anchors",
-    plain:
-      "A memory for people who disappear and come back. When someone is hidden for a while or walks out and returns, the Tracker gives them a brand new number. The Reuniter decides which of those pieces are actually the same person and stitches them back into one identity.",
-    does: "It stops a teacher who steps into the corridor and returns from being counted as two people (which would halve her measured time), and stops a student who leans out of view from being double counted.",
-    detail:
-      "Every fragment pair is scored on appearance (a CLIP image embedding plus an HSV torso-colour histogram) and, decisively for a room in identical uniforms where appearance is nearly useless, on spatial continuity and a seat anchor: two stationary fragments at different desks are refused outright, no matter how similar their shirts, because a seat is the one thing a uniform cannot fake. These appearance vectors are ephemeral: they link fragments within one lesson and are never stored as a lasting identity. (Prior art points to a dedicated person-re-identification backbone here as the next upgrade.)",
+    name: "CLIP ViT-B/32 + HSV hist + seat anchors",
+    family: "Re-identification (appearance + geometry scoring)",
+    task: "Merge track fragments (from occlusion / exit) back into stable identities.",
+    mechanism:
+      "Per candidate pair: score = 0.35 appearance + 0.25 spatial + 0.20 size + 0.20 temporal. appearance = 0.5 cos(CLIP) + 0.5 HSV-hist corr. Hard vetoes: cos < 0.35 => different; two seated fragments (centre range < 0.02) with anchors > 0.10 apart => different. Greedy merge above 0.55.",
+    solves:
+      "Fragmentation. Under identical uniforms appearance is near-degenerate, so the discriminator is location: a seat is the one cue a uniform cannot fake. CLIP's high-value roles are the veto and re-linking the distinctly-dressed teacher. Embeddings are ephemeral (single lesson).",
+    input: "raw tracks + <=10 upper-body crops each + torso hists",
+    output: "raw_track_id -> identity (1..N by first appearance)",
+    params: "MERGE_THRESHOLD 0.55 · EMBED_VETO_COS 0.35 · MAX_GAP 10 min · overlap tol 1 s",
   },
   {
-    icon: ScanFace,
-    name: "The Zone Finder",
-    grownup: "YOLO-World + SAM 2",
-    plain:
-      "The part that finds the board and the door. One model is told, in plain English, to find a chalkboard, and points roughly at it. A second model traces its exact outline. A small rulebook then checks the shape is really a board.",
-    does: "It gives the room a front (the board) and its exits (the doors), so standing at the front becomes measured teaching time and a disappearance near a door becomes a confirmed exit.",
-    detail:
-      "YOLO-World does open-vocabulary detection from a text prompt, SAM 2 segments each candidate into a precise mask, and a geometric score (wide, high on the wall, rectangular, flat-coloured for a board; tall and narrow for a door) picks the winner and rejects false positives. An operator can redraw either zone by hand at any time.",
+    name: "YOLO-World + SAM 2",
+    family: "Open-vocabulary detection + promptable segmentation",
+    task: "Auto-detect the board and door polygons (run once, up front).",
+    mechanism:
+      "YOLO-World fuses a CLIP text encoder with a YOLO detector: a prompt ('chalkboard', 'classroom door') localises regions with no board-specific training. SAM 2 segments each region to a pixel mask. A geometric score (aspect, wall height, rectangularity) picks the winner; SAM 2 grid-probe fallback when the prompt finds nothing.",
+    solves:
+      "Turns 'standing at the front' into board time and 'vanished near a door' into a confirmed exit. Operator can redraw either zone.",
+    input: "representative frame + text prompts",
+    output: "board / door polygons (normalised points)",
+    params: "score threshold 0.25 · board expand 0.12 · door window 2 s",
   },
 ];
 
-// --------------------------------------------------------------------------- //
-// The four behavioural signals that separate the teacher from the students.
-// Values and weights are the real ones from services/ml-service/app/roles.py.
-// --------------------------------------------------------------------------- //
-const SIGNALS = [
+// Per-detection features (detector.py). Everything downstream is derived from these.
+const FEATURES: [string, string][] = [
+  [
+    "standing",
+    "bbox aspect h/w > 1.6, OR hip-above-knee keypoints (kpt conf > 0.4, box h >= 90/1440); smoothed by a 5-sample majority vote before use",
+  ],
+  ["back_to_camera", "face keypoints (nose/eyes) conf < 0.3 while both shoulders conf > 0.5"],
+  [
+    "torso HSV histogram",
+    "cv2.calcHist over (H,S), 30x32 bins, ranges [0,180]x[0,256], L1-normalised; region from torso keypoints or bbox 0.2-0.8 w x 0.15-0.6 h",
+  ],
+  ["CLIP crop", "upper 60% of bbox, downscaled to <=224 px, <=10 samples/track >=1 s apart"],
+];
+
+// Teacher/student signals (roles.py). Weighted, then an outlier decision rule.
+const SIGNALS: { label: string; weight: string; def: string; teacher: string; student: string }[] =
+  [
+    {
+      label: "standing_ratio",
+      weight: "0.30",
+      def: "fraction of samples standing (see feature above)",
+      teacher: "0.74",
+      student: "0.05",
+    },
+    {
+      label: "movement",
+      weight: "0.25",
+      def: "max(x_range, y_range) of bbox-centre trajectory / 0.40, clamped to 1",
+      teacher: "0.98",
+      student: "0.04",
+    },
+    {
+      label: "presence_ratio",
+      weight: "0.25",
+      def: "(last_ms - first_ms) / duration_ms",
+      teacher: "0.98",
+      student: "0.90",
+    },
+    {
+      label: "board_proximity",
+      weight: "0.20",
+      def: "fraction standing, centre in board x-range, box bottom below board floor; dropped + re-weighted if no board zone",
+      teacher: "0.19",
+      student: "0.00",
+    },
+  ];
+
+const GATES: { t: string; rule: string; d: string }[] = [
   {
-    icon: Footprints,
-    label: "Stands up",
-    weight: "0.30",
-    measures: "The fraction of the lesson a person is standing.",
-    how: "A person counts as standing when their box is taller than it is wide past a ratio of 1.6, or when the skeleton shows the hips clearly above the knees. Because a single frame can flicker, the flag is smoothed with a 5-sample majority vote before it is counted.",
-    teacher: "0.74",
-    student: "0.05",
+    t: "min span",
+    rule: "span >= 60 s",
+    d: "short fragments / passers-by cannot be teacher (scaled down for clips < 3 min)",
   },
   {
-    icon: MapPin,
-    label: "Roams the room",
-    weight: "0.25",
-    measures: "How far across the room a person travels over the whole lesson.",
-    how: "Measured as the spatial extent of the path (the width or height of the region the person's centre visits), not the wandering distance, so a seated child fidgeting in place scores near zero. It is normalised so covering 40 percent of the frame already saturates the signal.",
-    teacher: "0.98",
-    student: "0.04",
+    t: "not frame-edge",
+    rule: "0.03 < mean cx,cy < 0.97",
+    d: "clipped edge boxes always read as tall/standing",
   },
   {
-    icon: Timer,
-    label: "Is present throughout",
-    weight: "0.25",
-    measures: "How much of the lesson the person is on camera at all.",
-    how: "The span from a person's first sighting to their last, divided by the lesson length. A teacher is there start to finish; most students arrive and leave in a narrower window, and passers-by barely register.",
-    teacher: "0.98",
-    student: "0.90",
-  },
-  {
-    icon: Scale,
-    label: "Works at the board",
-    weight: "0.20",
-    measures: "The fraction of the lesson spent standing at the front of the room.",
-    how: "A sample counts only when the person is standing, their centre sits inside the board's horizontal span, and the bottom of their box reaches the floor line of the board (so a seated child in the middle of the room cannot score). If no board zone exists, this signal is dropped and the other three are re-weighted.",
-    teacher: "0.19",
-    student: "0.00",
+    t: "not tiny",
+    rule: "mean_area >= 0.3 x median",
+    d: "a distant back-row head cannot outscore the adult",
   },
 ];
 
-// --------------------------------------------------------------------------- //
-// The pipeline stages, each explained in real depth.
-// --------------------------------------------------------------------------- //
-const STAGES = [
+const EVENTS: [string, string][] = [
+  [
+    "presence",
+    "union of teacher detection timestamps; split at gaps >= 5 s; off-camera gaps <= 12 s away from any door are bridged",
+  ],
+  [
+    "entries / exits",
+    "presence-interval edges where any sample within a 2 s window is inside a door zone (expand 0.15); video-start counts as enter, final interval into last 5 s produces no exit",
+  ],
+  [
+    "board",
+    "hysteresis state machine: 2 s sustained ON to open, 3 s OFF to close; a >= 5 s sampling gap hard-closes; tolerates single-frame flicker (budget 600 ms)",
+  ],
+  ["occupancy", "distinct non-teacher track_no per 5 s bucket -> avg_students, max_students"],
+  ["heatmap", "32x18 grid of bbox-centre dwell counts, teacher vs student"],
+];
+
+const QUALITY: [string, string][] = [
+  [
+    "coverage",
+    "occupied 5 s buckets / span buckets over [first, last] detection; tiers >=0.9 / >=0.7",
+  ],
+  ["fragmentation", "raw_tracks / identities; tiers <=2 (clean) / <=4 (fair) / else low"],
+  [
+    "concurrent count",
+    "p95 of non-teacher boxes per frame; re-id-INDEPENDENT cross-check on max_students (one body = one box per frame)",
+  ],
+  [
+    "confidence tiers",
+    "per dimension (coverage, tracking, occupancy, teacher) + overall = weakest link",
+  ],
+];
+
+const STORAGE: { tier: string; contents: string; policy: string }[] = [
   {
-    title: "Sample the frames",
-    what: "ffmpeg reads the recording and pulls out roughly five frames every second instead of the full thirty.",
-    why: "Teaching behaviour changes over seconds, not milliseconds, so five frames a second captures every entrance, every walk to the board, and every posture change while doing one sixth of the work. That ratio is exactly what makes analysing an eight hour day across many rooms affordable rather than ruinous.",
+    tier: "Hot",
+    contents: "raw per-frame detection_events (TimescaleDB hypertable, wall-clock ts, ~1 h chunks)",
+    policy: "compress after 24 h, drop after 7 days",
   },
   {
-    title: "Find every person and their pose",
-    what: "The Spotter runs on each sampled frame and returns, for every person, a bounding box plus the 17 body keypoints.",
-    why: "This is the only stage that looks at raw pixels. Everything downstream reasons about boxes and skeletons, never faces. Running at high resolution here is the single biggest quality lever in the whole system, because a back-row student who is only 40 pixels tall is either seen now or lost forever.",
+    tier: "Overlay",
+    contents:
+      "per-track RDP centre polyline (eps 0.005) + bbox keyframes every 2 s, in tracks.meta",
+    policy: "permanent; ~2% of raw; serves playback after hot rows age out",
   },
   {
-    title: "Follow each person through time",
-    what: "The Tracker links the per-frame boxes into one continuous trajectory per person and gives each a stable id.",
-    why: "A metric like time at the board only means something for a person you can follow. This stage converts tens of thousands of independent detections into a few dozen moving paths, which is the object every later stage actually works on.",
-  },
-  {
-    title: "Reunite the broken pieces",
-    what: "The Reuniter merges the fragments that occlusion and exits inevitably create back into stable identities, using position and a seat anchor as much as appearance.",
-    why: "Trackers break a person into new ids the moment they are hidden or leave the frame. Left alone, that fragmentation would split one teacher into a dozen identities and inflate the student count. This stage is where a room full of identical uniforms is handled honestly: it leans on where people are, not what colour they wear.",
-  },
-  {
-    title: "Decide who is the teacher",
-    what: "Each stable identity is scored on four behaviours, and the one clear behavioural outlier is labelled the teacher. Everyone else is a student, and if nobody stands out, nobody is labelled.",
-    why: "The teacher never wears a badge the system can read, so identity is inferred from conduct: standing, roaming, being present throughout, and working at the board. The full rule is spelled out in the next section, because it is the heart of the product and the place a school leader most deserves to see the workings.",
-  },
-  {
-    title: "Turn movement into measured events",
-    what: "The teacher's trajectory is crossed with the zones to produce the final numbers: presence intervals, entries and exits at the door, and time at the board, opened and closed with hysteresis so a single occluded frame never fabricates an event.",
-    why: "This is where paths become the figures on the dashboard. Every rule here exists to stop a tracking hiccup from becoming a false story, which is the difference between a number a principal can act on and one they cannot.",
+    tier: "Aggregate",
+    contents: "events, track summaries, video_analytics, 1-min occupancy continuous aggregate",
+    policy: "permanent; negligible size; everything the dashboard reads",
   },
 ];
 
-const NOT_DOING = [
-  "Recognise faces or identify any student by name",
-  "Infer emotion, affect, attention, or engagement (video cannot validly measure these, and inferring them in schools is restricted under the EU AI Act)",
-  "Treat head or body orientation as gaze or a state of mind; it is only an orientation-toward-the-board proxy",
-  "Produce a per-student attendance register or a longitudinal per-child profile",
-  "Claim proximity or distance in metres without a one-time camera calibration",
-  "Persist a student's appearance fingerprint; re-identification is ephemeral, within a single lesson only",
+const BOUNDARIES: [string, string][] = [
+  [
+    "Time-on-task via interval sampling; in-seat vs out-of-seat; presence / head-count",
+    "Student engagement / attention / focus / motivation as a validated construct or mental state (restricted in EU education under AI Act Art. 5(1)(f))",
+  ],
+  [
+    "Gross movement, teacher circulation, dwell spread, image-plane coverage",
+    "Emotion / affect / mood from face or body (no validated mapping; Barrett et al. 2019)",
+  ],
+  [
+    "Standing vs seated posture with detector confidence attached",
+    "Head/body orientation as gaze or attention (orientation-toward-board proxy only)",
+  ],
+  [
+    "Detection/tracking accuracy (mAP, HOTA, quality tiers)",
+    "Demographic fairness for per-individual scoring (no subgroup validation)",
+  ],
+  [
+    "Aggregate, zone-level, teacher-facing reflection; ephemeral within-session re-ID",
+    "Per-student attendance register, longitudinal per-child profile, or persisted appearance biometric",
+  ],
+  [
+    "Proximity / dwell in metres AFTER a one-time camera homography, with error bars",
+    "Pixel proximity as comparable across cameras/rooms; distance in metres without calibration",
+  ],
 ];
 
-const STACK = [
-  { layer: "Frontend", tech: "Vite, TanStack Router and Query, shadcn, Tailwind" },
-  { layer: "API", tech: "Bun, Hono, oRPC, Drizzle" },
-  { layer: "Queue", tech: "BullMQ on Redis, with a live job dashboard" },
-  { layer: "ML service", tech: "FastAPI, Ultralytics YOLO26-pose, SAM 2, CLIP, ffmpeg" },
-  { layer: "Database", tech: "TimescaleDB, a time-series Postgres for the detection firehose" },
+const STACK: [string, string][] = [
+  ["Frontend", "Vite, TanStack Router + Query, shadcn, Tailwind"],
+  ["API", "Bun, Hono, oRPC, Drizzle"],
+  ["Queue", "BullMQ on Redis"],
+  ["ML service", "FastAPI, Ultralytics YOLO26-pose, BoT-SORT, CLIP, SAM 2, YOLO-World, ffmpeg"],
+  ["Store", "TimescaleDB (hypertable + continuous aggregates + compression/retention)"],
 ];
 
 function Section({ title, children }: { title: string; children: React.ReactNode }) {
   return (
-    <section className="reveal space-y-5">
-      <h2 className="font-display text-2xl font-semibold tracking-tight">{title}</h2>
+    <section className="reveal space-y-4">
+      <h2 className="font-display text-xl font-semibold tracking-tight">{title}</h2>
       {children}
     </section>
   );
 }
 
-function Mono({ children }: { children: React.ReactNode }) {
+// Two-column key/value spec table.
+function KV({ rows, keyClass = "w-44" }: { rows: [string, string][]; keyClass?: string }) {
   return (
-    <code className="rounded bg-muted px-1.5 py-0.5 font-mono text-[0.82em] text-foreground">
-      {children}
-    </code>
+    <Card className="overflow-hidden">
+      <div className="overflow-x-auto">
+        <table className="w-full text-sm">
+          <tbody className="divide-y divide-border">
+            {rows.map(([k, v]) => (
+              <tr key={k} className="align-top">
+                <td className={`${keyClass} px-4 py-2.5 font-mono text-[0.8rem] font-medium`}>
+                  {k}
+                </td>
+                <td className="px-4 py-2.5 leading-relaxed text-muted-foreground">{v}</td>
+              </tr>
+            ))}
+          </tbody>
+        </table>
+      </div>
+    </Card>
   );
 }
 
 function Architecture() {
   return (
-    <div className="mx-auto max-w-4xl space-y-16">
-      {/* Hero */}
-      <header className="reveal space-y-5">
-        <LuminaryMark className="size-11" bloom />
-        <div className="space-y-3">
-          <h1 className="font-display text-[2.5rem] font-semibold leading-[1.05] tracking-tight">
-            How Luminary reads a lesson
-          </h1>
-          <p className="max-w-2xl text-base leading-relaxed text-muted-foreground">
-            You give it a classroom recording. It hands back a clear picture of the teaching: how
-            present the teacher was, how long she spent at the board, how the class filled and
-            settled, and how she moved through the room. Every figure is measured automatically,
-            nobody labels anything by hand, and no face is ever recognised.
-          </p>
+    <div className="mx-auto max-w-4xl space-y-12">
+      <header className="reveal space-y-4">
+        <div className="font-mono text-xs uppercase tracking-widest text-primary">
+          ML pipeline · technical reference
         </div>
-        <div className="flex flex-wrap gap-2 text-xs">
-          {["5 frames / second", "17 body points", "No facial recognition", "Aggregate only"].map(
-            (b) => (
-              <span
-                key={b}
-                className="rounded-full border border-border bg-card px-3 py-1 font-mono text-muted-foreground"
-              >
-                {b}
-              </span>
-            ),
-          )}
-        </div>
+        <h1 className="font-display text-3xl font-semibold tracking-tight">
+          How the analytics are computed
+        </h1>
+        <p className="max-w-2xl text-sm leading-relaxed text-muted-foreground">
+          Video in, structured teaching analytics out. A fixed camera is sampled at 5 fps and passed
+          through detection, tracking, re-identification, role classification, and event derivation.
+          No frame is labelled by hand and no face is recognised. Constants below are the ones the
+          service actually runs.
+        </p>
+        <KV rows={SUMMARY} keyClass="w-28" />
       </header>
 
-      {/* Big picture */}
-      <Section title="The idea, in one paragraph">
-        <Card className="p-6">
-          <p className="text-base leading-relaxed">
-            Imagine an assistant who can watch a whole lesson without ever getting bored or
-            distracted. Five times a second they glance at the room and note where every person is
-            and whether they are standing or sitting. They never learn a single name; they only
-            follow shapes moving around. At the end they add it up. The person who stood, walked the
-            room, stayed the whole time, and worked at the board was the teacher. Everyone seated
-            was a student. Luminary is that assistant, built from a small line of specialised AI
-            models, each doing one job and handing off to the next.
-          </p>
-        </Card>
-      </Section>
-
-      {/* Journey */}
-      <Section title="The journey of a recording">
-        <FlowDiagram />
+      {/* Pipeline */}
+      <Section title="1 · Pipeline">
         <p className="text-sm leading-relaxed text-muted-foreground">
-          The browser uploads the video to the API, which stores it and adds a job to a queue. A
-          dedicated worker runs the analysis, calls the vision service for detection and tracking,
-          and writes the results to the database. The dashboard then reads those results over a
-          typed API, so the heavy work never blocks the page.
+          Eleven stages, each consuming the previous output. Stages 1-4 run per frame in the ML
+          service; 5-9 run once over the whole video; 10 writes the tiered store.
         </p>
-      </Section>
-
-      {/* Models */}
-      <Section title="The four specialists doing the work">
-        <p className="-mt-2 max-w-2xl text-sm leading-relaxed text-muted-foreground">
-          Each specialist does one job well, then passes its output to the next. Here is each one
-          explained plainly, then named and specified.
-        </p>
-        <div className="stagger grid gap-4 sm:grid-cols-2">
-          {MODELS.map((m, i) => (
-            <Card
-              key={m.name}
-              className="flex flex-col gap-3 p-5 transition-colors hover:border-primary/40"
-              style={{ "--i": i } as CSSProperties}
-            >
-              <div className="flex items-center justify-between">
-                <span className="flex size-9 items-center justify-center rounded-lg bg-primary/10 text-primary">
-                  <m.icon className="size-5" />
-                </span>
-                <code className="rounded-md bg-muted px-2 py-1 font-mono text-[0.7rem] text-muted-foreground">
-                  {m.grownup}
-                </code>
-              </div>
-              <h3 className="font-display text-lg font-semibold tracking-tight">{m.name}</h3>
-              <p className="text-sm leading-relaxed text-muted-foreground">{m.plain}</p>
-              <p className="text-sm leading-relaxed">
-                <span className="font-medium">What it does here. </span>
-                {m.does}
-              </p>
-              <p className="mt-auto flex gap-2 border-t border-border pt-3 text-xs leading-relaxed text-muted-foreground">
-                <Sparkles className="mt-px size-3.5 shrink-0 text-light" />
-                {m.detail}
-              </p>
-            </Card>
-          ))}
-        </div>
-      </Section>
-
-      {/* Pipeline stages */}
-      <Section title="The six stages, from pixels to numbers">
-        <ol className="stagger space-y-3">
-          {STAGES.map((stage, i) => (
-            <li key={stage.title} style={{ "--i": i } as CSSProperties}>
-              <Card className="flex gap-4 p-5">
-                <span className="flex size-8 shrink-0 items-center justify-center rounded-full bg-primary/12 font-mono text-sm font-semibold text-primary">
-                  {i + 1}
-                </span>
-                <div>
-                  <h3 className="font-medium">{stage.title}</h3>
-                  <p className="mt-1.5 text-sm leading-relaxed">{stage.what}</p>
-                  <p className="mt-1.5 text-sm leading-relaxed text-muted-foreground">
-                    <span className="font-medium text-foreground">Why it matters. </span>
-                    {stage.why}
-                  </p>
-                </div>
-              </Card>
-            </li>
-          ))}
-        </ol>
-      </Section>
-
-      {/* The teacher heuristic: the star technical section */}
-      <Section title="How Luminary tells the teacher from the students">
-        <p className="-mt-2 max-w-2xl text-sm leading-relaxed text-muted-foreground">
-          This is the heart of the system, so here it is in full. There is no face recognition and
-          no name tag. A teacher is identified purely by how she behaves, because in a classroom the
-          teacher does four things almost nobody else does at once.
-        </p>
-
-        <div className="stagger grid gap-4 sm:grid-cols-2">
-          {SIGNALS.map((s, i) => (
-            <Card
-              key={s.label}
-              className="flex flex-col gap-3 p-5"
-              style={{ "--i": i } as CSSProperties}
-            >
-              <div className="flex items-center justify-between gap-3">
-                <div className="flex items-center gap-2.5">
-                  <span className="flex size-8 items-center justify-center rounded-lg bg-primary/10 text-primary">
-                    <s.icon className="size-[1.05rem]" />
-                  </span>
-                  <h3 className="font-medium">{s.label}</h3>
-                </div>
-                <span
-                  className="rounded-md bg-primary/10 px-2 py-1 font-mono text-xs font-medium text-primary"
-                  title="Weight this signal carries in the combined score"
-                >
-                  weight {s.weight}
-                </span>
-              </div>
-              <p className="text-sm leading-relaxed">{s.measures}</p>
-              <p className="text-sm leading-relaxed text-muted-foreground">{s.how}</p>
-              {/* teacher vs student example bar */}
-              <div className="mt-auto space-y-2 border-t border-border pt-3">
-                <SignalBar label="Typical teacher" value={Number(s.teacher)} tone="primary" />
-                <SignalBar label="Typical student" value={Number(s.student)} tone="muted" />
-              </div>
-            </Card>
-          ))}
-        </div>
-
-        {/* The decision rule */}
-        <Card className="space-y-4 p-6">
-          <div className="flex items-center gap-2">
-            <Scale className="size-4 text-primary" />
-            <h3 className="font-medium">The decision rule</h3>
-          </div>
-          <p className="text-sm leading-relaxed">
-            The four signals are combined into one score per person, each multiplied by its weight
-            and added together:
-          </p>
-          <div className="overflow-x-auto rounded-lg bg-muted/60 p-4 font-mono text-xs leading-relaxed text-foreground">
-            <div>score = 0.30 &times; stands</div>
-            <div className="pl-[3.6rem]">+ 0.25 &times; roams</div>
-            <div className="pl-[3.6rem]">+ 0.25 &times; present</div>
-            <div className="pl-[3.6rem]">+ 0.20 &times; at_board</div>
-            <div className="mt-3 text-muted-foreground">
-              # teacher chosen only when the top score is a genuine outlier:
-            </div>
-            <div>
-              teacher = best if <span className="text-primary">best &ge; 0.50</span> and{" "}
-              <span className="text-primary">
-                (best - runner_up) &ge; max(0.08, 0.15 &times; best)
-              </span>
-            </div>
-            <div className="text-muted-foreground">else: nobody is labelled the teacher</div>
-          </div>
-          <p className="text-sm leading-relaxed text-muted-foreground">
-            The second condition is the important one. It is not enough to have the highest score;
-            the top person has to{" "}
-            <span className="font-medium text-foreground">
-              lead the runner-up by a clear margin
-            </span>
-            . On the demo lesson the teacher scores about <Mono>0.71</Mono> while the most
-            teacher-like student chain reaches only about <Mono>0.59</Mono>, a lead well past the
-            threshold. When two adults share a room, or when a lively student presents at the front,
-            the margin collapses and Luminary declines to guess: it labels everyone{" "}
-            <Mono>unknown</Mono> and the teacher metrics read as unavailable rather than wrong. The
-            size of that winning margin becomes the{" "}
-            <span className="font-medium text-foreground">confidence</span> shown next to the
-            teacher figure on the dashboard, as <Mono>0.5 + margin</Mono>.
-          </p>
-        </Card>
-
-        {/* The gates */}
-        <Card className="space-y-3 p-6">
-          <div className="flex items-center gap-2">
-            <Fingerprint className="size-4 text-primary" />
-            <h3 className="font-medium">Who is not even allowed to be the teacher</h3>
-          </div>
-          <p className="text-sm leading-relaxed text-muted-foreground">
-            Before any scoring, obvious non-candidates are filtered out so a brief glitch can never
-            be crowned. Three gates apply. Each of these may still be labelled a student; they
-            simply cannot claim or block the teacher slot.
-          </p>
-          <ul className="grid gap-2.5 sm:grid-cols-3">
-            {[
-              {
-                t: "Too brief",
-                d: "Seen for less than about 60 seconds. A passer-by or a one-off fragment is not a teacher.",
-                m: "span < 60 s",
-              },
-              {
-                t: "Stuck to an edge",
-                d: "Average position hugging a frame edge, where clipped boxes always look tall and fake-standing.",
-                m: "edge < 0.03",
-              },
-              {
-                t: "Too small",
-                d: "A box far smaller than the median person, so a distant back-row head cannot outscore the adult.",
-                m: "area < 0.3 x median",
-              },
-            ].map((g) => (
-              <li key={g.t} className="rounded-lg border border-border bg-background/50 p-3">
-                <div className="text-sm font-medium">{g.t}</div>
-                <p className="mt-1 text-xs leading-relaxed text-muted-foreground">{g.d}</p>
-                <code className="mt-2 inline-block font-mono text-[0.7rem] text-primary">
-                  {g.m}
-                </code>
-              </li>
-            ))}
-          </ul>
-          <p className="text-sm leading-relaxed text-muted-foreground">
-            One last safeguard runs after the teacher is chosen. Because she walks in and out of
-            view, the tracker often hands her return a fresh id that the Reuniter cannot bridge
-            across a long gap. A dedicated step re-claims those stray fragments that fall inside her
-            absence windows near the door, the board, or her own path, so she stays a single
-            continuous identity across the whole lesson rather than being downgraded to a student
-            halfway through.
-          </p>
-        </Card>
-      </Section>
-
-      {/* Trust */}
-      <Section title="How Luminary shows its confidence">
-        <Card className="p-6">
-          <div className="flex items-start gap-3">
-            <Fingerprint className="mt-0.5 size-5 shrink-0 text-primary" />
-            <p className="text-base leading-relaxed">
-              A number is only useful if you know how much to trust it. Every analysed lesson
-              carries a confidence report built from three honest signals: how much of the lesson
-              the camera actually covered, how cleanly the tracker followed people without
-              fragmenting them, and a re-identification-independent head count (the most people
-              visible in any single frame, which can never double-count anyone) as a cross-check on
-              the identity-based count. When those disagree, the dashboard says so out loud rather
-              than showing a falsely precise figure.
-            </p>
-          </div>
-        </Card>
-      </Section>
-
-      {/* Storage */}
-      <Section title="Where the data lives, and how it survives 80 classrooms">
-        <Card className="p-6">
-          <p className="text-base leading-relaxed">
-            A single lesson produces hundreds of thousands of detection rows, and a live camera
-            would produce them forever. So storage follows the standard three-tier split used across
-            professional video analytics, on a TimescaleDB hypertable that ages and compresses data
-            automatically.
-          </p>
-          <div className="mt-5 grid gap-3 sm:grid-cols-3">
-            {[
-              {
-                icon: Layers,
-                title: "Hot tier",
-                body: "Raw per-frame detections. Compressed after a day, dropped after a week, enough to audit and re-derive recent footage.",
-              },
-              {
-                icon: Ruler,
-                title: "Overlay tier",
-                body: "Simplified track paths and sparse keyframe boxes. A few percent of the raw size, kept forever, so playback overlays survive after the raw rows age out.",
-              },
-              {
-                icon: Fingerprint,
-                title: "Aggregate tier",
-                body: "Events, track summaries, and per-lesson analytics. Kept forever at negligible size. This is everything the dashboard shows.",
-              },
-            ].map((t) => (
-              <div key={t.title} className="rounded-xl border border-border bg-background/50 p-4">
-                <t.icon className="size-5 text-primary" />
-                <div className="mt-2 text-sm font-medium">{t.title}</div>
-                <p className="mt-1 text-xs leading-relaxed text-muted-foreground">{t.body}</p>
-              </div>
-            ))}
-          </div>
-          <p className="mt-4 text-sm leading-relaxed text-muted-foreground">
-            Because the two permanent tiers hold everything you can see, retention never erases a
-            number anyone relies on, and the raw firehose stays bounded no matter how many hours of
-            how many rooms flow through it.
-          </p>
-        </Card>
-      </Section>
-
-      {/* Boundaries */}
-      <Section title="What Luminary will not do">
-        <Card className="border-destructive/20 bg-destructive/[0.03] p-6">
-          <p className="text-sm leading-relaxed text-muted-foreground">
-            The most important design choices are the ones we refused. Luminary deliberately does
-            not:
-          </p>
-          <ul className="mt-4 grid gap-2.5 sm:grid-cols-2">
-            {NOT_DOING.map((item) => (
-              <li key={item} className="flex items-start gap-2.5 text-sm">
-                <Ban className="mt-0.5 size-4 shrink-0 text-destructive/70" />
-                <span>{item}</span>
-              </li>
-            ))}
-          </ul>
-          <p className="mt-4 border-t border-border pt-3 text-sm leading-relaxed">
-            These are not limitations to apologise for. They follow the evidence: reading emotion or
-            attention off video is scientifically unsupported and legally restricted in schools, so
-            we do not claim it. Insights are aggregate, teacher-facing, and about the{" "}
-            <span className="font-medium">craft of teaching</span>, never about surveilling
-            children.
-          </p>
-        </Card>
-      </Section>
-
-      {/* Grounded in prior work */}
-      <Section title="Grounded in prior work">
-        <Card className="p-6">
-          <p className="text-base leading-relaxed">
-            The design follows the established research on classroom sensing, not guesswork:
-          </p>
-          <ul className="mt-4 space-y-3 text-sm leading-relaxed">
-            <li>
-              <span className="font-medium">Skeleton-first, on-device, no stored video.</span> The
-              reference deployed system, Carnegie Mellon&apos;s EduSense, ran on-premises, kept no
-              recordings, identified no individuals, and reported roughly 92% accuracy on body-level
-              signals. Luminary&apos;s self-hosted GPU, events-only database, and pose-not-face
-              approach mirror that defensible pattern.
-            </li>
-            <li>
-              <span className="font-medium">Movement patterns, honestly framed.</span> The teacher
-              circulation view uses the validated mobility constructs from the Moodoo research
-              (dwell spread, room coverage, presenter vs supervisor pattern) rather than an invented
-              score, and labels them as image-plane movement, not a rating.
-            </li>
-            <li>
-              <span className="font-medium">A clear line where the evidence draws one.</span> The
-              scientific literature finds emotion and attention cannot be validly read from video,
-              and the EU AI Act restricts inferring them in education, so those live in the
-              boundaries above rather than the dashboard.
-            </li>
-            <li>
-              <span className="font-medium">A known upgrade path.</span> Under identical uniforms
-              the appearance step is the weakest link; the prior art points to a dedicated
-              person-re-identification backbone and motion-first tracking as the next hardening
-              steps. These are written up in the project&apos;s decision records.
-            </li>
-          </ul>
-        </Card>
-      </Section>
-
-      {/* Stack */}
-      <Section title="The stack">
         <Card className="overflow-hidden">
           <div className="overflow-x-auto">
-            <table className="w-full text-sm">
+            <table className="w-full text-left text-sm">
+              <thead className="border-b border-border bg-muted/40 font-mono text-[0.7rem] uppercase tracking-wider text-muted-foreground">
+                <tr>
+                  <th className="px-3 py-2 font-medium">#</th>
+                  <th className="px-3 py-2 font-medium">Stage</th>
+                  <th className="px-3 py-2 font-medium">Module</th>
+                  <th className="px-3 py-2 font-medium">In &rarr; Out</th>
+                </tr>
+              </thead>
               <tbody className="divide-y divide-border">
-                {STACK.map((row) => (
-                  <tr key={row.layer}>
-                    <td className="w-36 px-5 py-3.5 font-medium">{row.layer}</td>
-                    <td className="px-5 py-3.5 font-mono text-[0.8rem] text-muted-foreground">
-                      {row.tech}
+                {PIPELINE.map((s) => (
+                  <tr key={s.n} className="align-top">
+                    <td className="px-3 py-2.5 font-mono text-primary">{s.n}</td>
+                    <td className="px-3 py-2.5 font-medium">{s.stage}</td>
+                    <td className="whitespace-nowrap px-3 py-2.5 font-mono text-[0.72rem] text-muted-foreground">
+                      {s.module}
+                    </td>
+                    <td className="px-3 py-2.5 font-mono text-[0.72rem] leading-relaxed text-muted-foreground">
+                      {s.io}
                     </td>
                   </tr>
                 ))}
@@ -569,36 +378,242 @@ function Architecture() {
           </div>
         </Card>
       </Section>
+
+      {/* Models */}
+      <Section title="2 · Models">
+        <div className="stagger space-y-4">
+          {MODELS.map((m, i) => (
+            <Card key={m.name} className="p-5" style={{ "--i": i } as CSSProperties}>
+              <div className="flex flex-wrap items-baseline justify-between gap-2">
+                <h3 className="font-mono text-base font-semibold">{m.name}</h3>
+                <span className="rounded-md bg-muted px-2 py-0.5 font-mono text-[0.7rem] text-muted-foreground">
+                  {m.family}
+                </span>
+              </div>
+              <dl className="mt-3 space-y-2.5 text-sm leading-relaxed">
+                <SpecRow k="Task" v={m.task} />
+                <SpecRow k="Mechanism" v={m.mechanism} />
+                <SpecRow k="Solves" v={m.solves} />
+                <SpecRow k="Params" v={m.params} mono />
+              </dl>
+              <div className="mt-3 grid gap-2 border-t border-border pt-3 sm:grid-cols-2">
+                <IoBox label="in" v={m.input} />
+                <IoBox label="out" v={m.output} />
+              </div>
+            </Card>
+          ))}
+        </div>
+        <p className="text-xs leading-relaxed text-muted-foreground">
+          Two later stages are explainable rules, not neural models: the role classifier (section 4)
+          and the event deriver (section 5). Keeping them as rules means every number traces to a
+          cause.
+        </p>
+      </Section>
+
+      {/* Features */}
+      <Section title="3 · Per-detection features">
+        <p className="text-sm leading-relaxed text-muted-foreground">
+          Computed once per person per frame; every analytic is derived from these plus the track
+          id.
+        </p>
+        <KV rows={FEATURES} />
+      </Section>
+
+      {/* Re-ID */}
+      <Section title="4 · Re-identification merge">
+        <KV
+          rows={[
+            ["candidate", "temporal overlap < 1 s AND gap < 10 min"],
+            ["score", "0.35 appearance + 0.25 spatial + 0.20 size + 0.20 temporal"],
+            [
+              "appearance",
+              "0.5 cos(CLIP) + 0.5 HSV-hist corr (both present), else spatial continuity",
+            ],
+            [
+              "hard veto",
+              "cos < 0.35 => different; seated pair (range < 0.02) with anchors > 0.10 => different",
+            ],
+            ["merge", "greedy max-heap, threshold 0.55; identities numbered by first appearance"],
+            [
+              "teacher rescue",
+              "adult-height + mobile pair gets an appearance floor when embeds agree (leave-and-return)",
+            ],
+          ]}
+          keyClass="w-36"
+        />
+      </Section>
+
+      {/* Teacher classification */}
+      <Section title="5 · Teacher classification (roles.py)">
+        <p className="text-sm leading-relaxed text-muted-foreground">
+          Each eligible identity gets a weighted composite over four behavioural signals; the
+          teacher is the clear outlier or nobody. Representative teacher/student values from the
+          demo lesson.
+        </p>
+        <Card className="overflow-hidden">
+          <div className="overflow-x-auto">
+            <table className="w-full text-left text-sm">
+              <thead className="border-b border-border bg-muted/40 font-mono text-[0.7rem] uppercase tracking-wider text-muted-foreground">
+                <tr>
+                  <th className="px-3 py-2 font-medium">signal</th>
+                  <th className="px-3 py-2 font-medium">w</th>
+                  <th className="px-3 py-2 font-medium">definition</th>
+                  <th className="px-3 py-2 text-right font-medium">teacher</th>
+                  <th className="px-3 py-2 text-right font-medium">student</th>
+                </tr>
+              </thead>
+              <tbody className="divide-y divide-border">
+                {SIGNALS.map((s) => (
+                  <tr key={s.label} className="align-top">
+                    <td className="px-3 py-2.5 font-mono text-[0.78rem] font-medium">{s.label}</td>
+                    <td className="px-3 py-2.5 font-mono text-primary">{s.weight}</td>
+                    <td className="px-3 py-2.5 leading-relaxed text-muted-foreground">{s.def}</td>
+                    <td className="px-3 py-2.5 text-right font-mono tabular-nums">{s.teacher}</td>
+                    <td className="px-3 py-2.5 text-right font-mono tabular-nums text-muted-foreground">
+                      {s.student}
+                    </td>
+                  </tr>
+                ))}
+              </tbody>
+            </table>
+          </div>
+        </Card>
+
+        <div className="overflow-x-auto rounded-lg bg-muted/60 p-4 font-mono text-xs leading-relaxed">
+          <div>score = 0.30 stand + 0.25 roam + 0.25 present + 0.20 board</div>
+          <div className="mt-2 text-muted-foreground">
+            # teacher only if the top score is a genuine outlier
+          </div>
+          <div>
+            teacher = argmax if <span className="text-primary">best &gt;= 0.50</span> and{" "}
+            <span className="text-primary">(best - 2nd) &gt;= max(0.08, 0.15 x best)</span>
+          </div>
+          <div className="text-muted-foreground">else: all unknown (degrade gracefully)</div>
+          <div className="mt-2">role_confidence = min(1, 0.5 + margin)</div>
+        </div>
+
+        <p className="text-xs font-medium text-muted-foreground">
+          Eligibility gates (before scoring):
+        </p>
+        <div className="grid gap-2 sm:grid-cols-3">
+          {GATES.map((g) => (
+            <div key={g.t} className="rounded-lg border border-border bg-background/50 p-3">
+              <div className="text-sm font-medium">{g.t}</div>
+              <code className="mt-1 block font-mono text-[0.72rem] text-primary">{g.rule}</code>
+              <p className="mt-1.5 text-xs leading-relaxed text-muted-foreground">{g.d}</p>
+            </div>
+          ))}
+        </div>
+        <p className="text-xs leading-relaxed text-muted-foreground">
+          Post-selection, teacher_chain.stitch_teacher reclaims her fragments that student ids stole
+          during walk-ins near the door / board / her own path, so she stays one identity across the
+          lesson.
+        </p>
+      </Section>
+
+      {/* Events */}
+      <Section title="6 · Event derivation (events.py)">
+        <KV rows={EVENTS} keyClass="w-32" />
+      </Section>
+
+      {/* Quality */}
+      <Section title="7 · Data-quality report (quality.py)">
+        <p className="text-sm leading-relaxed text-muted-foreground">
+          Additive; never mutates a derived number. Quantifies how much to trust each figure.
+        </p>
+        <KV rows={QUALITY} keyClass="w-40" />
+      </Section>
+
+      {/* Storage */}
+      <Section title="8 · Storage tiers">
+        <p className="text-sm leading-relaxed text-muted-foreground">
+          A 1-hour lesson at 5 fps is ~18k frames / ~540k detection rows. Three tiers keep the raw
+          firehose bounded while the dashboard survives retention.
+        </p>
+        <Card className="overflow-hidden">
+          <div className="overflow-x-auto">
+            <table className="w-full text-left text-sm">
+              <thead className="border-b border-border bg-muted/40 font-mono text-[0.7rem] uppercase tracking-wider text-muted-foreground">
+                <tr>
+                  <th className="px-3 py-2 font-medium">tier</th>
+                  <th className="px-3 py-2 font-medium">contents</th>
+                  <th className="px-3 py-2 font-medium">policy</th>
+                </tr>
+              </thead>
+              <tbody className="divide-y divide-border">
+                {STORAGE.map((t) => (
+                  <tr key={t.tier} className="align-top">
+                    <td className="px-3 py-2.5 font-mono font-medium text-primary">{t.tier}</td>
+                    <td className="px-3 py-2.5 leading-relaxed">{t.contents}</td>
+                    <td className="px-3 py-2.5 leading-relaxed text-muted-foreground">
+                      {t.policy}
+                    </td>
+                  </tr>
+                ))}
+              </tbody>
+            </table>
+          </div>
+        </Card>
+      </Section>
+
+      {/* Boundaries */}
+      <Section title="9 · Claim boundaries">
+        <p className="text-sm leading-relaxed text-muted-foreground">
+          Grounded in the affect-recognition evidence and EU AI Act / FERPA / GDPR. Left: measured
+          and defensible. Right: invalid or restricted, therefore not computed or claimed.
+        </p>
+        <Card className="overflow-hidden">
+          <div className="overflow-x-auto">
+            <table className="w-full text-left text-sm">
+              <thead className="border-b border-border bg-muted/40 text-[0.72rem] uppercase tracking-wider">
+                <tr>
+                  <th className="px-3 py-2 font-medium text-primary">CAN claim</th>
+                  <th className="px-3 py-2 font-medium text-destructive/80">CANNOT claim</th>
+                </tr>
+              </thead>
+              <tbody className="divide-y divide-border">
+                {BOUNDARIES.map(([can, cannot]) => (
+                  <tr key={can} className="align-top">
+                    <td className="w-1/2 px-3 py-2.5 leading-relaxed">{can}</td>
+                    <td className="w-1/2 px-3 py-2.5 leading-relaxed text-muted-foreground">
+                      {cannot}
+                    </td>
+                  </tr>
+                ))}
+              </tbody>
+            </table>
+          </div>
+        </Card>
+      </Section>
+
+      {/* Stack */}
+      <Section title="10 · Stack">
+        <KV rows={STACK} keyClass="w-28" />
+      </Section>
     </div>
   );
 }
 
-function SignalBar({
-  label,
-  value,
-  tone,
-}: {
-  label: string;
-  value: number;
-  tone: "primary" | "muted";
-}) {
-  const pct = Math.max(2, Math.round(value * 100));
+function SpecRow({ k, v, mono = false }: { k: string; v: string; mono?: boolean }) {
   return (
-    <div className="flex items-center gap-2.5">
-      <span className="w-24 shrink-0 text-xs text-muted-foreground">{label}</span>
-      <div className="h-2 flex-1 overflow-hidden rounded-full bg-muted">
-        <div
-          className={
-            tone === "primary"
-              ? "h-full rounded-full bg-primary"
-              : "h-full rounded-full bg-muted-foreground/40"
-          }
-          style={{ width: `${pct}%` }}
-        />
-      </div>
-      <span className="w-9 shrink-0 text-right font-mono text-xs tabular-nums text-foreground">
-        {value.toFixed(2)}
+    <div className="grid grid-cols-[5.5rem_1fr] gap-3">
+      <dt className="font-mono text-[0.72rem] font-medium uppercase tracking-wide text-muted-foreground">
+        {k}
+      </dt>
+      <dd className={mono ? "font-mono text-[0.78rem] text-muted-foreground" : ""}>{v}</dd>
+    </div>
+  );
+}
+
+function IoBox({ label, v }: { label: string; v: string }) {
+  return (
+    <div className="rounded-lg bg-muted/50 px-3 py-2">
+      <span className="font-mono text-[0.65rem] uppercase tracking-wider text-primary">
+        {label}
       </span>
+      <div className="mt-0.5 font-mono text-[0.72rem] leading-relaxed text-muted-foreground">
+        {v}
+      </div>
     </div>
   );
 }
