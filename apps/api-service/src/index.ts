@@ -13,6 +13,10 @@ const server = Bun.serve({
   hostname: env.API_SERVICE__HOST,
   port: env.API_SERVICE__PORT,
   idleTimeout: 120,
+  // Bun's default request-body cap is far below a real classroom-video upload,
+  // so raise it to the same ceiling the /videos route enforces (default 4 GB).
+  // Without this, Bun returns an empty-bodied 413 before the route ever runs.
+  maxRequestBodySize: env.API_SERVICE__MAX_UPLOAD_BYTES,
   fetch: app.fetch,
 });
 
