@@ -8,12 +8,22 @@ from pathlib import Path
 
 import cv2
 import numpy as np
+import pytest
 from fastapi.testclient import TestClient
 
 from app import board_detect as bd
 from app.main import app
 
 client = TestClient(app)
+
+
+@pytest.fixture(autouse=True)
+def _disable_yoloe(monkeypatch):
+    """YOLOE-26-seg is the preferred strategy but needs a real model, so default
+    it off (returns no masks) for every test. The existing tests then exercise
+    the YOLO-World/SAM2 fallback exactly as before; the YOLOE path opts back in
+    via its own monkeypatch."""
+    monkeypatch.setattr(bd, "_yoloe_masks", lambda frame: [])
 
 H, W = 720, 1280
 ASSETS = Path(__file__).resolve().parent / "assets"
@@ -127,6 +137,22 @@ def test_chain_reports_sam2_geometric_when_world_unavailable(monkeypatch):
     score, poly, method = bd._detect_on_frame(FRAME)
     assert method == "sam2_geometric"
     assert score >= 0.5
+    assert_polygon_sane(poly)
+
+
+def test_chain_prefers_yoloe_and_skips_sam2(monkeypatch):
+    # YOLOE returns a board mask (class 0) and a door mask (class 5); the board
+    # is used and the door class is filtered out. SAM 2 must not run at all.
+    monkeypatch.setattr(bd, "_yoloe_masks", lambda frame: [(BOARD_MASK, 0.65, 0), (TALL_BLOB, 0.6, 5)])
+
+    def _boom(*a, **k):
+        raise AssertionError("SAM2 must not run when YOLOE finds the board")
+
+    monkeypatch.setattr(bd, "_sam_segment", _boom)
+    monkeypatch.setattr(bd, "_yolo_world_proposals", _boom)
+    score, poly, method = bd._detect_on_frame(FRAME)
+    assert method == "yoloe26_seg"
+    assert score >= bd.MIN_SCORE
     assert_polygon_sane(poly)
 
 

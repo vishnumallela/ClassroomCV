@@ -128,16 +128,16 @@ const MODELS = [
     params: "MERGE_THRESHOLD 0.55 · EMBED_VETO_COS 0.35 · MAX_GAP 10 min · overlap tol 1 s",
   },
   {
-    name: "YOLO-World + SAM 2",
-    family: "Open-vocabulary detection + promptable segmentation",
+    name: "YOLOE-26-seg",
+    family: "Open-vocabulary detection + segmentation, one model",
     task: "Auto-detect the board and door polygons (run once, up front).",
     mechanism:
-      "YOLO-World fuses a CLIP text encoder with a YOLO detector: a prompt ('chalkboard', 'classroom door') localises regions with no board-specific training. SAM 2 segments each region to a pixel mask. A geometric score (aspect, wall height, rectangularity) picks the winner; SAM 2 grid-probe fallback when the prompt finds nothing.",
+      "An open-vocabulary model in the YOLO26 family that DETECTS and SEGMENTS in one pass: a text prompt ('chalkboard', 'classroom door') returns the region and a mask together, replacing the older YOLO-World + SAM 2 two-model chain. A geometric score (aspect, wall height, rectangularity, colour) picks the winner; a SAM 2 grid-probe fallback remains for when the text encoder is unavailable.",
     solves:
       "Turns 'standing at the front' into board time and 'vanished near a door' into a confirmed exit. Operator can redraw either zone.",
     input: "representative frame + text prompts",
     output: "board / door polygons (normalised points)",
-    params: "score threshold 0.25 · board expand 0.12 · door window 2 s",
+    params: "yoloe-26s-seg · score threshold 0.25 · +10-11 AP and ~1.4x faster than YOLO-World",
   },
 ];
 
@@ -243,7 +243,8 @@ const STORAGE: { tier: string; contents: string; policy: string }[] = [
   {
     tier: "Hot",
     contents: "raw per-frame detection_events (TimescaleDB hypertable, wall-clock ts, ~1 h chunks)",
-    policy: "compress after 1 h (static post-write), drop after 2 days; only needed for cheap /rederive",
+    policy:
+      "compress after 1 h (static post-write), drop after 2 days; only needed for cheap /rederive",
   },
   {
     tier: "Overlay",
@@ -289,7 +290,7 @@ const STACK: [string, string][] = [
   ["Frontend", "Vite, TanStack Router + Query, shadcn, Tailwind"],
   ["API", "Bun, Hono, oRPC, Drizzle"],
   ["Queue", "BullMQ on Redis"],
-  ["ML service", "FastAPI, Ultralytics YOLO26-pose, BoT-SORT, CLIP, SAM 2, YOLO-World, ffmpeg"],
+  ["ML service", "FastAPI, Ultralytics YOLO26-pose, BoT-SORT, CLIP, YOLOE-26-seg, ffmpeg"],
   ["Store", "TimescaleDB (hypertable + continuous aggregates + compression/retention)"],
 ];
 
