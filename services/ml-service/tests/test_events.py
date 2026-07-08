@@ -198,6 +198,10 @@ _ANALYTICS_KEYS = {
     "avg_students",
     "max_students",
     "heatmap",
+    "teacher_pointing_ms",
+    "teacher_writing_ms",
+    "teacher_board_near_ms",
+    "board_interactions",
 }
 
 

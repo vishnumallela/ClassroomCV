@@ -46,6 +46,30 @@ export function KpiCards({
         : "no board zone",
       badge: null,
     },
+    {
+      label: "Pointing at board",
+      value:
+        hasBoard && analytics.teacherPointingMs !== null
+          ? msToClock(analytics.teacherPointingMs)
+          : "n/a",
+      sub:
+        hasBoard && analytics.teacherPointingMs !== null
+          ? percentOf(analytics.teacherPointingMs, durationMs) + " of lesson"
+          : "no board zone",
+      badge: null,
+    },
+    {
+      label: "Writing on board",
+      value:
+        hasBoard && analytics.teacherWritingMs !== null
+          ? msToClock(analytics.teacherWritingMs)
+          : "n/a",
+      sub:
+        hasBoard && analytics.teacherWritingMs !== null
+          ? percentOf(analytics.teacherWritingMs, durationMs) + " of lesson"
+          : "no board zone",
+      badge: null,
+    },
     { label: "Entries", value: String(analytics.entries), sub: "into the room", badge: null },
     { label: "Exits", value: String(analytics.exits), sub: "out of the room", badge: null },
     {
@@ -63,7 +87,7 @@ export function KpiCards({
   ];
 
   return (
-    <div className="grid grid-cols-2 gap-3 md:grid-cols-3 lg:grid-cols-6">
+    <div className="grid grid-cols-2 gap-3 md:grid-cols-3 lg:grid-cols-4">
       {tiles.map((t) => (
         <Card key={t.label} className="p-4">
           <div className="flex items-start justify-between gap-1">

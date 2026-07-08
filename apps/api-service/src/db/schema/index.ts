@@ -9,6 +9,8 @@ export type Interval = [number, number];
 // Spatial dwell histograms (row-major grid_h x grid_w per-cell sample counts).
 export type Heatmap = { grid_w: number; grid_h: number; teacher: number[]; students: number[] };
 const EMPTY_HEATMAP: Heatmap = { grid_w: 0, grid_h: 0, teacher: [], students: [] };
+// One debounced teacher board-interaction segment (pointing/writing/near).
+export type BoardInteraction = { kind: "pointing" | "writing" | "near"; start_ms: number; end_ms: number };
 
 export const videos = pgTable("videos", {
   id: uuid("id").primaryKey().defaultRandom(),
@@ -91,5 +93,10 @@ export const videoAnalytics = pgTable("video_analytics", {
   entryExit: jsonb("entry_exit").$type<EntryExitItem[]>().notNull().default([]),
   occupancy: jsonb("occupancy").$type<OccupancyPoint[]>().notNull().default([]),
   heatmap: jsonb("heatmap").$type<Heatmap>().notNull().default(EMPTY_HEATMAP),
+  // Teacher board-interaction analytics (null ms when no board zone exists).
+  teacherPointingMs: bigint("teacher_pointing_ms", { mode: "number" }),
+  teacherWritingMs: bigint("teacher_writing_ms", { mode: "number" }),
+  teacherBoardNearMs: bigint("teacher_board_near_ms", { mode: "number" }),
+  boardInteractions: jsonb("board_interactions").$type<BoardInteraction[]>().notNull().default([]),
   computedAt: timestamp("computed_at", { withTimezone: true }).defaultNow(),
 });

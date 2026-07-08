@@ -20,6 +20,7 @@ import math
 from bisect import bisect_left, bisect_right
 from typing import Optional
 
+from app import activity as activity_mod
 from app.geometry import bboxes_intersect, expand_bbox, polygon_bbox
 from app.models import Detection
 
@@ -434,6 +435,13 @@ def derive(
                     {"kind": "board_leave", "video_ts_ms": end, "track_no": teacher_no}
                 )
 
+    # Teacher board-activity breakdown (pointing / writing / near). Uses the
+    # per-detection pose features stored on Detection.activity + the board zone,
+    # so it is null (no board) or empty (no teacher) exactly when board time is.
+    # Segments live in analytics.board_interactions (not the enter/exit events
+    # timeline, whose kinds are a fixed set).
+    board_activity = activity_mod.derive_board_activity(teacher_dets, board_polygon)
+
     occupancy = occupancy_buckets(dets_by_track, roles_map, duration_ms)
     counts = [b["students"] for b in occupancy]
     avg_students = round(sum(counts) / len(counts), 2) if counts else 0.0
@@ -454,5 +462,9 @@ def derive(
         "avg_students": avg_students,
         "max_students": max_students,
         "heatmap": heatmap,
+        "teacher_pointing_ms": board_activity["pointing_ms"],
+        "teacher_writing_ms": board_activity["writing_ms"],
+        "teacher_board_near_ms": board_activity["near_ms"],
+        "board_interactions": board_activity["segments"],
     }
     return events, analytics

@@ -30,6 +30,15 @@ class Detection:
     standing: bool
     back_to_camera: bool
     track_no: Optional[int] = None  # merged identity, assigned post-merge
+    # Board-independent pose features for teacher-activity classification
+    # (pointing/writing at the board), computed at detection time from the
+    # pose keypoints and later combined with the board zone in app.activity.
+    # None when keypoints are unusable. Shape:
+    #   {"ts": torso_scale_norm, "fc": facing_score,
+    #    "arms": [[wrist_x, wrist_y, wrist_up_ratio], ...]}  # 0..2 usable arms
+    # Stored in detection_events.meta so /rederive can re-classify (with a new
+    # board polygon) without re-running YOLO.
+    activity: Optional[dict] = None
 
 
 @dataclass
@@ -169,6 +178,20 @@ class HeatmapOut(BaseModel):
     students: list[int]
 
 
+class BoardInteractionOut(BaseModel):
+    """One teacher board-interaction segment (debounced).
+
+    kind: "pointing" (arm raised toward the board), "writing" (hand on the
+    board with local micro-motion), or "near" (at the board, arm not usable).
+    Totals in AnalyticsOut count pointing + writing as interaction; near is
+    tracked separately.
+    """
+
+    kind: Literal["pointing", "writing", "near"]
+    start_ms: int
+    end_ms: int
+
+
 class AnalyticsOut(BaseModel):
     teacher_present_ms: int
     teacher_board_ms: Optional[int]
@@ -181,6 +204,11 @@ class AnalyticsOut(BaseModel):
     avg_students: float
     max_students: int
     heatmap: HeatmapOut
+    # Teacher board-interaction analytics (null ms when no board zone exists).
+    teacher_pointing_ms: Optional[int] = None
+    teacher_writing_ms: Optional[int] = None
+    teacher_board_near_ms: Optional[int] = None
+    board_interactions: list[BoardInteractionOut] = Field(default_factory=list)
 
 
 class AnalysisResult(BaseModel):

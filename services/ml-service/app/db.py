@@ -100,6 +100,10 @@ async def replace_detections(
                 "back_to_camera": bool(d.back_to_camera),
                 "raw_track_id": int(d.raw_track_id),
             }
+            # Board-activity pose features (per detection) so /rederive can
+            # re-classify pointing/writing against an edited board without YOLO.
+            if d.activity is not None:
+                meta["activity"] = d.activity
             hist = hist_pending.pop(int(d.raw_track_id), None)
             if hist is not None:
                 meta["hist"] = hist
@@ -176,6 +180,7 @@ async def fetch_detections(
                 standing=bool(meta.get("standing", False)),
                 back_to_camera=bool(meta.get("back_to_camera", False)),
                 track_no=int(r["track_no"]),
+                activity=meta.get("activity"),
             )
         )
     return detections

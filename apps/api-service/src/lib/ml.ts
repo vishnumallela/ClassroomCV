@@ -41,6 +41,10 @@ export interface AnalysisResultAnalytics {
   avg_students: number | null;
   max_students: number | null;
   heatmap: { grid_w: number; grid_h: number; teacher: number[]; students: number[] };
+  teacher_pointing_ms: number | null;
+  teacher_writing_ms: number | null;
+  teacher_board_near_ms: number | null;
+  board_interactions: { kind: "pointing" | "writing" | "near"; start_ms: number; end_ms: number }[];
 }
 
 export interface AnalysisResult {
