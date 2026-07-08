@@ -35,7 +35,7 @@ class Detection:
     # pose keypoints and later combined with the board zone in app.activity.
     # None when keypoints are unusable. Shape:
     #   {"ts": torso_scale_norm, "fc": facing_score,
-    #    "arms": [[wrist_x, wrist_y, wrist_up_ratio], ...]}  # 0..2 usable arms
+    #    "arms": [[wrist_x, wrist_y, wrist_up_ratio, reach], ...]}  # 0..2 arms
     # Stored in detection_events.meta so /rederive can re-classify (with a new
     # board polygon) without re-running YOLO.
     activity: Optional[dict] = None

@@ -88,3 +88,17 @@ def test_gap_breaks_segments():
     out = _run(first + second)
     pointing_segs = [s for s in out["segments"] if s["kind"] == "pointing"]
     assert len(pointing_segs) >= 2, out
+
+
+def test_reach_gate_rejects_bent_arm():
+    # Raised + near the board, but arm barely extended (reach 0.2 < 0.40).
+    dets = [_det(i * STEP_MS, arms=[[0.55, 0.20, 0.45, 0.20]]) for i in range(26)]
+    out = _run(dets)
+    assert out["pointing_ms"] == 0, out
+
+
+def test_reach_gate_allows_extended_arm():
+    # Same, but the arm is extended (reach 0.70 >= 0.40) -> pointing.
+    dets = [_det(i * STEP_MS, arms=[[0.55, 0.20, 0.45, 0.70]]) for i in range(26)]
+    out = _run(dets)
+    assert out["pointing_ms"] > 3_000, out

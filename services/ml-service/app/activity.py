@@ -53,6 +53,15 @@ HANDS_UP_MIN = -0.30
 # Writing additionally requires the teacher to be facing the board (occluded
 # face). facing_score ~0 faces the students, ~0.85 back-turned.
 FACING_GATE = 0.5
+# POINTING requires the arm to be EXTENDED toward the board: the shoulder->wrist
+# reach must be at least this many torso-lengths. A bent arm resting near the
+# board is not a point. NOTE: unlike the reference's literal 1.2, this is
+# calibrated to OUR torso-scale + pose model — reach here tops out ~0.86 because
+# a board-pointing arm is rarely fully straight. 0.40 was swept against the
+# reference demo (pointing 51.8s -> 39.8s vs the reference's 40.8s, matching its
+# 8-segment structure). Only applied to detections carrying reach (4-element
+# arms); older analyses stay backward-compatible.
+POINTING_REACH_RATIO = 0.40
 
 # --- writing micro-motion (torso-length units) ----------------------------- #
 # The engaged wrist must move (mean per-frame step >= activity) but stay local
@@ -190,6 +199,7 @@ def _classify_frame(
     # The engaged arm is the one whose wrist is closest to the board.
     arm = min(arms, key=lambda a: _point_box_dist(float(a[0]), float(a[1]), board_box))
     wx, wy, up = float(arm[0]), float(arm[1]), float(arm[2])
+    reach = float(arm[3]) if len(arm) > 3 else None  # None for legacy detections
     motion.update(det.video_ts_ms, wx, wy, scale)
 
     on_board = point_in_polygon(wx, wy, board_polygon)
@@ -200,6 +210,11 @@ def _classify_frame(
 
     if on_board and motion.is_writing() and float(act.get("fc", 0.0)) >= FACING_GATE:
         return WRITING
+    # A raised hand near the board is only POINTING when the arm is extended;
+    # a bent arm (low reach) resting at the board is not a point (matches the
+    # reference, which returns NONE for a hand-down-at-board frame).
+    if reach is not None and reach < POINTING_REACH_RATIO:
+        return NONE
     return POINTING
 
 

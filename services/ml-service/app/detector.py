@@ -352,8 +352,13 @@ def _activity_features(
         if min(float(kconf[sh]), float(kconf[el]), float(kconf[wr])) < KPT_CONF_ARM:
             continue
         wx, wy = float(kxy[wr][0]), float(kxy[wr][1])
-        up_ratio = (float(kxy[sh][1]) - wy) / ts if ts > 0 else 0.0
-        arms.append([round(wx, 4), round(wy, 4), round(up_ratio, 4)])
+        sx, sy = float(kxy[sh][0]), float(kxy[sh][1])
+        up_ratio = (sy - wy) / ts if ts > 0 else 0.0
+        # reach: shoulder->wrist distance in torso-lengths (isotropic: x scaled
+        # by aspect to frame-height units, matching ts). Separates an extended
+        # pointing arm from a bent arm merely resting near the board.
+        reach = math.hypot((wx - sx) * aspect, wy - sy) / ts if ts > 0 else 0.0
+        arms.append([round(wx, 4), round(wy, 4), round(up_ratio, 4), round(reach, 4)])
     if not arms:
         return None
     return {"ts": round(ts, 4), "fc": round(_facing_score(kconf), 3), "arms": arms}
