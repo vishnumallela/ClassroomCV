@@ -390,10 +390,15 @@ def _upper_crop(frame: np.ndarray, bbox: dict) -> Optional[np.ndarray]:
 def _embed_tracks(crops: dict[int, list[np.ndarray]]) -> dict[int, list[float]]:
     """L2-normalized median CLIP embedding (512 floats) per raw track.
 
-    One batched post-pass over all sampled crops (~1560 for the demo video at
-    batch 64), so the 5 fps detection loop stays untouched. Failures degrade
-    to {} instead of raising: losing re-ID evidence must never discard a
-    completed multi-minute YOLO pass — the merge falls back to hist+spatial.
+    One batched post-pass over all sampled crops, so the 5 fps detection loop
+    stays untouched. Preprocessing happens INSIDE the batch loop, not up front:
+    a 1-hour video can accumulate tens of thousands of crops, and materializing
+    every 3x224x224 CLIP tensor at once (~600 KB each) would need >10 GB and OOM
+    the worker. Streaming keeps peak tensor memory at one batch (~40 MB) no
+    matter how long the video is; the output is identical to a single pass.
+    Failures degrade to {} instead of raising: losing re-ID evidence must never
+    discard a completed multi-minute YOLO pass — the merge falls back to
+    hist+spatial.
     """
     flat: list[tuple[int, np.ndarray]] = [
         (raw_id, crop) for raw_id, samples in crops.items() for crop in samples
@@ -405,15 +410,16 @@ def _embed_tracks(crops: dict[int, list[np.ndarray]]) -> dict[int, list[float]]:
         from PIL import Image
 
         model, preprocess, device = _get_clip()
-        tensors = [
-            # cv2 frames are BGR; CLIP's preprocess expects an RGB PIL image.
-            preprocess(Image.fromarray(cv2.cvtColor(crop, cv2.COLOR_BGR2RGB)))
-            for _raw_id, crop in flat
-        ]
         feats: list[np.ndarray] = []
         with torch.no_grad():
-            for i in range(0, len(tensors), CLIP_BATCH_SIZE):
-                batch = torch.stack(tensors[i : i + CLIP_BATCH_SIZE]).to(device)
+            for i in range(0, len(flat), CLIP_BATCH_SIZE):
+                chunk = flat[i : i + CLIP_BATCH_SIZE]
+                tensors = [
+                    # cv2 frames are BGR; CLIP's preprocess expects an RGB PIL image.
+                    preprocess(Image.fromarray(cv2.cvtColor(crop, cv2.COLOR_BGR2RGB)))
+                    for _raw_id, crop in chunk
+                ]
+                batch = torch.stack(tensors).to(device)
                 feats.append(model.encode_image(batch).float().cpu().numpy())
         all_feats = np.concatenate(feats, axis=0)
     except Exception:

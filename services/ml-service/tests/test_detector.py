@@ -174,3 +174,49 @@ class TestValidateVideoPath:
         monkeypatch.setenv("DATA_DIR", str(data_dir))
         with pytest.raises(ValueError):
             _validate_video_path(str(data_dir / ".." / "secret.mp4"))
+
+
+# --------------------------------------------------------------------------- #
+# _embed_tracks streams crops in batches (bounded memory for long videos)
+# --------------------------------------------------------------------------- #
+
+
+def test_embed_tracks_streams_and_normalizes(monkeypatch):
+    """CLIP embedding must batch INSIDE the loop (not materialize every tensor
+    up front) so a 1-hour video's tens of thousands of crops cannot OOM, and it
+    must return a unit-norm median vector per raw track."""
+    import numpy as np
+    import torch
+
+    from app import detector as D
+
+    # Force multiple batches: 5 crops across 2 tracks with batch size 2.
+    monkeypatch.setattr(D, "CLIP_BATCH_SIZE", 2)
+
+    seen_batch_sizes: list[int] = []
+
+    class FakeModel:
+        def encode_image(self, batch):
+            seen_batch_sizes.append(int(batch.shape[0]))
+            # flatten each fake CxHxW crop tensor into a feature vector
+            return batch.reshape(batch.shape[0], -1)
+
+    def fake_preprocess(img):
+        m = float(np.asarray(img).mean())
+        return torch.full((3, 2, 2), m)  # a fake 3x2x2 "image" tensor
+
+    monkeypatch.setattr(D, "_get_clip", lambda: (FakeModel(), fake_preprocess, "cpu"))
+
+    crops = {
+        7: [np.full((8, 8, 3), v, np.uint8) for v in (10, 20, 30)],
+        9: [np.full((8, 8, 3), v, np.uint8) for v in (40, 50)],
+    }
+    out = D._embed_tracks(crops)
+
+    assert set(out.keys()) == {7, 9}
+    for vec in out.values():
+        assert len(vec) == 12  # 3*2*2 flattened
+        assert abs(float(np.linalg.norm(vec)) - 1.0) < 1e-5  # unit-normalized
+    # 5 crops at batch size 2 -> batches of [2, 2, 1]; never all 5 at once.
+    assert seen_batch_sizes == [2, 2, 1]
+    assert max(seen_batch_sizes) <= 2
