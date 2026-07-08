@@ -1,6 +1,6 @@
 import type { RouterOutputs } from "@classroom/api-contracts";
 import { Card } from "@/components/ui/card";
-import { avgStudentsWhileOccupied, lessonStats } from "@/lib/analytics";
+import { avgStudentsWhileOccupied, lessonRhythm, lessonStats } from "@/lib/analytics";
 import { msToClock } from "@/lib/format";
 
 type Analytics = NonNullable<RouterOutputs["videos"]["get"]["analytics"]>;
@@ -9,9 +9,9 @@ type Interval = [number, number];
 const pct = (part: number, whole: number) => (whole > 0 ? (part / whole) * 100 : 0);
 
 const SLICES = [
-  { key: "board", label: "At board", color: "bg-amber-400" },
-  { key: "circulating", label: "Circulating", color: "bg-primary" },
-  { key: "absent", label: "Out of room", color: "bg-zinc-300 dark:bg-zinc-700" },
+  { key: "board", label: "At board", color: "bg-state-board" },
+  { key: "circulating", label: "Circulating", color: "bg-state-circulating" },
+  { key: "absent", label: "Out of room", color: "bg-state-absent" },
 ] as const;
 
 export function LessonBreakdown({
@@ -33,15 +33,30 @@ export function LessonBreakdown({
     absent: stats.absentMs,
   };
   const occupied = avgStudentsWhileOccupied(analytics.occupancy);
+  const rhythm = lessonRhythm(
+    analytics.presenceIntervals as Interval[],
+    analytics.occupancy,
+    durationMs,
+  );
 
   const chips: { label: string; value: string }[] = [
+    {
+      label: "Teacher first present",
+      value: rhythm.firstTeacherMs !== null ? msToClock(rhythm.firstTeacherMs) : "n/a",
+    },
+    {
+      label: "Time for class to fill",
+      value: rhythm.settleMs !== null ? msToClock(rhythm.settleMs) : "n/a",
+    },
     {
       label: "Board share of teaching",
       value: stats.boardShare !== null ? `${Math.round(stats.boardShare * 100)}%` : "n/a",
     },
     { label: "Longest unbroken presence", value: msToClock(stats.longestPresentMs) },
-    { label: "Presence segments", value: String(stats.presenceSegments) },
-    { label: "Total out of room", value: msToClock(stats.absentMs) },
+    {
+      label: "Longest unsupervised",
+      value: rhythm.longestUnsupervisedMs > 0 ? msToClock(rhythm.longestUnsupervisedMs) : "none",
+    },
     {
       label: "Avg students while occupied",
       value: occupied !== null ? occupied.toFixed(1) : "n/a",
@@ -81,10 +96,10 @@ export function LessonBreakdown({
         ))}
       </div>
 
-      <div className="mt-4 grid grid-cols-2 gap-3 sm:grid-cols-3 lg:grid-cols-5">
+      <div className="mt-5 grid grid-cols-2 gap-3 sm:grid-cols-3 lg:grid-cols-6">
         {chips.map((c) => (
           <div key={c.label}>
-            <div className="text-lg font-semibold tabular-nums">{c.value}</div>
+            <div className="font-display text-xl font-semibold tabular-nums">{c.value}</div>
             <div className="mt-0.5 text-xs text-muted-foreground">{c.label}</div>
           </div>
         ))}

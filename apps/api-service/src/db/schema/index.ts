@@ -9,6 +9,28 @@ export type Interval = [number, number];
 // Spatial dwell histograms (row-major grid_h x grid_w per-cell sample counts).
 export type Heatmap = { grid_w: number; grid_h: number; teacher: number[]; students: number[] };
 const EMPTY_HEATMAP: Heatmap = { grid_w: 0, grid_h: 0, teacher: [], students: [] };
+export type QualityTier = "high" | "medium" | "low";
+// Additive per-run trust report from the ML service (services/ml-service/app/quality.py).
+export type DataQuality = {
+  detections: number;
+  frames: number;
+  identities: number;
+  raw_tracks: number;
+  fragmentation: number;
+  coverage: number;
+  occupied_buckets: number;
+  span_buckets: number;
+  concurrent_peak: number;
+  concurrent_typical: number;
+  confidence: {
+    overall: QualityTier;
+    occupancy: QualityTier;
+    identity: QualityTier;
+    coverage: QualityTier;
+    teacher: QualityTier;
+  };
+  notes: string[];
+};
 
 export const videos = pgTable("videos", {
   id: uuid("id").primaryKey().defaultRandom(),
@@ -91,5 +113,7 @@ export const videoAnalytics = pgTable("video_analytics", {
   entryExit: jsonb("entry_exit").$type<EntryExitItem[]>().notNull().default([]),
   occupancy: jsonb("occupancy").$type<OccupancyPoint[]>().notNull().default([]),
   heatmap: jsonb("heatmap").$type<Heatmap>().notNull().default(EMPTY_HEATMAP),
+  // Additive trust report; null for rows computed before the quality pass.
+  dataQuality: jsonb("data_quality").$type<DataQuality | null>(),
   computedAt: timestamp("computed_at", { withTimezone: true }).defaultNow(),
 });

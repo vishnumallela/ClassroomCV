@@ -1,4 +1,5 @@
 import type { RouterOutputs } from "@classroom/api-contracts";
+import type { CSSProperties } from "react";
 import { Card } from "@/components/ui/card";
 import { msToClock, percentOf } from "@/lib/format";
 
@@ -15,9 +16,9 @@ function confidenceBadge(conf: number | null | undefined): Confidence | null {
 }
 
 const TONE_CLASS: Record<Confidence["tone"], string> = {
-  high: "bg-emerald-500/15 text-emerald-600 dark:text-emerald-400",
-  medium: "bg-amber-500/15 text-amber-600 dark:text-amber-400",
-  low: "bg-red-500/15 text-red-600 dark:text-red-400",
+  high: "bg-tier-high/15 text-tier-high",
+  medium: "bg-tier-medium/15 text-tier-medium",
+  low: "bg-tier-low/15 text-tier-low",
 };
 
 export function KpiCards({
@@ -63,21 +64,27 @@ export function KpiCards({
   ];
 
   return (
-    <div className="grid grid-cols-2 gap-3 md:grid-cols-3 lg:grid-cols-6">
-      {tiles.map((t) => (
-        <Card key={t.label} className="p-4">
+    <div className="stagger grid grid-cols-2 gap-3 md:grid-cols-3 lg:grid-cols-6">
+      {tiles.map((t, i) => (
+        <Card
+          key={t.label}
+          className="p-4 transition-colors hover:border-primary/40"
+          style={{ "--i": i } as CSSProperties}
+        >
           <div className="flex items-start justify-between gap-1">
             <div className="text-xs text-muted-foreground">{t.label}</div>
             {t.badge && (
               <span
-                className={`rounded px-1.5 py-0.5 text-[10px] font-medium ${TONE_CLASS[t.badge.tone]}`}
+                className={`rounded-full px-1.5 py-0.5 text-[10px] font-medium ${TONE_CLASS[t.badge.tone]}`}
                 title="How confident the classifier is that this identity is the teacher"
               >
                 {t.badge.label}
               </span>
             )}
           </div>
-          <div className="mt-1 text-xl font-semibold tabular-nums">{t.value}</div>
+          <div className="mt-1.5 font-display text-2xl font-semibold tabular-nums tracking-tight">
+            {t.value}
+          </div>
           <div className="mt-0.5 text-xs text-muted-foreground">{t.sub}</div>
         </Card>
       ))}

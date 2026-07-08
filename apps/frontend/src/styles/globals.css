@@ -1,50 +1,139 @@
 @import "tailwindcss";
 
+/* Luminary type system: Fraunces (display serif) + Hanken Grotesk (UI) +
+   JetBrains Mono (data). A contrast-axis pairing (a warm humanist serif, a
+   neutral grotesque, and a precise monospace) reads premium and dodges the
+   all-Inter AI default. Variable fonts, self-hosted (no network dependency). */
+@import "@fontsource-variable/fraunces";
+@import "@fontsource-variable/hanken-grotesk";
+@import "@fontsource-variable/jetbrains-mono";
+
 @variant dark (&:is(.dark *));
 
+/* --------------------------------------------------------------------------
+   "Chalkboard & Warm Light" — a chalkboard-green ink reimagined as a premium
+   surface, chalk as the paper, and one warm shaft of classroom light as the
+   accent. OKLCH throughout. Deliberately NOT the cream/sand AI default, NOT
+   navy-and-gold, NOT SaaS purple. Light mode ("chalk") is the default: a
+   principal reads these reports in a daylit office and wants print-clean
+   trust. Dark mode ("chalkboard") is a genuine deep-spruce board, not grey.
+   -------------------------------------------------------------------------- */
 :root {
-  --radius: 0.625rem;
-  --background: oklch(1 0 0);
-  --foreground: oklch(0.16 0.004 285.8);
-  --card: oklch(0.99 0 0);
-  --card-foreground: oklch(0.16 0.004 285.8);
-  --popover: oklch(1 0 0);
-  --popover-foreground: oklch(0.16 0.004 285.8);
-  --primary: oklch(0.62 0.15 162.5);
-  --primary-foreground: oklch(0.98 0.01 162.5);
-  --secondary: oklch(0.97 0.001 286);
-  --secondary-foreground: oklch(0.21 0.006 286);
-  --muted: oklch(0.97 0.001 286);
-  --muted-foreground: oklch(0.52 0.008 286);
-  --accent: oklch(0.96 0.001 286);
-  --accent-foreground: oklch(0.21 0.006 286);
-  --destructive: oklch(0.58 0.22 27);
-  --destructive-foreground: oklch(0.98 0.01 27);
-  --border: oklch(0.91 0.002 286);
-  --input: oklch(0.91 0.002 286);
-  --ring: oklch(0.62 0.15 162.5);
+  --radius: 0.75rem;
+
+  /* chalk surfaces — faint spruce tint, never cream */
+  --background: oklch(0.98 0.004 165);
+  --foreground: oklch(0.26 0.028 165);
+  --card: oklch(0.995 0.003 165);
+  --card-foreground: oklch(0.26 0.028 165);
+  --popover: oklch(0.995 0.003 165);
+  --popover-foreground: oklch(0.26 0.028 165);
+
+  /* spruce ink — the deep chalkboard green as the brand primary */
+  --primary: oklch(0.5 0.088 167);
+  --primary-foreground: oklch(0.985 0.008 160);
+
+  --secondary: oklch(0.955 0.008 165);
+  --secondary-foreground: oklch(0.3 0.03 167);
+  --muted: oklch(0.955 0.006 165);
+  --muted-foreground: oklch(0.44 0.022 167);
+  --accent: oklch(0.945 0.012 168);
+  --accent-foreground: oklch(0.3 0.03 167);
+
+  --destructive: oklch(0.55 0.2 27);
+  --destructive-foreground: oklch(0.985 0.01 27);
+
+  --border: oklch(0.9 0.008 167);
+  --input: oklch(0.9 0.008 167);
+  --ring: oklch(0.72 0.135 74);
+
+  /* the one warm shaft of light — amber, used <= 5%: the mark's glow, focus,
+     one hero metric, "at the board" moments. Never as body-text color. */
+  --light: oklch(0.8 0.135 74);
+  --light-foreground: oklch(0.28 0.05 60);
+  --light-soft: oklch(0.93 0.05 78);
+
+  /* teaching-state semantics (timeline, instructional-time composition) */
+  --state-board: oklch(0.8 0.135 74); /* amber — front-of-room / at the board */
+  --state-circulating: oklch(0.55 0.09 167); /* spruce — moving among desks */
+  --state-absent: oklch(0.86 0.01 167); /* faint — out of the room */
+
+  /* confidence tiers (data-quality report) */
+  --tier-high: oklch(0.55 0.1 167);
+  --tier-medium: oklch(0.72 0.13 74);
+  --tier-low: oklch(0.62 0.16 40);
+
+  --chart-1: oklch(0.5 0.088 167);
+  --chart-2: oklch(0.72 0.13 74);
+  --chart-3: oklch(0.62 0.07 210);
+  --chart-4: oklch(0.6 0.11 300);
+  --chart-5: oklch(0.65 0.13 25);
+
+  --font-display: "Fraunces Variable", Fraunces, Georgia, "Times New Roman", serif;
+  --font-sans:
+    "Hanken Grotesk Variable", "Hanken Grotesk", ui-sans-serif, system-ui, -apple-system,
+    "Segoe UI", Roboto, sans-serif;
+  --font-mono:
+    "JetBrains Mono Variable", "JetBrains Mono", ui-monospace, "SF Mono", Menlo, monospace;
+
+  /* motion — calm, confident ease-out (no bounce, no elastic) */
+  --ease-out-quint: cubic-bezier(0.22, 1, 0.36, 1);
+  --dur-fast: 140ms;
+  --dur-base: 200ms;
+  --dur-slow: 320ms;
+
+  /* semantic z-index scale (never arbitrary 9999) */
+  --z-base: 0;
+  --z-sticky: 20;
+  --z-dropdown: 30;
+  --z-overlay: 40;
+  --z-modal: 50;
+  --z-toast: 60;
+  --z-tooltip: 70;
 }
 
 .dark {
-  --background: oklch(0.16 0.004 285.8);
-  --foreground: oklch(0.98 0 0);
-  --card: oklch(0.2 0.005 285.8);
-  --card-foreground: oklch(0.98 0 0);
-  --popover: oklch(0.2 0.005 285.8);
-  --popover-foreground: oklch(0.98 0 0);
-  --primary: oklch(0.7 0.15 162.5);
-  --primary-foreground: oklch(0.17 0.03 162.5);
-  --secondary: oklch(0.26 0.006 286);
-  --secondary-foreground: oklch(0.98 0 0);
-  --muted: oklch(0.25 0.006 286);
-  --muted-foreground: oklch(0.71 0.009 286);
-  --accent: oklch(0.27 0.006 286);
-  --accent-foreground: oklch(0.98 0 0);
-  --destructive: oklch(0.62 0.21 25);
+  --background: oklch(0.22 0.021 167); /* deep chalkboard green */
+  --foreground: oklch(0.95 0.008 160);
+  --card: oklch(0.26 0.022 167);
+  --card-foreground: oklch(0.95 0.008 160);
+  --popover: oklch(0.26 0.022 167);
+  --popover-foreground: oklch(0.95 0.008 160);
+
+  --primary: oklch(0.74 0.11 168);
+  --primary-foreground: oklch(0.2 0.03 167);
+
+  --secondary: oklch(0.3 0.02 167);
+  --secondary-foreground: oklch(0.95 0.008 160);
+  --muted: oklch(0.3 0.018 167);
+  --muted-foreground: oklch(0.74 0.016 165);
+  --accent: oklch(0.32 0.022 167);
+  --accent-foreground: oklch(0.95 0.008 160);
+
+  --destructive: oklch(0.62 0.2 25);
   --destructive-foreground: oklch(0.98 0.01 25);
-  --border: oklch(0.28 0.006 286);
-  --input: oklch(0.3 0.006 286);
-  --ring: oklch(0.7 0.15 162.5);
+
+  --border: oklch(0.33 0.02 167);
+  --input: oklch(0.35 0.02 167);
+  --ring: oklch(0.8 0.14 76);
+
+  --light: oklch(0.82 0.14 76);
+  --light-foreground: oklch(0.24 0.05 60);
+  --light-soft: oklch(0.4 0.06 74);
+
+  --state-board: oklch(0.82 0.14 76);
+  --state-circulating: oklch(0.7 0.1 168);
+  --state-absent: oklch(0.38 0.02 167);
+
+  --tier-high: oklch(0.74 0.11 168);
+  --tier-medium: oklch(0.82 0.14 76);
+  --tier-low: oklch(0.7 0.16 40);
+
+  --chart-1: oklch(0.74 0.11 168);
+  --chart-2: oklch(0.82 0.14 76);
+  --chart-3: oklch(0.68 0.08 210);
+  --chart-4: oklch(0.68 0.12 300);
+  --chart-5: oklch(0.7 0.14 25);
 }
 
 @theme inline {
@@ -67,26 +156,153 @@
   --color-border: var(--border);
   --color-input: var(--input);
   --color-ring: var(--ring);
+
+  --color-light: var(--light);
+  --color-light-foreground: var(--light-foreground);
+  --color-light-soft: var(--light-soft);
+  --color-state-board: var(--state-board);
+  --color-state-circulating: var(--state-circulating);
+  --color-state-absent: var(--state-absent);
+  --color-tier-high: var(--tier-high);
+  --color-tier-medium: var(--tier-medium);
+  --color-tier-low: var(--tier-low);
+  --color-chart-1: var(--chart-1);
+  --color-chart-2: var(--chart-2);
+  --color-chart-3: var(--chart-3);
+  --color-chart-4: var(--chart-4);
+  --color-chart-5: var(--chart-5);
+
+  --font-sans: var(--font-sans);
+  --font-display: var(--font-display);
+  --font-mono: var(--font-mono);
+
   --radius-sm: calc(var(--radius) - 4px);
   --radius-md: calc(var(--radius) - 2px);
   --radius-lg: var(--radius);
   --radius-xl: calc(var(--radius) + 4px);
+
+  --ease-out-quint: var(--ease-out-quint);
+
+  --animate-rise: rise var(--dur-slow) var(--ease-out-quint) both;
+  --animate-bloom: bloom 1100ms var(--ease-out-quint) both;
+  --animate-draw: draw 900ms var(--ease-out-quint) both;
+  --animate-sheen: sheen 1.6s linear infinite;
+}
+
+@keyframes rise {
+  from {
+    opacity: 0;
+    transform: translateY(8px);
+  }
+  to {
+    opacity: 1;
+    transform: none;
+  }
+}
+
+/* the signature moment: a single warm glow on the mark and one hero metric at
+   load. Never loops, never on scroll. */
+@keyframes bloom {
+  0% {
+    opacity: 0;
+    transform: scale(0.6);
+  }
+  55% {
+    opacity: 1;
+    transform: scale(1.08);
+  }
+  100% {
+    opacity: 1;
+    transform: scale(1);
+  }
+}
+
+@keyframes draw {
+  from {
+    stroke-dashoffset: var(--draw-length, 100);
+  }
+  to {
+    stroke-dashoffset: 0;
+  }
+}
+
+@keyframes sheen {
+  from {
+    background-position: 200% 0;
+  }
+  to {
+    background-position: -200% 0;
+  }
 }
 
 @layer base {
   * {
     border-color: var(--color-border);
   }
+  html {
+    color-scheme: light dark;
+  }
   body {
     background-color: var(--color-background);
     color: var(--color-foreground);
-    font-family:
-      ui-sans-serif,
-      system-ui,
-      -apple-system,
-      "Segoe UI",
-      Roboto,
-      sans-serif;
+    font-family: var(--font-sans);
+    font-feature-settings: "ss01", "cv01";
     -webkit-font-smoothing: antialiased;
+    text-rendering: optimizeLegibility;
+  }
+  h1,
+  h2,
+  h3 {
+    font-family: var(--font-display);
+    font-optical-sizing: auto;
+    letter-spacing: -0.015em;
+    text-wrap: balance;
+  }
+  p {
+    text-wrap: pretty;
+  }
+  ::selection {
+    background: var(--light-soft);
+    color: var(--foreground);
+  }
+  /* Amber focus ring — the "light" accent, applied consistently. */
+  :focus-visible {
+    outline: 2px solid var(--ring);
+    outline-offset: 2px;
+  }
+}
+
+@layer utilities {
+  .font-display {
+    font-family: var(--font-display);
+  }
+  /* Staggered reveal: children rise+fade on mount. The initial hidden state
+     lives ONLY inside no-preference, so reduced-motion users and headless
+     renders show fully-visible content immediately (never a blank section). */
+  @media (prefers-reduced-motion: no-preference) {
+    .reveal {
+      animation: var(--animate-rise);
+    }
+    .stagger > * {
+      animation: var(--animate-rise);
+      animation-delay: calc(var(--stagger-step, 45ms) * var(--i, 0));
+    }
+    .bloom {
+      animation: var(--animate-bloom);
+    }
+  }
+  .tabular {
+    font-variant-numeric: tabular-nums;
+    font-feature-settings: "tnum";
+  }
+}
+
+@media (prefers-reduced-motion: reduce) {
+  *,
+  *::before,
+  *::after {
+    animation-duration: 0.01ms !important;
+    animation-iteration-count: 1 !important;
+    transition-duration: 0.01ms !important;
   }
 }

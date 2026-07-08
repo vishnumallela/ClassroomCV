@@ -1,10 +1,24 @@
-# ClassroomCV
+# Luminary
 
-Upload a classroom recording and get structured teaching analytics: teacher
-presence, entries and exits, time at the board, and student occupancy over time.
-The detection pipeline (YOLO11m-pose, BoT-SORT, re-identification, SAM 2 board
-detection) runs in a durable background worker; the dashboard reads the results
-over a typed API.
+_Every lesson, brought to light._
+
+Upload a classroom recording and get trustworthy teaching analytics: teacher
+presence, entries and exits, time at the board, circulation among the desks,
+how the class settled, and student occupancy over time — each shown with an
+honest confidence level, never a falsely precise number. No facial recognition,
+no named students, aggregate insights only.
+
+The detection pipeline (YOLO11m-pose, BoT-SORT, CLIP re-identification, SAM 2
+zone detection) runs in a durable background worker; the dashboard reads the
+results over a typed API. Every analysed lesson also carries a **data-quality
+report** (`services/ml-service/app/quality.py`) — coverage, tracker
+fragmentation, and a re-identification-independent concurrent head count — so
+the dashboard can say how much each figure can be trusted.
+
+The **How it works** page (`/architecture`) explains the whole pipeline in plain
+language, and [`docs/architecture-decision.md`](docs/architecture-decision.md)
+is the SOTA + scalability decision record (detection/tracking upgrades, the
+80-camera streaming path, and the TimescaleDB tiering for high-volume ingest).
 
 ## Layout
 

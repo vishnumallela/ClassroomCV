@@ -237,6 +237,7 @@ export async function replaceDerived(
       entryExit: a.entry_exit ?? [],
       occupancy: a.occupancy ?? [],
       heatmap: a.heatmap ?? { grid_w: 0, grid_h: 0, teacher: [], students: [] },
+      dataQuality: a.data_quality ?? null,
       computedAt: new Date(),
     });
 
@@ -282,6 +283,95 @@ export interface DetectionData {
   frames: { tsMs: number; boxes: BoxTuple[] }[];
 }
 
+/**
+ * Rebuild playback frames from the PERMANENT overlay tier (RDP-simplified
+ * keyframe boxes stored in tracks.meta.overlay) instead of the raw
+ * detection_events hot tier. Used as the fallback when raw rows have aged out
+ * under the 7-day retention policy (plan section 6): at 8h x 80-camera scale the
+ * raw firehose is dropped, but the sparse ~2s-cadence keyframes are kept forever
+ * at ~2% of the size, so the video overlay keeps working. Cost is O(tracks), not
+ * O(detections). Returns null when a video has no overlay tier (pre-overlay rows).
+ */
+type OverlayKeyframe = [number, number, number, number, number]; // [ts_ms, x, y, w, h]
+
+export async function getOverlayFrames(videoId: string): Promise<DetectionData | null> {
+  const video = await getVideo(videoId);
+  if (!video) return null;
+  const rows = await pg<{ track_no: number; role: string; keyframes: OverlayKeyframe[] | null }[]>`
+    select track_no, role, meta->'overlay'->'keyframes' as keyframes
+    from tracks
+    where video_id = ${videoId} and meta->'overlay'->'keyframes' is not null
+    order by track_no`;
+
+  const overlayTracks = rows
+    .filter(
+      (r): r is typeof r & { keyframes: OverlayKeyframe[] } =>
+        Array.isArray(r.keyframes) && r.keyframes.length > 0,
+    )
+    .map((r) => ({
+      trackNo: r.track_no,
+      role: r.role,
+      kfs: r.keyframes.toSorted((a, b) => a[0] - b[0]),
+    }));
+  if (overlayTracks.length === 0) return null;
+
+  const roles: Record<string, string> = {};
+  const times = new Set<number>();
+  for (const t of overlayTracks) {
+    roles[String(t.trackNo)] = t.role;
+    for (const kf of t.kfs) times.add(kf[0]);
+  }
+
+  // Stride the union timeline so total emitted boxes stay under MAX_BOXES even
+  // for an 8h video (which produces thousands of 2s-cadence keyframes).
+  let timeline = [...times].toSorted((a, b) => a - b);
+  const budget = Math.max(1, Math.floor(MAX_BOXES / overlayTracks.length));
+  if (timeline.length > budget) {
+    const stride = Math.ceil(timeline.length / budget);
+    timeline = timeline.filter((_v, i) => i % stride === 0);
+  }
+
+  // At each kept timestamp, HOLD each active track's most-recent keyframe box
+  // (binary search), so every concurrently-present person is drawn — not just
+  // the few whose keyframe landed exactly on this timestamp.
+  const frames = timeline
+    .map((ts) => {
+      const boxes: BoxTuple[] = [];
+      for (const t of overlayTracks) {
+        const kfs = t.kfs;
+        if (ts < kfs[0]![0] || ts > kfs[kfs.length - 1]![0]) continue;
+        let lo = 0;
+        let hi = kfs.length - 1;
+        let idx = 0;
+        while (lo <= hi) {
+          const mid = (lo + hi) >> 1;
+          if (kfs[mid]![0] <= ts) {
+            idx = mid;
+            lo = mid + 1;
+          } else {
+            hi = mid - 1;
+          }
+        }
+        const kf = kfs[idx]!;
+        boxes.push([t.trackNo, r4(kf[1]), r4(kf[2]), r4(kf[3]), r4(kf[4])]);
+      }
+      return { tsMs: ts, boxes };
+    })
+    .filter((f) => f.boxes.length > 0);
+  if (frames.length === 0) return null;
+
+  const span = frames[frames.length - 1]!.tsMs - frames[0]!.tsMs;
+  const fps = span > 0 ? Math.round(((frames.length - 1) / (span / 1000)) * 100) / 100 : 0.5;
+  return {
+    width: video.width ?? null,
+    height: video.height ?? null,
+    durationMs: video.durationMs ?? null,
+    fps,
+    roles,
+    frames,
+  };
+}
+
 export async function getDetections(videoId: string, fpsParam?: number): Promise<DetectionData> {
   const video = await getVideo(videoId);
   const width = video?.width ?? null;
@@ -299,6 +389,10 @@ export async function getDetections(videoId: string, fpsParam?: number): Promise
     from detection_events where video_id = ${videoId}`;
 
   if (!stats || stats.frames === 0 || stats.total === 0) {
+    // Raw hot tier is empty — either never written, or aged out by retention.
+    // Fall back to the permanent overlay tier so playback overlays survive.
+    const overlay = await getOverlayFrames(videoId);
+    if (overlay) return overlay;
     return { width, height, durationMs, fps: requestedFps, roles: {}, frames: [] };
   }
 

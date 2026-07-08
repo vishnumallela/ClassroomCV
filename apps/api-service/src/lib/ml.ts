@@ -29,6 +29,29 @@ export interface AnalysisResultEvent {
   track_no: number | null;
 }
 
+export type QualityTier = "high" | "medium" | "low";
+
+export interface DataQuality {
+  detections: number;
+  frames: number;
+  identities: number;
+  raw_tracks: number;
+  fragmentation: number;
+  coverage: number;
+  occupied_buckets: number;
+  span_buckets: number;
+  concurrent_peak: number;
+  concurrent_typical: number;
+  confidence: {
+    overall: QualityTier;
+    occupancy: QualityTier;
+    identity: QualityTier;
+    coverage: QualityTier;
+    teacher: QualityTier;
+  };
+  notes: string[];
+}
+
 export interface AnalysisResultAnalytics {
   teacher_present_ms: number;
   teacher_board_ms: number | null;
@@ -41,6 +64,7 @@ export interface AnalysisResultAnalytics {
   avg_students: number | null;
   max_students: number | null;
   heatmap: { grid_w: number; grid_h: number; teacher: number[]; students: number[] };
+  data_quality?: DataQuality | null;
 }
 
 export interface AnalysisResult {

@@ -1,31 +1,45 @@
-import { ArrowRight } from "lucide-react";
+import { Boxes, Clapperboard, Database, LayoutDashboard, ScanLine, Workflow } from "lucide-react";
+import type { CSSProperties } from "react";
 
 const STEPS = [
-  { label: "Browser", detail: "Upload a recording" },
-  { label: "API", detail: "Hono stores the file" },
-  { label: "Queue", detail: "BullMQ on Redis" },
-  { label: "Worker", detail: "Durable pipeline" },
-  { label: "ML service", detail: "YOLO and SAM2" },
-  { label: "TimescaleDB", detail: "Detections and analytics" },
-  { label: "Dashboard", detail: "Video and charts" },
+  { label: "Recording", detail: "An operator uploads a video", icon: Clapperboard },
+  { label: "Intake", detail: "The API stores it and queues a job", icon: Workflow },
+  { label: "Worker", detail: "A durable worker runs the pipeline", icon: Boxes },
+  { label: "Vision", detail: "Models find & follow every person", icon: ScanLine },
+  { label: "Store", detail: "Detections + insights land in the DB", icon: Database },
+  { label: "Dashboard", detail: "You read the lesson", icon: LayoutDashboard },
 ];
 
 export function FlowDiagram() {
   return (
-    <div className="overflow-x-auto pb-2">
-      <div className="flex min-w-max items-center gap-2">
+    <div className="overflow-x-auto pb-1">
+      <ol className="stagger flex min-w-max items-stretch gap-1.5">
         {STEPS.map((step, i) => (
-          <div key={step.label} className="flex items-center gap-2">
-            <div className="w-36 rounded-lg border border-border bg-card p-3 text-center">
-              <div className="text-sm font-medium">{step.label}</div>
-              <div className="mt-1 text-xs text-muted-foreground">{step.detail}</div>
+          <li
+            key={step.label}
+            className="flex items-center gap-1.5"
+            style={{ "--i": i } as CSSProperties}
+          >
+            <div className="flex w-36 flex-col gap-2 rounded-xl border border-border bg-card p-3.5">
+              <span className="flex size-8 items-center justify-center rounded-lg bg-primary/10 text-primary">
+                <step.icon className="size-[1.05rem]" />
+              </span>
+              <div>
+                <div className="text-sm font-medium">{step.label}</div>
+                <div className="mt-0.5 text-xs leading-snug text-muted-foreground">
+                  {step.detail}
+                </div>
+              </div>
             </div>
             {i < STEPS.length - 1 && (
-              <ArrowRight className="size-4 shrink-0 text-muted-foreground" />
+              <span
+                aria-hidden
+                className="h-px w-4 shrink-0 bg-gradient-to-r from-border to-primary/40"
+              />
             )}
-          </div>
+          </li>
         ))}
-      </div>
+      </ol>
     </div>
   );
 }

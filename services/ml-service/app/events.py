@@ -20,6 +20,7 @@ import math
 from bisect import bisect_left, bisect_right
 from typing import Optional
 
+from app import quality
 from app.geometry import bboxes_intersect, expand_bbox, polygon_bbox
 from app.models import Detection
 
@@ -467,6 +468,20 @@ def derive(
     max_students = max(counts) if counts else 0
     heatmap = spatial_heatmap(dets_by_track, roles_map)
 
+    # Additive, never mutates a derived number: an honest confidence report so
+    # the dashboard can say how much each figure can be trusted (coverage,
+    # tracker fragmentation, and a re-id-independent concurrent crowd count).
+    teacher_conf = (
+        roles_map.get(teacher_no, ("", None))[1] if teacher_no is not None else None
+    )
+    data_quality = quality.assess(
+        dets_by_track,
+        roles_map,
+        duration_ms,
+        teacher_confidence=teacher_conf,
+        identity_max_students=max_students,
+    )
+
     events.sort(key=lambda e: (e["video_ts_ms"], e["kind"]))
 
     analytics = {
@@ -481,5 +496,6 @@ def derive(
         "avg_students": avg_students,
         "max_students": max_students,
         "heatmap": heatmap,
+        "data_quality": data_quality,
     }
     return events, analytics

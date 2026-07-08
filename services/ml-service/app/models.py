@@ -169,6 +169,34 @@ class HeatmapOut(BaseModel):
     students: list[int]
 
 
+class QualityTiers(BaseModel):
+    overall: Literal["high", "medium", "low"]
+    occupancy: Literal["high", "medium", "low"]
+    identity: Literal["high", "medium", "low"]
+    coverage: Literal["high", "medium", "low"]
+    teacher: Literal["high", "medium", "low"]
+
+
+class DataQualityOut(BaseModel):
+    """Additive per-run trust report (app/quality.py). Annotates, never alters,
+    the derived numbers: how well the camera covered the lesson, how much the
+    tracker fragmented, and a re-identification-independent concurrent crowd
+    count that cross-checks the identity-based occupancy."""
+
+    detections: int
+    frames: int
+    identities: int
+    raw_tracks: int
+    fragmentation: float
+    coverage: float
+    occupied_buckets: int
+    span_buckets: int
+    concurrent_peak: int
+    concurrent_typical: int
+    confidence: QualityTiers
+    notes: list[str]
+
+
 class AnalyticsOut(BaseModel):
     teacher_present_ms: int
     teacher_board_ms: Optional[int]
@@ -181,6 +209,8 @@ class AnalyticsOut(BaseModel):
     avg_students: float
     max_students: int
     heatmap: HeatmapOut
+    # Optional so rows/tests predating the quality report still validate.
+    data_quality: Optional[DataQualityOut] = None
 
 
 class AnalysisResult(BaseModel):

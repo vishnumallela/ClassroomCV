@@ -2,6 +2,8 @@ import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
 import { Link, createFileRoute, useNavigate } from "@tanstack/react-router";
 import { Suspense, lazy, useRef, useState } from "react";
 import { BoardSessions } from "@/components/board-sessions";
+import { CirculationCard } from "@/components/circulation-card";
+import { DataQualityCard } from "@/components/data-quality-card";
 import { EventsTable } from "@/components/events-table";
 import { HeatmapCard } from "@/components/heatmap-card";
 import { KpiCards } from "@/components/kpi-cards";
@@ -138,6 +140,7 @@ function VideoDetail() {
               data.tracks.find((t) => t.role === "teacher")?.roleConfidence ?? null
             }
           />
+          <DataQualityCard analytics={analytics} />
           <LessonBreakdown analytics={analytics} durationMs={video.durationMs} />
           <TimelineStrip
             durationMs={video.durationMs}
@@ -150,6 +153,7 @@ function VideoDetail() {
           <Suspense fallback={<Skeleton className="h-64 w-full rounded-xl" />}>
             <OccupancyChart analytics={analytics} durationMs={video.durationMs} onSeek={seek} />
           </Suspense>
+          <CirculationCard analytics={analytics} />
           <HeatmapCard
             analytics={analytics}
             thumbnailUrl={video.thumbnailUrl ? `${API_URL}${video.thumbnailUrl}` : null}

@@ -10,7 +10,10 @@ export const env = createEnv({
       .url()
       .default("postgres://postgres:postgres@localhost:5433/classroom"),
     API_SERVICE__REDIS_URL: z.url().default("redis://localhost:6379"),
-    API_SERVICE__ML_SERVICE_URL: z.url().default("http://localhost:8000"),
+    // 127.0.0.1, not localhost: uvicorn binds IPv4-only, but Bun's fetch
+    // resolves localhost to IPv6 (::1) first and does not fall back, so
+    // "localhost" intermittently yields ConnectionRefused to the ML service.
+    API_SERVICE__ML_SERVICE_URL: z.url().default("http://127.0.0.1:8000"),
     API_SERVICE__DATA_DIR: z
       .string()
       .default("/Users/vishnumallela/Desktop/stackai/classroom-surveillance/data"),

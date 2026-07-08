@@ -46,6 +46,7 @@ export function toDetailDto(d: Detail) {
           entryExit: d.analytics.entryExit,
           occupancy: d.analytics.occupancy,
           heatmap: d.analytics.heatmap,
+          dataQuality: d.analytics.dataQuality ?? null,
         }
       : null,
   };
