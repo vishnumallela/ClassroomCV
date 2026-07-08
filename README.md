@@ -8,7 +8,7 @@ how the class settled, and student occupancy over time — each shown with an
 honest confidence level, never a falsely precise number. No facial recognition,
 no named students, aggregate insights only.
 
-The detection pipeline (YOLO11m-pose, BoT-SORT, CLIP re-identification, SAM 2
+The detection pipeline (YOLO26-pose, BoT-SORT, CLIP re-identification, SAM 2
 zone detection) runs in a durable background worker; the dashboard reads the
 results over a typed API. Every analysed lesson also carries a **data-quality
 report** (`services/ml-service/app/quality.py`) — coverage, tracker
@@ -26,7 +26,7 @@ is the SOTA + scalability decision record (detection/tracking upgrades, the
 apps/frontend/       Vite + TanStack Router SPA, shadcn UI, oRPC client
 apps/api-service/    Bun + Hono + oRPC, BullMQ pipeline, Drizzle + postgres.js
 packages/api-contracts/  Shared, type-only oRPC router types
-services/ml-service/     Python FastAPI, YOLO11m-pose + SAM 2 (uv-managed)
+services/ml-service/     Python FastAPI, YOLO26-pose + SAM 2 (uv-managed, GPU-ready)
 data/                    Uploaded videos, thumbnails
 docker-compose.yml       TimescaleDB (5433) and Redis (6379)
 ```

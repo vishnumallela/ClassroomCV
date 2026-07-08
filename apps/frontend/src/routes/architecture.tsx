@@ -29,12 +29,12 @@ const MODELS = [
   {
     icon: Camera,
     name: "The Spotter",
-    grownup: "YOLO11m-pose",
+    grownup: "YOLO26-pose",
     plain:
       "A single neural network that looks at one still frame and, in one pass, draws a tight box around every person and places 17 labelled dots on each body: eyes, nose, shoulders, elbows, wrists, hips, knees, ankles.",
     does: "It answers two questions per frame at once: where is each person, and what shape is their body making. The 17 dots (a skeleton) are what later let the system tell a standing adult apart from a seated child without ever looking at a face.",
     detail:
-      "Ultralytics YOLO11m-pose, run at 1280 px input (a 2560 px CCTV frame is only halved, so a 40 px back-row head survives) in half precision on the Mac GPU. A confidence floor and a 100-detection cap per frame keep the far rows in without flooding the tracker.",
+      "Ultralytics YOLO26-pose, the latest generation (NMS-free, up to +7.2 keypoint AP over YOLO11). It runs at 1280 to 1536 px so a 40 px back-row head survives the downscale, in half precision. It is device-aware: the large yolo26x variant on a production GPU (exported to TensorRT for roughly a 5x fp16 speedup), a lighter yolo26m for laptop development. A confidence floor and a 100-detection cap per frame keep the far rows in without flooding the tracker.",
   },
   {
     icon: Boxes,
@@ -159,7 +159,7 @@ const STACK = [
   { layer: "Frontend", tech: "Vite, TanStack Router and Query, shadcn, Tailwind" },
   { layer: "API", tech: "Bun, Hono, oRPC, Drizzle" },
   { layer: "Queue", tech: "BullMQ on Redis, with a live job dashboard" },
-  { layer: "ML service", tech: "FastAPI, Ultralytics YOLO11m-pose, SAM 2, CLIP, ffmpeg" },
+  { layer: "ML service", tech: "FastAPI, Ultralytics YOLO26-pose, SAM 2, CLIP, ffmpeg" },
   { layer: "Database", tech: "TimescaleDB, a time-series Postgres for the detection firehose" },
 ];
 

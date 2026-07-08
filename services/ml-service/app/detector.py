@@ -141,21 +141,53 @@ def model_loaded() -> bool:
     return _model is not None
 
 
+# Best YOLO26 pose weight per resolved device when Settings.model_name is
+# 'auto'. YOLO26 is NMS-free and reports up to +7.2 pose AP over YOLO11; a GPU
+# affords the x variant, while mps/cpu stay on m for fast dev iteration. Any of
+# these is overridable via MODEL_NAME (a .pt weight or a TensorRT .engine).
+_DEVICE_MODEL_DEFAULT = {
+    "cuda": "yolo26x-pose.pt",
+    "mps": "yolo26m-pose.pt",
+    "cpu": "yolo26m-pose.pt",
+}
+
+
 def get_device() -> str:
-    """Effective inference device ('mps' or 'cpu')."""
+    """Effective inference device: 'cuda', 'mps', or 'cpu'.
+
+    Resolves Settings.device. 'auto' prefers cuda, then mps, then cpu; an
+    explicit device is honoured but degrades to cpu when unavailable so a
+    misconfigured box does not crash. Once a runtime failure trips
+    _fallback_cpu, cpu is pinned for the rest of the process.
+    """
     if _fallback_cpu:
         return "cpu"
-    configured = get_settings().device
-    if configured == "mps":
-        try:
-            import torch
+    configured = (get_settings().device or "auto").strip().lower()
+    cuda_ok = mps_ok = False
+    try:
+        import torch
 
-            if torch.backends.mps.is_available():
-                return "mps"
-        except Exception:  # pragma: no cover - torch import issues
-            pass
-        return "cpu"
-    return configured
+        cuda_ok = bool(torch.cuda.is_available())
+        mps_ok = bool(torch.backends.mps.is_available())
+    except Exception:  # pragma: no cover - torch import issues
+        pass
+    if configured in ("", "auto"):
+        return "cuda" if cuda_ok else ("mps" if mps_ok else "cpu")
+    if configured == "cuda":
+        return "cuda" if cuda_ok else ("mps" if mps_ok else "cpu")
+    if configured == "mps":
+        return "mps" if mps_ok else "cpu"
+    return configured  # explicit 'cpu' or a specific 'cuda:N' device string
+
+
+def resolve_model_name() -> str:
+    """The YOLO weight to load: Settings.model_name, or the best device default
+    when it is 'auto'/empty."""
+    configured = (get_settings().model_name or "").strip()
+    if configured and configured.lower() != "auto":
+        return configured
+    base = get_device().split(":", 1)[0]  # 'cuda:0' -> 'cuda'
+    return _DEVICE_MODEL_DEFAULT.get(base, "yolo26m-pose.pt")
 
 
 def _get_model():
@@ -164,7 +196,9 @@ def _get_model():
         _ensure_lap_shim()  # must precede any ultralytics.trackers import
         from ultralytics import YOLO
 
-        _model = YOLO(get_settings().model_name)
+        name = resolve_model_name()
+        logger.info("loading pose model %s on device %s", name, get_device())
+        _model = YOLO(name)
     return _model
 
 
@@ -192,8 +226,8 @@ def _track_frame(model, frame: np.ndarray, device: str):
         verbose=False,
     )
     try:
-        # fp16 only on the GPU path; the cpu fallback stays fp32.
-        return model.track(frame, device=effective, half=effective == "mps", **kwargs)
+        # fp16 on any GPU path (cuda or mps); the cpu fallback stays fp32.
+        return model.track(frame, device=effective, half=effective != "cpu", **kwargs)
     except Exception as exc:
         if effective == "cpu":
             raise
