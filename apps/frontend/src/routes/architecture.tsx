@@ -257,6 +257,12 @@ const STORAGE: { tier: string; contents: string; policy: string }[] = [
     contents: "events, track summaries, video_analytics, 1-min occupancy continuous aggregate",
     policy: "permanent; negligible size; everything the dashboard reads",
   },
+  {
+    tier: "Media",
+    contents: "uploaded video + thumbnail bytes (blobs, not DB rows)",
+    policy:
+      "local disk (dev) or S3-compatible object storage; on-prem MinIO keeps student video on-site, cloud S3/R2 by config; worker caches a local copy for ffmpeg/ML",
+  },
 ];
 
 const BOUNDARIES: [string, string][] = [
@@ -292,6 +298,7 @@ const STACK: [string, string][] = [
   ["Queue", "BullMQ on Redis"],
   ["ML service", "FastAPI, Ultralytics YOLO26-pose, BoT-SORT, CLIP, YOLOE-26-seg, ffmpeg"],
   ["Store", "TimescaleDB (hypertable + continuous aggregates + compression/retention)"],
+  ["Media", "Local disk or MinIO / S3 / R2 for video + thumbnail blobs (Bun native S3 client)"],
 ];
 
 function Section({ title, children }: { title: string; children: React.ReactNode }) {

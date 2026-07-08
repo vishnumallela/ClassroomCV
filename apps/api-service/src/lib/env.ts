@@ -33,6 +33,17 @@ export const env = createEnv({
       ),
     API_SERVICE__QUEUE_DASHBOARD_USER: z.string().default("admin"),
     API_SERVICE__QUEUE_DASHBOARD_PASSWORD: z.string().default("admin"),
+    // Durable storage for video + thumbnail bytes. "local" writes into DATA_DIR
+    // (dev default). "s3" stores objects in MinIO / S3 / R2 (on-prem or cloud,
+    // one S3 API): durable, shared across workers, keeps large media out of the
+    // app's local disk. The worker still materializes a local copy because the
+    // ML service + ffmpeg need a real file path.
+    API_SERVICE__STORAGE_BACKEND: z.enum(["local", "s3"]).default("local"),
+    API_SERVICE__S3_ENDPOINT: z.string().default("http://localhost:9000"),
+    API_SERVICE__S3_BUCKET: z.string().default("luminary-videos"),
+    API_SERVICE__S3_ACCESS_KEY: z.string().default("minioadmin"),
+    API_SERVICE__S3_SECRET_KEY: z.string().default("minioadmin"),
+    API_SERVICE__S3_REGION: z.string().default("us-east-1"),
   },
   runtimeEnv: process.env,
   emptyStringAsUndefined: true,

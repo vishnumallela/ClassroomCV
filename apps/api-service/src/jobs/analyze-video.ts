@@ -14,6 +14,7 @@ import {
 import { generateThumbnail, probeVideo } from "@api/lib/media";
 import { logger } from "@api/lib/logger";
 import { mlDetectBoard, mlGetJob, mlGetJobResult, mlStartAnalysis } from "@api/lib/ml";
+import { ensureLocal, putLocalFile } from "@api/lib/storage";
 import type { AnalyzeJobData } from "@api/lib/queue";
 
 const POLL_INTERVAL_MS = 5_000;
@@ -57,13 +58,21 @@ async function probeStep(
 ): Promise<void> {
   const video = await requireCurrentRun(videoId, attemptId, jobId, "probe");
   await updateStatus(videoId, { status: "probing", progress: 0.02 });
+  // s3 backend: pull the uploaded object into the local cache so ffprobe /
+  // ffmpeg / the ML service (all of which need a real file path) can read it.
+  await ensureLocal(video.filePath);
   const meta = await probeVideo(video.filePath);
 
   let thumbnailPath: string | undefined;
   try {
     const mark = meta.durationMs ? (meta.durationMs / 1000) * 0.1 : 1;
     const out = join(dirname(video.filePath), "thumb.jpg");
-    if (await generateThumbnail(video.filePath, out, mark)) thumbnailPath = out;
+    if (await generateThumbnail(video.filePath, out, mark)) {
+      thumbnailPath = out;
+      await putLocalFile(out).catch((err) =>
+        logger.warn({ err, videoId }, "thumbnail upload to object store failed (non-fatal)"),
+      );
+    }
   } catch (err) {
     logger.warn({ err, videoId }, "thumbnail generation failed (non-fatal)");
   }

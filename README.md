@@ -58,13 +58,14 @@ http://localhost:8787/admin/queues.
 
 ## Ports
 
-| Service              | Port |
-| -------------------- | ---- |
-| Frontend (Vite)      | 3001 |
-| API (Hono)           | 8787 |
-| ML service (FastAPI) | 8000 |
-| TimescaleDB          | 5433 |
-| Redis                | 6379 |
+| Service              | Port       |
+| -------------------- | ---------- |
+| Frontend (Vite)      | 3001       |
+| API (Hono)           | 8787       |
+| ML service (FastAPI) | 8000       |
+| TimescaleDB          | 5433       |
+| Redis                | 6379       |
+| MinIO (S3 + console) | 9000, 9001 |
 
 ## Commands
 
@@ -84,3 +85,9 @@ The api-service reads `API_SERVICE__*` variables with sensible local defaults
 (database on `localhost:5433`, Redis on `localhost:6379`, ML service on
 `localhost:8000`). The frontend reads `FRONTEND__API_URL`, defaulting to
 `http://localhost:8787`.
+
+Video + thumbnail bytes are stored per `API_SERVICE__STORAGE_BACKEND`: `local`
+(the default; writes into `DATA_DIR`) or `s3` (MinIO / S3 / R2 via Bun's native
+S3 client, configured with `API_SERVICE__S3_ENDPOINT` / `_BUCKET` / `_ACCESS_KEY`
+/ `_SECRET_KEY`). On-prem MinIO keeps student video on the school's own
+infrastructure; the worker caches a local copy for ffmpeg and the ML service.

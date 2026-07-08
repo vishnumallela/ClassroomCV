@@ -1,10 +1,11 @@
-import { mkdir, rm } from "node:fs/promises";
+import { rm } from "node:fs/promises";
 import { basename, extname, join } from "node:path";
 import type { Context, Hono } from "hono";
 import { createVideo, deleteVideoRows, getVideo, setWorkflowRunId } from "@api/db/queries";
 import { env } from "@api/lib/env";
 import { logger } from "@api/lib/logger";
 import { enqueueAnalysis } from "@api/lib/queue";
+import { ensureLocal, openWriteSink, removeObjects } from "@api/lib/storage";
 
 const CONTENT_TYPES: Record<string, string> = {
   ".mp4": "video/mp4",
@@ -33,11 +34,11 @@ async function handleUpload(c: Context): Promise<Response> {
   const dir = join(env.API_SERVICE__DATA_DIR, "videos", id);
   const filePath = join(dir, `original${ext}`);
 
-  await mkdir(dir, { recursive: true });
   await createVideo({ id, title, originalFilename: rawName, filePath });
 
   const cleanup = async (): Promise<void> => {
     await rm(dir, { recursive: true, force: true }).catch(() => undefined);
+    await removeObjects([filePath]).catch(() => undefined);
     await deleteVideoRows(id).catch(() => undefined);
   };
 
@@ -54,7 +55,7 @@ async function handleUpload(c: Context): Promise<Response> {
     return c.json({ error: "Upload exceeds size limit." }, 413);
   }
 
-  const sink = Bun.file(filePath).writer();
+  const sink = await openWriteSink(filePath);
   let total = 0;
   let tooLarge = false;
   const reader = body.getReader();
@@ -85,6 +86,7 @@ async function handleUpload(c: Context): Promise<Response> {
   // A DELETE may have raced the upload; if the row is gone, discard the bytes.
   if (!(await getVideo(id))) {
     await rm(dir, { recursive: true, force: true }).catch(() => undefined);
+    await removeObjects([filePath]).catch(() => undefined);
     return c.json({ error: "Video was deleted during upload." }, 409);
   }
 
@@ -96,6 +98,8 @@ async function handleUpload(c: Context): Promise<Response> {
 async function serveVideo(c: Context, headOnly: boolean): Promise<Response> {
   const video = await getVideo(c.req.param("id"));
   if (!video) return c.notFound();
+  // s3 backend: pull the object into the local cache before range-serving it.
+  await ensureLocal(video.filePath).catch(() => undefined);
   const file = Bun.file(video.filePath);
   if (!(await file.exists())) return c.notFound();
 
@@ -152,6 +156,7 @@ async function serveVideo(c: Context, headOnly: boolean): Promise<Response> {
 async function serveThumbnail(c: Context, headOnly: boolean): Promise<Response> {
   const video = await getVideo(c.req.param("id"));
   if (!video?.thumbnailPath) return c.notFound();
+  await ensureLocal(video.thumbnailPath).catch(() => undefined);
   const file = Bun.file(video.thumbnailPath);
   if (!(await file.exists())) return c.notFound();
   return new Response(headOnly ? null : file.stream(), {

@@ -9,6 +9,7 @@ import {
   getVideoStatus,
   listVideos,
 } from "@api/db/queries";
+import { removeObjects } from "@api/lib/storage";
 import { base } from "@api/orpc/base";
 import { toDetailDto } from "@api/router/dto";
 
@@ -38,6 +39,7 @@ export const videosRouter = {
     if (!video) throw errors.NOT_FOUND();
     await deleteVideoRows(input.id);
     await rm(dirname(video.filePath), { recursive: true, force: true }).catch(() => undefined);
+    await removeObjects([video.filePath, video.thumbnailPath ?? ""]).catch(() => undefined);
     return { ok: true as const };
   }),
 };
