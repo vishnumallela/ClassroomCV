@@ -243,7 +243,7 @@ const STORAGE: { tier: string; contents: string; policy: string }[] = [
   {
     tier: "Hot",
     contents: "raw per-frame detection_events (TimescaleDB hypertable, wall-clock ts, ~1 h chunks)",
-    policy: "compress after 24 h, drop after 7 days",
+    policy: "compress after 1 h (static post-write), drop after 2 days; only needed for cheap /rederive",
   },
   {
     tier: "Overlay",
