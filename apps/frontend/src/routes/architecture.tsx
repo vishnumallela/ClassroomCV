@@ -54,7 +54,7 @@ const MODELS = [
       "A memory for people who disappear and come back. When someone is hidden for a while or walks out and returns, the Tracker gives them a brand new number. The Reuniter decides which of those pieces are actually the same person and stitches them back into one identity.",
     does: "It stops a teacher who steps into the corridor and returns from being counted as two people (which would halve her measured time), and stops a student who leans out of view from being double counted.",
     detail:
-      "Every fragment pair is scored on appearance (a CLIP image embedding plus an HSV torso-colour histogram) and, decisively for a room in identical uniforms where appearance is nearly useless, on spatial continuity and a seat anchor: two stationary fragments sitting at different desks are refused outright, no matter how similar their shirts, because a seat is the one thing a uniform cannot fake.",
+      "Every fragment pair is scored on appearance (a CLIP image embedding plus an HSV torso-colour histogram) and, decisively for a room in identical uniforms where appearance is nearly useless, on spatial continuity and a seat anchor: two stationary fragments at different desks are refused outright, no matter how similar their shirts, because a seat is the one thing a uniform cannot fake. These appearance vectors are ephemeral: they link fragments within one lesson and are never stored as a lasting identity. (Prior art points to a dedicated person-re-identification backbone here as the next upgrade.)",
   },
   {
     icon: ScanFace,
@@ -149,10 +149,11 @@ const STAGES = [
 
 const NOT_DOING = [
   "Recognise faces or identify any student by name",
-  "Score a child's attention, engagement, or emotion (video cannot honestly measure this)",
-  "Produce a per-student attendance register",
-  "Claim distances in feet without camera calibration",
-  "Keep student appearance fingerprints after the video is processed",
+  "Infer emotion, affect, attention, or engagement (video cannot validly measure these, and inferring them in schools is restricted under the EU AI Act)",
+  "Treat head or body orientation as gaze or a state of mind; it is only an orientation-toward-the-board proxy",
+  "Produce a per-student attendance register or a longitudinal per-child profile",
+  "Claim proximity or distance in metres without a one-time camera calibration",
+  "Persist a student's appearance fingerprint; re-identification is ephemeral, within a single lesson only",
 ];
 
 const STACK = [
@@ -504,11 +505,48 @@ function Architecture() {
             ))}
           </ul>
           <p className="mt-4 border-t border-border pt-3 text-sm leading-relaxed">
-            These are not limitations to apologise for. They are the reason a school can adopt
-            Luminary without a privacy fight. Insights are aggregate, teacher-facing, and about the{" "}
+            These are not limitations to apologise for. They follow the evidence: reading emotion or
+            attention off video is scientifically unsupported and legally restricted in schools, so
+            we do not claim it. Insights are aggregate, teacher-facing, and about the{" "}
             <span className="font-medium">craft of teaching</span>, never about surveilling
             children.
           </p>
+        </Card>
+      </Section>
+
+      {/* Grounded in prior work */}
+      <Section title="Grounded in prior work">
+        <Card className="p-6">
+          <p className="text-base leading-relaxed">
+            The design follows the established research on classroom sensing, not guesswork:
+          </p>
+          <ul className="mt-4 space-y-3 text-sm leading-relaxed">
+            <li>
+              <span className="font-medium">Skeleton-first, on-device, no stored video.</span> The
+              reference deployed system, Carnegie Mellon&apos;s EduSense, ran on-premises, kept no
+              recordings, identified no individuals, and reported roughly 92% accuracy on body-level
+              signals. Luminary&apos;s self-hosted GPU, events-only database, and pose-not-face
+              approach mirror that defensible pattern.
+            </li>
+            <li>
+              <span className="font-medium">Movement patterns, honestly framed.</span> The teacher
+              circulation view uses the validated mobility constructs from the Moodoo research
+              (dwell spread, room coverage, presenter vs supervisor pattern) rather than an invented
+              score, and labels them as image-plane movement, not a rating.
+            </li>
+            <li>
+              <span className="font-medium">A clear line where the evidence draws one.</span> The
+              scientific literature finds emotion and attention cannot be validly read from video,
+              and the EU AI Act restricts inferring them in education, so those live in the
+              boundaries above rather than the dashboard.
+            </li>
+            <li>
+              <span className="font-medium">A known upgrade path.</span> Under identical uniforms
+              the appearance step is the weakest link; the prior art points to a dedicated
+              person-re-identification backbone and motion-first tracking as the next hardening
+              steps. These are written up in the project&apos;s decision records.
+            </li>
+          </ul>
         </Card>
       </Section>
 

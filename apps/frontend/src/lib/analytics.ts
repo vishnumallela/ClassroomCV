@@ -81,7 +81,7 @@ export function lessonStats(
 }
 
 /**
- * Mean concurrent students over the buckets where anyone was present — undoes
+ * Mean concurrent students over the buckets where anyone was present, undoes
  * the dilution of avg_students by empty pre/post-lesson buckets, so it reads
  * closer to true class size. Additive: does not touch the blessed avg_students.
  */
@@ -158,7 +158,7 @@ export function lessonRhythm(
 
 // --------------------------------------------------------------------------- //
 // Teacher circulation, from the dwell heatmap (teacher vs student per-cell
-// sample counts). Everything here is IMAGE-PLANE coverage — never metric
+// sample counts). Everything here is IMAGE-PLANE coverage, never metric
 // distance in feet, which would need camera calibration we do not have.
 // --------------------------------------------------------------------------- //
 
@@ -169,8 +169,19 @@ export type Circulation = {
   amongStudentsShare: number; // share of teacher time in cells where students sit
   focusShare: number; // share of teacher time in her single most-used cell
   reachedBackRows: boolean; // did she reach the row band farthest from the front
+  spread: number; // normalized dwell entropy 0..1 (Moodoo): 0 = one spot, 1 = even
+  style: "presenter" | "supervisor" | "balanced"; // Moodoo-style teaching pattern
   samples: number;
 };
+
+// Moodoo (Martinez-Maldonado et al.) validates that a teacher's dwell
+// distribution separates "presenter/authoritative" (front-anchored, low spread)
+// from "supervisor" (mobile, high spread, reaches learners) teaching patterns.
+// We compute those from the dwell heatmap; they are image-plane, relative to
+// this lesson, and describe MOVEMENT PATTERN only, never teaching quality.
+const SPREAD_LOW = 0.35; // below this, dwell is concentrated in a few cells
+const SPREAD_HIGH = 0.6; // above this, dwell is well distributed
+const FOCUS_HIGH = 0.5; // >half of time in one cell = anchored
 
 export function circulation(hm: Heatmap | null | undefined): Circulation | null {
   if (!hm || hm.grid_w <= 0 || hm.grid_h <= 0) return null;
@@ -182,14 +193,24 @@ export function circulation(hm: Heatmap | null | undefined): Circulation | null 
   let activeCells = 0;
   let amongStudents = 0;
   let topCell = 0;
+  let entropy = 0; // -sum p*ln p over occupied teacher cells
   for (let i = 0; i < teacher.length; i++) {
     const t = teacher[i]!;
     const st = students[i] ?? 0;
     if (t > 0 || st > 0) activeCells++;
-    if (t > 0) teacherCells++;
+    if (t > 0) {
+      teacherCells++;
+      const p = t / total;
+      entropy -= p * Math.log(p);
+    }
     if (t > 0 && st > 0) amongStudents += t;
     if (t > topCell) topCell = t;
   }
+  // Normalize entropy by ln(occupied cells) so spread is 0..1 and comparable
+  // across rooms regardless of how many cells the teacher visited.
+  const spread = teacherCells > 1 ? entropy / Math.log(teacherCells) : 0;
+  const focusShare = topCell / total;
+  const coverage = activeCells > 0 ? teacherCells / activeCells : 0;
 
   // "Back rows" = the third of grid rows with the most student mass but the
   // least camera proximity; we approximate it as the student-dense row band
@@ -217,11 +238,23 @@ export function circulation(hm: Heatmap | null | undefined): Circulation | null 
     }
   }
 
+  // Classify the movement pattern (Moodoo): anchored + low spread reads as a
+  // front-of-room presenter; wide spread that reaches learners reads as a
+  // supervisor circulating the room; anything else is balanced.
+  let style: Circulation["style"] = "balanced";
+  if (focusShare >= FOCUS_HIGH || spread < SPREAD_LOW) {
+    style = "presenter";
+  } else if (spread >= SPREAD_HIGH && reachedBackRows && coverage >= 0.4) {
+    style = "supervisor";
+  }
+
   return {
-    coverage: activeCells > 0 ? teacherCells / activeCells : 0,
+    coverage,
     amongStudentsShare: amongStudents / total,
-    focusShare: topCell / total,
+    focusShare,
     reachedBackRows,
+    spread,
+    style,
     samples: total,
   };
 }
