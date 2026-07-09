@@ -11,6 +11,10 @@ const badgeVariants = cva(
         secondary: "border-transparent bg-secondary text-secondary-foreground",
         outline: "border-border text-muted-foreground",
         destructive: "border-transparent bg-destructive/15 text-destructive",
+        // Data-quality / confidence tiers (semantic tones from the theme).
+        high: "border-transparent bg-tier-high/15 text-tier-high",
+        medium: "border-transparent bg-tier-medium/15 text-tier-medium",
+        low: "border-transparent bg-tier-low/15 text-tier-low",
       },
     },
     defaultVariants: { variant: "default" },

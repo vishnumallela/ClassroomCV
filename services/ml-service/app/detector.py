@@ -27,7 +27,6 @@ from __future__ import annotations
 import logging
 import math
 import os
-import shutil
 import tempfile
 import urllib.parse
 import urllib.request
@@ -284,19 +283,61 @@ def _media_url_host_allowed(url: str) -> bool:
     return urllib.parse.urlparse(url).netloc in allow
 
 
+class _AllowlistRedirectHandler(urllib.request.HTTPRedirectHandler):
+    """Re-validate every redirect hop against media_url_allowlist.
+
+    urllib follows 3xx redirects by default, and the allowlist is only checked
+    on the INITIAL url. Without this, an allowlisted origin could 301/302 the
+    fetch to an internal address (169.254.169.254, an intranet host) that the
+    allowlist never saw -- the classic SSRF-via-redirect bypass. Here every hop
+    is re-validated, so a redirect to a non-allowlisted host is refused.
+    """
+
+    def redirect_request(self, req, fp, code, msg, headers, newurl):  # noqa: D102
+        if not _media_url_host_allowed(newurl):
+            raise ValueError(
+                f"media URL redirected to a non-allowlisted host: {newurl!r}"
+            )
+        return super().redirect_request(req, fp, code, msg, headers, newurl)
+
+
+# Opener whose only redirect handler re-validates the allowlist on each hop.
+_MEDIA_URL_OPENER = urllib.request.build_opener(_AllowlistRedirectHandler)
+# Cap the download so a huge (or malicious) allowlisted object cannot exhaust
+# disk. Defaults to 8 GiB (2x the API's 4 GiB upload cap, for headroom);
+# override with MEDIA_MAX_DOWNLOAD_BYTES.
+_MEDIA_MAX_DOWNLOAD_BYTES = int(os.environ.get("MEDIA_MAX_DOWNLOAD_BYTES", 8 * 1024**3))
+_DOWNLOAD_CHUNK = 1024 * 1024
+
+
 def _download_to_temp(url: str) -> str:
     """Stream an allowlisted media URL to a temp file (chunked, no full buffer).
 
-    Placed inside DATA_DIR when configured so the downloaded copy also satisfies
-    _validate_video_path's DATA_DIR containment when the pipeline re-validates.
+    Redirects are re-validated against the allowlist on every hop, and the total
+    byte count is capped, so neither an SSRF-via-redirect nor an oversized object
+    can slip through. Placed inside DATA_DIR when configured so the downloaded
+    copy also satisfies _validate_video_path's DATA_DIR containment when the
+    pipeline re-validates.
     """
     data_dir = os.environ.get("DATA_DIR")
     tmp_dir = data_dir if data_dir and os.path.isdir(data_dir) else tempfile.gettempdir()
     fd, tmp = tempfile.mkstemp(prefix="mediacache_", suffix=".mp4", dir=tmp_dir)
     try:
         with os.fdopen(fd, "wb") as out:
-            with urllib.request.urlopen(url, timeout=30) as resp:  # noqa: S310 (host allowlisted)
-                shutil.copyfileobj(resp, out, length=1024 * 1024)
+            # noqa: S310 (host allowlisted, redirects re-validated per hop)
+            with _MEDIA_URL_OPENER.open(url, timeout=30) as resp:
+                remaining = _MEDIA_MAX_DOWNLOAD_BYTES
+                while True:
+                    chunk = resp.read(_DOWNLOAD_CHUNK)
+                    if not chunk:
+                        break
+                    remaining -= len(chunk)
+                    if remaining < 0:
+                        raise ValueError(
+                            "media download exceeds "
+                            f"{_MEDIA_MAX_DOWNLOAD_BYTES} byte cap: {url!r}"
+                        )
+                    out.write(chunk)
     except Exception:
         try:
             os.unlink(tmp)

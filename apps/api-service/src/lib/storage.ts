@@ -17,7 +17,8 @@
  * Uses Bun's built-in S3 client (Bun.S3Client) — no extra dependency.
  */
 import { S3Client } from "bun";
-import { mkdir } from "node:fs/promises";
+import { randomUUID } from "node:crypto";
+import { mkdir, rename, unlink } from "node:fs/promises";
 import { dirname } from "node:path";
 import { env } from "@api/lib/env";
 
@@ -72,17 +73,42 @@ export async function openWriteSink(localPath: string): Promise<WriteSink> {
   };
 }
 
+/** In-process single-flight: concurrent ensureLocal calls for the same path
+ *  share one download instead of racing to write the same file. */
+const inflightDownloads = new Map<string, Promise<void>>();
+
 /**
  * Guarantee the bytes exist at `localPath` (probe / ffmpeg / the ML service
  * need a real file). Local: already present. S3: stream the object to disk if
  * the local cache is missing.
+ *
+ * The object is streamed to a private temp file and then atomically renamed
+ * onto the canonical path, so (a) two concurrent cold-cache reads can never
+ * interleave bytes into the served file, and (b) a transient S3 error can never
+ * leave a truncated cache that is then served forever — only a fully streamed
+ * object is ever published, and a failed stream unlinks its temp.
  */
-export async function ensureLocal(localPath: string): Promise<void> {
-  if (!isS3) return;
-  if (await Bun.file(localPath).exists()) return;
-  await mkdir(dirname(localPath), { recursive: true });
-  // Bun.write streams the S3File to disk without buffering the whole object.
-  await Bun.write(localPath, client().file(objectKey(localPath)));
+export function ensureLocal(localPath: string): Promise<void> {
+  if (!isS3) return Promise.resolve();
+  const existing = inflightDownloads.get(localPath);
+  if (existing) return existing;
+
+  const download = (async () => {
+    if (await Bun.file(localPath).exists()) return;
+    await mkdir(dirname(localPath), { recursive: true });
+    const tmp = `${localPath}.tmp-${randomUUID()}`;
+    try {
+      // Bun.write streams the S3File to disk without buffering the whole object.
+      await Bun.write(tmp, client().file(objectKey(localPath)));
+      await rename(tmp, localPath); // atomic within DATA_DIR (same filesystem)
+    } catch (err) {
+      await unlink(tmp).catch(() => undefined);
+      throw err;
+    }
+  })();
+
+  inflightDownloads.set(localPath, download);
+  return download.finally(() => inflightDownloads.delete(localPath));
 }
 
 /**

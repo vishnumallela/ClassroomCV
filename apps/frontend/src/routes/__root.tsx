@@ -1,7 +1,6 @@
 import type { QueryClient } from "@tanstack/react-query";
 import { Link, Outlet, createRootRouteWithContext } from "@tanstack/react-router";
-import { BookOpen, LayoutGrid, ShieldCheck } from "lucide-react";
-import { LuminaryLogo } from "@/components/luminary-logo";
+import { BookOpen, LayoutGrid } from "lucide-react";
 import { ThemeToggle } from "@/components/theme-toggle";
 
 export interface RouterContext {
@@ -22,7 +21,9 @@ function RootLayout() {
     <div className="flex min-h-dvh bg-background text-foreground">
       <aside className="sticky top-0 hidden h-dvh w-64 shrink-0 flex-col border-r border-border bg-card/50 px-4 pb-4 md:flex">
         <Link to="/" className="flex h-16 items-center">
-          <LuminaryLogo bloom />
+          <span className="font-display text-[1.35rem] font-medium leading-none tracking-[-0.02em]">
+            Luminary
+          </span>
         </Link>
 
         <nav className="mt-2 flex flex-col gap-1">
@@ -45,29 +46,15 @@ function RootLayout() {
           ))}
         </nav>
 
-        <div className="mt-auto space-y-3">
-          <div className="rounded-lg border border-border bg-background/60 p-3">
-            <div className="flex items-center gap-2 text-xs font-medium text-foreground">
-              <ShieldCheck className="size-4 text-primary" />
-              Privacy by design
-            </div>
-            <p className="mt-1.5 text-[0.7rem] leading-relaxed text-muted-foreground">
-              No facial recognition. No named students. Aggregate insights only.
-            </p>
-          </div>
-          <div className="flex items-center justify-between px-1">
-            <span className="font-display text-xs italic text-muted-foreground">
-              Every lesson, brought to light
-            </span>
-            <ThemeToggle />
-          </div>
+        <div className="mt-auto flex justify-end px-1">
+          <ThemeToggle />
         </div>
       </aside>
 
       {/* Mobile top bar */}
       <header className="fixed inset-x-0 top-0 z-[var(--z-sticky)] flex h-14 items-center justify-between border-b border-border bg-card/80 px-4 backdrop-blur md:hidden">
         <Link to="/">
-          <LuminaryLogo />
+          <span className="font-display text-lg font-medium tracking-[-0.02em]">Luminary</span>
         </Link>
         <div className="flex items-center gap-1">
           {NAV.map(({ to, label, icon: Icon, exact }) => (

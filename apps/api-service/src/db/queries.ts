@@ -373,11 +373,18 @@ export async function getOverlayFrames(videoId: string): Promise<DetectionData |
 }
 
 export async function getDetections(videoId: string, fpsParam?: number): Promise<DetectionData> {
+  const requestedFps = Math.min(30, fpsParam && fpsParam > 0 ? fpsParam : DEFAULT_FPS);
+  // A non-UUID id would reach the raw stats query below and make Postgres throw
+  // "invalid input syntax for type uuid" (an unhandled 500). Guard like
+  // getVideo/getVideoStatus and degrade to an empty result instead.
+  if (!isUuid(videoId)) {
+    return { width: null, height: null, durationMs: null, fps: requestedFps, roles: {}, frames: [] };
+  }
+
   const video = await getVideo(videoId);
   const width = video?.width ?? null;
   const height = video?.height ?? null;
   const durationMs = video?.durationMs ?? null;
-  const requestedFps = Math.min(30, fpsParam && fpsParam > 0 ? fpsParam : DEFAULT_FPS);
 
   const [stats] = await pg<
     { total: number; frames: number; min_ts: number | null; max_ts: number | null }[]

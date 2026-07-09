@@ -264,13 +264,63 @@ def test_resolve_url_downloads_when_allowlisted(monkeypatch):
     monkeypatch.delenv("DATA_DIR", raising=False)
     get_settings.cache_clear()
     payload = b"FAKE-VIDEO-BYTES" * 1000
-    monkeypatch.setattr(D.urllib.request, "urlopen", lambda url, timeout=30: io.BytesIO(payload))
+    # The fetch now goes through the allowlist-revalidating opener, not the bare
+    # urlopen, so patch the opener's open().
+    monkeypatch.setattr(D._MEDIA_URL_OPENER, "open", lambda url, timeout=30: io.BytesIO(payload))
     path, is_temp = D.resolve_video_source("http://host:1234/bucket/key.mp4")
     try:
         assert is_temp is True
         assert Path(path).read_bytes() == payload
     finally:
         Path(path).unlink(missing_ok=True)
+    get_settings.cache_clear()
+
+
+def test_download_rejects_redirect_to_non_allowlisted_host(monkeypatch):
+    """A 3xx from an allowlisted origin to an internal host is refused (the
+    SSRF-via-redirect bypass): the redirect handler re-checks every hop."""
+    import io
+    import urllib.request
+
+    from app import detector as D
+    from app.config import get_settings
+
+    monkeypatch.setenv("MEDIA_URL_ALLOWLIST", "cache.example.com")
+    get_settings.cache_clear()
+    handler = D._AllowlistRedirectHandler()
+    with pytest.raises(ValueError, match="non-allowlisted host"):
+        handler.redirect_request(
+            None, None, 302, "Found", {}, "http://169.254.169.254/latest/meta-data/"
+        )
+    # A redirect back to an allowlisted host is allowed to proceed.
+    req = handler.redirect_request(
+        urllib.request.Request("http://cache.example.com/a.mp4"),
+        io.BytesIO(b""),
+        302,
+        "Found",
+        {},
+        "http://cache.example.com/b.mp4",
+    )
+    assert req is not None
+    get_settings.cache_clear()
+
+
+def test_download_rejects_oversize_object(monkeypatch):
+    """An allowlisted object larger than the byte cap aborts (disk-exhaustion
+    guard) and leaves no temp file behind."""
+    import io
+
+    from app import detector as D
+    from app.config import get_settings
+
+    monkeypatch.setenv("MEDIA_URL_ALLOWLIST", "host:1234")
+    monkeypatch.delenv("DATA_DIR", raising=False)
+    get_settings.cache_clear()
+    monkeypatch.setattr(D, "_MEDIA_MAX_DOWNLOAD_BYTES", 4096)
+    big = io.BytesIO(b"x" * (4096 * 4))
+    monkeypatch.setattr(D._MEDIA_URL_OPENER, "open", lambda url, timeout=30: big)
+    with pytest.raises(ValueError, match="byte cap"):
+        D.resolve_video_source("http://host:1234/bucket/huge.mp4")
     get_settings.cache_clear()
 
 

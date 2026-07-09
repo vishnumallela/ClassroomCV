@@ -14,7 +14,7 @@ import {
 import { mkdir } from "node:fs/promises";
 import { generateThumbnail, probeVideo } from "@api/lib/media";
 import { logger } from "@api/lib/logger";
-import { mlDetectBoard, mlGetJob, mlGetJobResult, mlStartAnalysis } from "@api/lib/ml";
+import { mlDetectBoard, mlDetectDoor, mlGetJob, mlGetJobResult, mlStartAnalysis } from "@api/lib/ml";
 import { isS3, presignGet, putLocalFile } from "@api/lib/storage";
 
 // The bytes source for ffprobe/ffmpeg/the ML worker. On s3 this is a presigned
@@ -122,6 +122,34 @@ async function detectBoardStep(
   }
 }
 
+async function detectDoorStep(
+  videoId: string,
+  attemptId: string | undefined,
+  jobId: string,
+): Promise<void> {
+  await requireCurrentRun(videoId, attemptId, jobId, "detect-door");
+  if (await hasZoneKind(videoId, "door")) return;
+  try {
+    const video = await getVideo(videoId);
+    if (!video) return;
+    const res = await mlDetectDoor(videoId, mediaSource(video.filePath));
+    // Doors score lower than boards (tall/narrow geometry, softer color term),
+    // so the API auto-accept gate is lower than board's 0.5. The ML side has
+    // already rejected anything below DOOR_MIN_SCORE and returned a null polygon.
+    if (res.polygon && res.confidence >= 0.4) {
+      await requireCurrentRun(videoId, attemptId, jobId, "detect-door insert");
+      await insertZone(videoId, {
+        kind: "door",
+        polygon: res.polygon,
+        meta: { auto: true, confidence: res.confidence, method: res.method },
+      });
+    }
+  } catch (err) {
+    if (err instanceof UnrecoverableError) throw err;
+    logger.warn({ err, videoId }, "door auto-detect failed (continuing without door)");
+  }
+}
+
 async function startAnalysisStep(
   videoId: string,
   attemptId: string | undefined,
@@ -208,6 +236,7 @@ export async function processAnalyzeJob(job: Job<AnalyzeJobData>): Promise<void>
   try {
     await probeStep(videoId, attemptId, jobId);
     await detectBoardStep(videoId, attemptId, jobId);
+    await detectDoorStep(videoId, attemptId, jobId);
     const mlJobId = await startAnalysisStep(videoId, attemptId, jobId);
     await pollUntilDone(videoId, mlJobId, attemptId, jobId, job);
     await ingestStep(videoId, mlJobId, attemptId, jobId);

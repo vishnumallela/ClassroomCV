@@ -1,12 +1,10 @@
 @import "tailwindcss";
 
-/* Luminary type system: Fraunces (display serif) + Hanken Grotesk (UI) +
-   JetBrains Mono (data). A contrast-axis pairing (a warm humanist serif, a
-   neutral grotesque, and a precise monospace) reads premium and dodges the
-   all-Inter AI default. Variable fonts, self-hosted (no network dependency). */
-@import "@fontsource-variable/fraunces";
-@import "@fontsource-variable/hanken-grotesk";
-@import "@fontsource-variable/jetbrains-mono";
+/* Luminary type system: Geist (UI + display) + Geist Mono (data). One neutral
+   variable grotesque for all prose and headings, its monospace sibling for
+   data. Self-hosted, no network dependency. */
+@import "@fontsource-variable/geist";
+@import "@fontsource-variable/geist-mono";
 
 @variant dark (&:is(.dark *));
 
@@ -69,12 +67,13 @@
   --chart-4: oklch(0.6 0.11 300);
   --chart-5: oklch(0.65 0.13 25);
 
-  --font-display: "Fraunces Variable", Fraunces, Georgia, "Times New Roman", serif;
   --font-sans:
-    "Hanken Grotesk Variable", "Hanken Grotesk", ui-sans-serif, system-ui, -apple-system,
-    "Segoe UI", Roboto, sans-serif;
+    "Geist Variable", Geist, ui-sans-serif, system-ui, -apple-system, "Segoe UI", Roboto,
+    sans-serif;
+  /* display == sans: Geist is the only prose family, headings just weigh more */
+  --font-display: var(--font-sans);
   --font-mono:
-    "JetBrains Mono Variable", "JetBrains Mono", ui-monospace, "SF Mono", Menlo, monospace;
+    "Geist Mono Variable", "Geist Mono", ui-monospace, "SF Mono", Menlo, monospace;
 
   /* motion — calm, confident ease-out (no bounce, no elastic) */
   --ease-out-quint: cubic-bezier(0.22, 1, 0.36, 1);
@@ -246,7 +245,6 @@
     background-color: var(--color-background);
     color: var(--color-foreground);
     font-family: var(--font-sans);
-    font-feature-settings: "ss01", "cv01";
     -webkit-font-smoothing: antialiased;
     text-rendering: optimizeLegibility;
   }

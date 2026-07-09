@@ -1,5 +1,6 @@
 import type { RouterOutputs } from "@classroom/api-contracts";
 import { CircleAlert, Info, ShieldCheck } from "lucide-react";
+import { Badge } from "@/components/ui/badge";
 import { Card } from "@/components/ui/card";
 import { cn } from "@/lib/utils";
 
@@ -7,31 +8,19 @@ type Analytics = NonNullable<RouterOutputs["videos"]["get"]["analytics"]>;
 type DataQuality = NonNullable<Analytics["dataQuality"]>;
 type Tier = "high" | "medium" | "low";
 
-const TIER_META: Record<Tier, { label: string; dot: string; text: string; bg: string }> = {
-  high: { label: "Strong", dot: "bg-tier-high", text: "text-tier-high", bg: "bg-tier-high/12" },
-  medium: {
-    label: "Fair",
-    dot: "bg-tier-medium",
-    text: "text-tier-medium",
-    bg: "bg-tier-medium/12",
-  },
-  low: { label: "Tentative", dot: "bg-tier-low", text: "text-tier-low", bg: "bg-tier-low/12" },
+const TIER_META: Record<Tier, { label: string; dot: string }> = {
+  high: { label: "Strong", dot: "bg-tier-high" },
+  medium: { label: "Fair", dot: "bg-tier-medium" },
+  low: { label: "Tentative", dot: "bg-tier-low" },
 };
 
 function TierPill({ tier, size = "sm" }: { tier: Tier; size?: "sm" | "lg" }) {
   const m = TIER_META[tier];
   return (
-    <span
-      className={cn(
-        "inline-flex items-center gap-1.5 rounded-full font-medium",
-        m.bg,
-        m.text,
-        size === "lg" ? "px-2.5 py-1 text-xs" : "px-2 py-0.5 text-[0.7rem]",
-      )}
-    >
+    <Badge variant={tier} className={size === "lg" ? "px-2.5 py-1 text-xs" : "text-[0.7rem]"}>
       <span className={cn("size-1.5 rounded-full", m.dot)} />
       {m.label}
-    </span>
+    </Badge>
   );
 }
 
@@ -118,7 +107,7 @@ export function DataQualityCard({ analytics }: { analytics: Analytics }) {
       <p className="mt-4 flex items-start gap-1.5 border-t border-border pt-3 text-[0.7rem] leading-relaxed text-muted-foreground">
         <Info className="mt-px size-3 shrink-0" />
         Aggregate estimates from video sampled at 5 frames per second. Head counts are a proxy, not
-        an attendance register — no faces are recognized and no student is named.
+        an attendance register. No faces are recognized and no student is named.
       </p>
     </Card>
   );

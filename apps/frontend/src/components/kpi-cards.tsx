@@ -1,5 +1,6 @@
 import type { RouterOutputs } from "@classroom/api-contracts";
 import type { CSSProperties } from "react";
+import { Badge } from "@/components/ui/badge";
 import { Card } from "@/components/ui/card";
 import { msToClock, percentOf } from "@/lib/format";
 
@@ -14,12 +15,6 @@ function confidenceBadge(conf: number | null | undefined): Confidence | null {
   if (conf >= 0.6) return { label: `${pct}% sure`, tone: "medium" };
   return { label: `${pct}% sure`, tone: "low" };
 }
-
-const TONE_CLASS: Record<Confidence["tone"], string> = {
-  high: "bg-tier-high/15 text-tier-high",
-  medium: "bg-tier-medium/15 text-tier-medium",
-  low: "bg-tier-low/15 text-tier-low",
-};
 
 export function KpiCards({
   analytics,
@@ -74,12 +69,13 @@ export function KpiCards({
           <div className="flex items-start justify-between gap-1">
             <div className="text-xs text-muted-foreground">{t.label}</div>
             {t.badge && (
-              <span
-                className={`rounded-full px-1.5 py-0.5 text-[10px] font-medium ${TONE_CLASS[t.badge.tone]}`}
+              <Badge
+                variant={t.badge.tone}
+                className="px-1.5 py-0.5 text-[10px]"
                 title="How confident the classifier is that this identity is the teacher"
               >
                 {t.badge.label}
-              </span>
+              </Badge>
             )}
           </div>
           <div className="mt-1.5 font-display text-2xl font-semibold tabular-nums tracking-tight">

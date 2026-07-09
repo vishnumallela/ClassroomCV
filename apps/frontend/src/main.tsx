@@ -5,6 +5,12 @@ import { createRoot } from "react-dom/client";
 import { routeTree } from "./routeTree.gen";
 import "./styles/globals.css";
 
+// React Grab: dev-only. Click any element to hand its component + source to a
+// coding agent. The dynamic import is tree-shaken out of production builds.
+if (import.meta.env.DEV) {
+  void import("react-grab");
+}
+
 const queryClient = new QueryClient({
   defaultOptions: { queries: { staleTime: 15_000, retry: 1 } },
 });

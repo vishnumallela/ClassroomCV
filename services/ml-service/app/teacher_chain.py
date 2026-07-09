@@ -244,9 +244,13 @@ def _sustained_ratio(
     model: HeightModel, dets: list[Detection], start: int, threshold: float
 ) -> bool:
     window = dets[start : start + SUSTAIN_SAMPLES]
-    if len(window) < min(SUSTAIN_SAMPLES, len(dets) - start):
+    # Require a FULL window of SUSTAIN_SAMPLES consecutive samples. (The old
+    # guard compared len(window) against min(SUSTAIN_SAMPLES, len(dets)-start),
+    # which is exactly len(window) for any valid start, so it never fired and a
+    # 1-4 sample tail counted as "sustained".)
+    if len(window) < SUSTAIN_SAMPLES:
         return False
-    return bool(window) and all(model.ratio(d) >= threshold for d in window)
+    return all(model.ratio(d) >= threshold for d in window)
 
 
 def _tail_anchor(
@@ -396,6 +400,8 @@ def stitch_teacher(
                 )
                 if claim_idx is None or _seated_static(f, claim_idx):
                     continue
+                if len(f.dets) - claim_idx < MIN_CLAIM_DETS:
+                    continue  # too short to be a real claim; skip, don't abort
                 mobility = MOBILITY_REWARD * min(1.0, f.spread(claim_idx))
                 # Prefer an immediate continuation and the more mobile fragment;
                 # a long sub-height trim (she was out of frame a while) costs
@@ -418,6 +424,8 @@ def stitch_teacher(
                 continue
             if _seated_static(f, 0):
                 continue
+            if len(f.dets) < MIN_CLAIM_DETS:
+                continue  # too short to be a real claim; skip, don't abort
             if not _sustained_ratio(model, f.dets, 0, START_RATIO):
                 continue
             if not _embed_ok(teacher_embed, embeds_by_raw, f.raw_id):
@@ -457,7 +465,12 @@ def stitch_teacher(
                 if candidate is None or cost < candidate_cost:
                     candidate, candidate_cost = Claim(f, idx), cost
 
-        if candidate is None or len(candidate.dets) < MIN_CLAIM_DETS:
+        # Every branch already rejects sub-MIN_CLAIM_DETS fragments during
+        # selection, so a real winner is never too short here; only a genuinely
+        # empty round ends the forward walk. (The old terminal length check
+        # broke the whole loop when a tiny fragment won on cost, abandoning
+        # every still-unclaimed valid claim after it.)
+        if candidate is None:
             break
         claims.append(candidate)
         claimed_from[id(candidate.fragment)] = candidate.from_idx

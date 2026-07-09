@@ -98,8 +98,8 @@ export function HeatmapCard({
   const renderH = Math.round(RENDER_W / (aspect || 16 / 9));
   const caption =
     effectiveMode === "teacher"
-      ? "Where the teacher spent the lesson — board, aisles, and the desks she visited."
-      : "Where students were seated — density across the room.";
+      ? "Where the teacher spent the lesson: board, aisles, and the desks she visited."
+      : "Where students were seated: density across the room.";
 
   return (
     <Card className="overflow-hidden">

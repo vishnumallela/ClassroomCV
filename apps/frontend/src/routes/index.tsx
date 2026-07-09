@@ -2,7 +2,7 @@ import { useQuery } from "@tanstack/react-query";
 import { Link, createFileRoute } from "@tanstack/react-router";
 import { Clapperboard } from "lucide-react";
 import type { CSSProperties } from "react";
-import { Badge } from "@/components/ui/badge";
+import { StatusBadge } from "@/components/status-badge";
 import { Card } from "@/components/ui/card";
 import { Skeleton } from "@/components/ui/skeleton";
 import { UploadZone } from "@/components/upload-zone";
@@ -19,7 +19,7 @@ function Library() {
       <header className="reveal space-y-1.5">
         <h1 className="font-display text-3xl font-semibold tracking-tight">Lessons</h1>
         <p className="max-w-xl text-sm leading-relaxed text-muted-foreground">
-          Upload a classroom recording and Luminary brings the teaching to light — presence, board
+          Upload a classroom recording and Luminary brings the teaching to light: presence, board
           time, circulation, and how the class settled.
         </p>
       </header>
@@ -73,7 +73,7 @@ function Library() {
                 <div className="space-y-3 p-4">
                   <div className="flex items-center justify-between gap-2">
                     <span className="truncate font-medium">{v.title}</span>
-                    <Badge variant={v.status === "done" ? "default" : "outline"}>{v.status}</Badge>
+                    <StatusBadge status={v.status} />
                   </div>
                   {v.status === "done" && v.teacherPresentMs !== null ? (
                     <div className="flex items-center gap-4 text-xs text-muted-foreground">
