@@ -11,10 +11,20 @@ import {
   updateVideo,
   type VideoRow,
 } from "@api/db/queries";
+import { mkdir } from "node:fs/promises";
 import { generateThumbnail, probeVideo } from "@api/lib/media";
 import { logger } from "@api/lib/logger";
 import { mlDetectBoard, mlGetJob, mlGetJobResult, mlStartAnalysis } from "@api/lib/ml";
-import { ensureLocal, putLocalFile } from "@api/lib/storage";
+import { isS3, presignGet, putLocalFile } from "@api/lib/storage";
+
+// The bytes source for ffprobe/ffmpeg/the ML worker. On s3 this is a presigned
+// URL (valid 6 h, long enough for a slow analysis) so nothing downloads the
+// whole video onto the API node: ffprobe reads only the header, ffmpeg only a
+// seeked frame, and the ML worker fetches its own local copy. On local it is
+// just the file path.
+function mediaSource(filePath: string): string {
+  return isS3 ? (presignGet(filePath, 6 * 60 * 60) ?? filePath) : filePath;
+}
 import type { AnalyzeJobData } from "@api/lib/queue";
 
 const POLL_INTERVAL_MS = 5_000;
@@ -58,16 +68,15 @@ async function probeStep(
 ): Promise<void> {
   const video = await requireCurrentRun(videoId, attemptId, jobId, "probe");
   await updateStatus(videoId, { status: "probing", progress: 0.02 });
-  // s3 backend: pull the uploaded object into the local cache so ffprobe /
-  // ffmpeg / the ML service (all of which need a real file path) can read it.
-  await ensureLocal(video.filePath);
-  const meta = await probeVideo(video.filePath);
+  const source = mediaSource(video.filePath);
+  const meta = await probeVideo(source);
 
   let thumbnailPath: string | undefined;
   try {
     const mark = meta.durationMs ? (meta.durationMs / 1000) * 0.1 : 1;
     const out = join(dirname(video.filePath), "thumb.jpg");
-    if (await generateThumbnail(video.filePath, out, mark)) {
+    await mkdir(dirname(out), { recursive: true });
+    if (await generateThumbnail(source, out, mark)) {
       thumbnailPath = out;
       await putLocalFile(out).catch((err) =>
         logger.warn({ err, videoId }, "thumbnail upload to object store failed (non-fatal)"),
@@ -98,7 +107,7 @@ async function detectBoardStep(
   try {
     const video = await getVideo(videoId);
     if (!video) return;
-    const res = await mlDetectBoard(videoId, video.filePath);
+    const res = await mlDetectBoard(videoId, mediaSource(video.filePath));
     if (res.polygon && res.confidence >= 0.5) {
       await requireCurrentRun(videoId, attemptId, jobId, "detect-board insert");
       await insertZone(videoId, {
@@ -123,7 +132,7 @@ async function startAnalysisStep(
   const runTokens = [attemptId, jobId].filter((t): t is string => Boolean(t));
   return mlStartAnalysis({
     videoId,
-    videoPath: video.filePath,
+    videoPath: mediaSource(video.filePath),
     sampleFps: 5,
     zones,
     idempotencyKey: `${videoId}:${attemptId ?? "initial"}`,

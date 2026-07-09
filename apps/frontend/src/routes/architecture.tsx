@@ -261,7 +261,7 @@ const STORAGE: { tier: string; contents: string; policy: string }[] = [
     tier: "Media",
     contents: "uploaded video + thumbnail bytes (blobs, not DB rows)",
     policy:
-      "local disk (dev) or S3-compatible object storage; on-prem MinIO keeps student video on-site, cloud S3/R2 by config; worker caches a local copy for ffmpeg/ML",
+      "local disk (dev) or S3-compatible object storage (on-prem MinIO keeps student video on-site, cloud S3/R2 by config); probe/thumbnail read a presigned URL directly, the GPU worker fetches its own copy by allowlisted presigned URL, so nothing downloads the whole video onto the API node",
   },
 ];
 

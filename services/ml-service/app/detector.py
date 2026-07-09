@@ -27,6 +27,10 @@ from __future__ import annotations
 import logging
 import math
 import os
+import shutil
+import tempfile
+import urllib.parse
+import urllib.request
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Callable, Iterator, Optional
@@ -261,6 +265,66 @@ def _validate_video_path(video_path: str) -> str:
                 f"video_path must be inside DATA_DIR ({base}): {raw!r}"
             )
     return str(p)
+
+
+def _media_url_host_allowed(url: str) -> bool:
+    """True when the URL's host[:port] is in Settings.media_url_allowlist.
+
+    The allowlist is the SSRF gate for object-store fetches: cv2/ffmpeg will
+    open ANY http/rtsp URL, and video_path arrives over the network, so only an
+    explicitly configured object-store host may be fetched.
+    """
+    allow = {
+        h.strip()
+        for h in (get_settings().media_url_allowlist or "").split(",")
+        if h.strip()
+    }
+    if not allow:
+        return False
+    return urllib.parse.urlparse(url).netloc in allow
+
+
+def _download_to_temp(url: str) -> str:
+    """Stream an allowlisted media URL to a temp file (chunked, no full buffer).
+
+    Placed inside DATA_DIR when configured so the downloaded copy also satisfies
+    _validate_video_path's DATA_DIR containment when the pipeline re-validates.
+    """
+    data_dir = os.environ.get("DATA_DIR")
+    tmp_dir = data_dir if data_dir and os.path.isdir(data_dir) else tempfile.gettempdir()
+    fd, tmp = tempfile.mkstemp(prefix="mediacache_", suffix=".mp4", dir=tmp_dir)
+    try:
+        with os.fdopen(fd, "wb") as out:
+            with urllib.request.urlopen(url, timeout=30) as resp:  # noqa: S310 (host allowlisted)
+                shutil.copyfileobj(resp, out, length=1024 * 1024)
+    except Exception:
+        try:
+            os.unlink(tmp)
+        except OSError:
+            pass
+        raise
+    return tmp
+
+
+def resolve_video_source(video_path: str) -> tuple[str, bool]:
+    """Resolve a request's video_path to a LOCAL file: returns (path, is_temp).
+
+    An http(s) URL whose host is allowlisted is downloaded to a temp file and
+    returned with is_temp=True (the caller unlinks it when done). This lets a
+    remote GPU worker fetch the video straight from MinIO/S3 by presigned URL
+    instead of the API node writing it to a shared filesystem, while cv2 still
+    decodes a LOCAL file (reliable over a multi-minute sequential read, unlike
+    streaming the whole video frame-by-frame over HTTP). Any other value goes
+    through the local-path SSRF guard (_validate_video_path); a non-allowlisted
+    URL is rejected there via ValueError.
+    """
+    if video_path.startswith(("http://", "https://")):
+        if not _media_url_host_allowed(video_path):
+            raise ValueError(
+                f"media URL host is not in media_url_allowlist: {video_path!r}"
+            )
+        return _download_to_temp(video_path), True
+    return _validate_video_path(video_path), False
 
 
 def _is_standing(

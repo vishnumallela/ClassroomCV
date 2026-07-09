@@ -8,6 +8,8 @@ Covers:
 - _validate_video_path (SSRF / arbitrary-path guard in front of cv2).
 """
 
+from pathlib import Path
+
 import numpy as np
 import pytest
 
@@ -220,3 +222,63 @@ def test_embed_tracks_streams_and_normalizes(monkeypatch):
     # 5 crops at batch size 2 -> batches of [2, 2, 1]; never all 5 at once.
     assert seen_batch_sizes == [2, 2, 1]
     assert max(seen_batch_sizes) <= 2
+
+
+# --------------------------------------------------------------------------- #
+# resolve_video_source: object-store URL fetch (allowlist-gated) vs local path
+# --------------------------------------------------------------------------- #
+
+
+def test_media_url_host_allowed(monkeypatch):
+    from app import detector as D
+    from app.config import get_settings
+
+    monkeypatch.setenv("MEDIA_URL_ALLOWLIST", "")
+    get_settings.cache_clear()
+    assert D._media_url_host_allowed("http://localhost:9000/b/k.mp4") is False
+    monkeypatch.setenv("MEDIA_URL_ALLOWLIST", "minio:9000,localhost:9000")
+    get_settings.cache_clear()
+    assert D._media_url_host_allowed("http://localhost:9000/b/k.mp4") is True
+    assert D._media_url_host_allowed("http://evil:9000/b/k.mp4") is False
+    get_settings.cache_clear()
+
+
+def test_resolve_url_rejected_without_allowlist(monkeypatch):
+    from app import detector as D
+    from app.config import get_settings
+
+    monkeypatch.setenv("MEDIA_URL_ALLOWLIST", "")
+    get_settings.cache_clear()
+    with pytest.raises(ValueError, match="media URL host"):
+        D.resolve_video_source("https://cdn.example.com/x.mp4")
+    get_settings.cache_clear()
+
+
+def test_resolve_url_downloads_when_allowlisted(monkeypatch):
+    import io
+
+    from app import detector as D
+    from app.config import get_settings
+
+    monkeypatch.setenv("MEDIA_URL_ALLOWLIST", "host:1234")
+    monkeypatch.delenv("DATA_DIR", raising=False)
+    get_settings.cache_clear()
+    payload = b"FAKE-VIDEO-BYTES" * 1000
+    monkeypatch.setattr(D.urllib.request, "urlopen", lambda url, timeout=30: io.BytesIO(payload))
+    path, is_temp = D.resolve_video_source("http://host:1234/bucket/key.mp4")
+    try:
+        assert is_temp is True
+        assert Path(path).read_bytes() == payload
+    finally:
+        Path(path).unlink(missing_ok=True)
+    get_settings.cache_clear()
+
+
+def test_resolve_local_path_passthrough(monkeypatch):
+    from app import detector as D
+
+    monkeypatch.delenv("DATA_DIR", raising=False)
+    asset = str((Path(__file__).resolve().parent / "assets" / "bus.jpg"))
+    path, is_temp = D.resolve_video_source(asset)
+    assert is_temp is False
+    assert path == str(Path(asset).resolve())

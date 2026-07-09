@@ -8,12 +8,20 @@ against the pydantic model). No GPU, no DB, no video file needed.
 import math
 
 import numpy as np
+import pytest
 
 from app import db, detector, jobs
 from app.models import AnalysisResult, Detection, VideoMeta
 
 VIDEO_ID = "11111111-2222-3333-4444-555555555555"
 DURATION_MS = 60_000
+
+
+@pytest.fixture(autouse=True)
+def _passthrough_resolve(monkeypatch):
+    """Bypass URL/local resolution: these tests mock detect_video with a fake
+    /fake/classroom.mp4 path that no longer needs to exist on disk."""
+    monkeypatch.setattr(detector, "resolve_video_source", lambda vp: (vp, False))
 
 
 def _hist(bin_idx: int) -> np.ndarray:

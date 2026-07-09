@@ -38,6 +38,12 @@ class Settings(BaseSettings):
     imgsz: int = 1280
     det_conf: float = 0.1
     max_det: int = 100
+    # Comma-separated host[:port] allowlist for presigned media URLs. Empty
+    # (default) rejects ALL URLs, so /analyze only reads local files (the SSRF
+    # guard). Set to the object-store host (e.g. "minio:9000,localhost:9000")
+    # to let the service fetch a video directly from MinIO/S3 by presigned URL,
+    # instead of the API node downloading it to a shared filesystem.
+    media_url_allowlist: str = ""
     tracker_cfg: str = str(
         Path(__file__).resolve().parent / "trackers" / "classroom_botsort.yaml"
     )

@@ -13,6 +13,8 @@ Routes per SPEC.md "ML service API":
 
 from __future__ import annotations
 
+import os
+
 from fastapi import FastAPI, HTTPException
 
 from app import board_detect, db, detector, jobs
@@ -84,10 +86,17 @@ def detect_board(req: DetectBoardRequest) -> DetectBoardResponse:
     /analyze) and maps its rejection to 400 per the feature contract.
     """
     try:
-        video_path = detector._validate_video_path(req.video_path)
+        video_path, is_temp = detector.resolve_video_source(req.video_path)
     except ValueError as exc:
         raise HTTPException(status_code=400, detail=str(exc))
-    result = board_detect.detect_board(req.video_id, video_path)
+    try:
+        result = board_detect.detect_board(req.video_id, video_path)
+    finally:
+        if is_temp:
+            try:
+                os.unlink(video_path)
+            except OSError:
+                pass
     return DetectBoardResponse(**result)
 
 
@@ -99,10 +108,17 @@ def detect_door(req: DetectBoardRequest) -> DetectBoardResponse:
     door-shaped geometric scoring (tall, narrow, reaching toward the floor).
     """
     try:
-        video_path = detector._validate_video_path(req.video_path)
+        video_path, is_temp = detector.resolve_video_source(req.video_path)
     except ValueError as exc:
         raise HTTPException(status_code=400, detail=str(exc))
-    result = board_detect.detect_door(req.video_id, video_path)
+    try:
+        result = board_detect.detect_door(req.video_id, video_path)
+    finally:
+        if is_temp:
+            try:
+                os.unlink(video_path)
+            except OSError:
+                pass
     return DetectBoardResponse(**result)
 
 

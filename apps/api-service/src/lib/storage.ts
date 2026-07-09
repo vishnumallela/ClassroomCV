@@ -94,6 +94,19 @@ export async function putLocalFile(localPath: string): Promise<void> {
   await client().file(objectKey(localPath)).write(Bun.file(localPath));
 }
 
+/**
+ * A time-limited presigned GET URL for the object, or null on the local
+ * backend. Lets ffprobe/ffmpeg read only the bytes they need (header, one
+ * seeked frame) over HTTP range, and lets a remote ML worker fetch the video
+ * itself, instead of downloading the whole file to the API node.
+ */
+export function presignGet(localPath: string, expiresInSeconds = 3600): string | null {
+  if (!isS3) return null;
+  return client()
+    .file(objectKey(localPath))
+    .presign({ method: "GET", expiresIn: expiresInSeconds });
+}
+
 /** Does the durable object exist? (local: the file; s3: the object) */
 export function exists(localPath: string): Promise<boolean> {
   if (!isS3) return Bun.file(localPath).exists();
