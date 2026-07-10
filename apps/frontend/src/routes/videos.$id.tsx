@@ -155,8 +155,7 @@ function VideoDetail() {
           </Suspense>
           <CirculationCard analytics={analytics} />
           <HeatmapCard
-            analytics={analytics}
-            thumbnailUrl={video.thumbnailUrl ? `${API_URL}${video.thumbnailUrl}` : null}
+            videoId={id}
             aspect={video.width && video.height ? video.width / video.height : 16 / 9}
           />
           <BoardSessions boardIntervals={analytics.boardIntervals} onSeek={seek} />
