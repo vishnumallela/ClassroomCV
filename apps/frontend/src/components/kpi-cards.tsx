@@ -42,20 +42,32 @@ export function KpiCards({
         : "no board zone",
       badge: null,
     },
+    {
+      label: "Pointing at board",
+      value:
+        hasBoard && analytics.teacherPointingMs !== null
+          ? msToClock(analytics.teacherPointingMs)
+          : "n/a",
+      sub:
+        hasBoard && analytics.teacherPointingMs !== null
+          ? percentOf(analytics.teacherPointingMs, durationMs) + " of lesson"
+          : "no board zone",
+      badge: null,
+    },
+    {
+      label: "Writing on board",
+      value:
+        hasBoard && analytics.teacherWritingMs !== null
+          ? msToClock(analytics.teacherWritingMs)
+          : "n/a",
+      sub:
+        hasBoard && analytics.teacherWritingMs !== null
+          ? percentOf(analytics.teacherWritingMs, durationMs) + " of lesson"
+          : "no board zone",
+      badge: null,
+    },
     { label: "Entries", value: String(analytics.entries), sub: "into the room", badge: null },
     { label: "Exits", value: String(analytics.exits), sub: "out of the room", badge: null },
-    {
-      label: "Avg students",
-      value: analytics.avgStudents !== null ? analytics.avgStudents.toFixed(1) : "n/a",
-      sub: "avg concurrent (per 5s)",
-      badge: null,
-    },
-    {
-      label: "Peak students",
-      value: analytics.maxStudents !== null ? String(analytics.maxStudents) : "n/a",
-      sub: "at once",
-      badge: null,
-    },
   ];
 
   return (
