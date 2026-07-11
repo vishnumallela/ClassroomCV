@@ -46,6 +46,10 @@ export function toDetailDto(d: Detail) {
           entryExit: d.analytics.entryExit,
           occupancy: d.analytics.occupancy,
           heatmap: d.analytics.heatmap,
+          teacherPointingMs: d.analytics.teacherPointingMs,
+          teacherWritingMs: d.analytics.teacherWritingMs,
+          teacherBoardNearMs: d.analytics.teacherBoardNearMs,
+          boardInteractions: d.analytics.boardInteractions,
           dataQuality: d.analytics.dataQuality ?? null,
         }
       : null,

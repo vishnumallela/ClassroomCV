@@ -237,6 +237,10 @@ export async function replaceDerived(
       entryExit: a.entry_exit ?? [],
       occupancy: a.occupancy ?? [],
       heatmap: a.heatmap ?? { grid_w: 0, grid_h: 0, teacher: [], students: [] },
+      teacherPointingMs: a.teacher_pointing_ms ?? null,
+      teacherWritingMs: a.teacher_writing_ms ?? null,
+      teacherBoardNearMs: a.teacher_board_near_ms ?? null,
+      boardInteractions: a.board_interactions ?? [],
       dataQuality: a.data_quality ?? null,
       computedAt: new Date(),
     });
