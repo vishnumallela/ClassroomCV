@@ -30,6 +30,11 @@ class Detection:
     standing: bool
     back_to_camera: bool
     track_no: Optional[int] = None  # merged identity, assigned post-merge
+    # Board-independent pose features for teacher-activity (pointing/writing)
+    # classification, computed at detection time and combined with the board
+    # zone in app.activity. None when keypoints are unusable. Persisted in
+    # detection_events.meta so /rederive can re-classify without re-running YOLO.
+    activity: Optional[dict] = None
 
 
 @dataclass
@@ -197,6 +202,19 @@ class DataQualityOut(BaseModel):
     notes: list[str]
 
 
+class BoardInteractionOut(BaseModel):
+    """One teacher board-interaction segment (debounced).
+
+    kind: "pointing" (arm raised toward the board), "writing" (hand on the
+    board with local micro-motion), or "near" (at the board, arm not usable).
+    Totals count pointing + writing as interaction; near is tracked separately.
+    """
+
+    kind: Literal["pointing", "writing", "near"]
+    start_ms: int
+    end_ms: int
+
+
 class AnalyticsOut(BaseModel):
     teacher_present_ms: int
     teacher_board_ms: Optional[int]
@@ -209,6 +227,11 @@ class AnalyticsOut(BaseModel):
     avg_students: float
     max_students: int
     heatmap: HeatmapOut
+    # Teacher board-interaction analytics (null ms when no board zone exists).
+    teacher_pointing_ms: Optional[int] = None
+    teacher_writing_ms: Optional[int] = None
+    teacher_board_near_ms: Optional[int] = None
+    board_interactions: list[BoardInteractionOut] = Field(default_factory=list)
     # Optional so rows/tests predating the quality report still validate.
     data_quality: Optional[DataQualityOut] = None
 

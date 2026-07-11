@@ -70,13 +70,17 @@ MIN_RELATIVE_AREA = 0.3
 # --- robust teacher rule ----------------------------------------------------
 TEACHER_MIN_SCORE = 0.5  # best must at least look teacher-like in absolute terms
 TEACHER_ABS_MARGIN = 0.08  # floor on the lead over the runner-up
-# Lead must also be >= this fraction of the best score. Recalibrated from 0.2
-# after CLIP re-ID started attaching the teacher's SEATED return segment
-# (demo: standing_ratio 0.74 -> 0.66, composite 0.766 -> 0.710, lead 26.6% ->
-# 17.6%): a correct re-ID must not un-classify the teacher. Chains of student
-# fragments ride the union-inflated movement+presence terms to ~0.59, so the
-# guard against declaring a teacher among lookalikes still holds at 15%.
-TEACHER_REL_MARGIN = 0.15
+# Relative margin DISABLED (0.0): selection now uses the absolute floor only.
+# The relative term (lead >= rel * best) is inverted — it demands a BIGGER lead
+# from a HIGHER-scoring teacher (0.83 -> 0.124, 0.72 -> 0.108) — so a correctly
+# rank-#1 teacher with dominant board proximity was rejected by a 0.0005 margin
+# (measured: track-demo best 0.717 vs second 0.610, required 0.1075, actual
+# 0.1070 -> all-unknown). Verified offline across three recordings: abs-only
+# (0.08) recovers that teacher, leaves an unambiguous walking teacher untouched
+# (writing: margin 0.284), and TEACHER_MIN_SCORE=0.5 still blocks true
+# no-teacher scenes. A genuinely sedentary teacher (margin ~0.02) is out of
+# reach of ANY margin tuning and needs the stitch-first / appearance-lock path.
+TEACHER_REL_MARGIN = 0.0
 
 # --- board proximity / absorption -------------------------------------------
 # Expansion of the board polygon bbox used when testing whether an absorbed

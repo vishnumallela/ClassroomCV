@@ -20,6 +20,7 @@ import math
 from bisect import bisect_left, bisect_right
 from typing import Optional
 
+from app import activity as activity_mod
 from app import quality
 from app.geometry import bboxes_intersect, expand_bbox, polygon_bbox
 from app.models import Detection
@@ -117,11 +118,11 @@ def door_entry_exit(
     of that edge is near the door. Single-sample tests miss most true
     crossings on real footage.
 
-    Video-edge semantics match the presence-based rule: an interval that
-    starts the video counts as an enter (the teacher was already inside), and
-    the final interval running into the last end_margin_ms of the video does
-    not produce an exit. Interior presence gaps away from the door (mid-room
-    occlusions) produce no events, so counts reflect real door crossings.
+    Crossings-only semantics: an enter/exit is emitted ONLY when a presence
+    edge is at the door. A teacher already inside when the recording starts is
+    NOT counted as an entry, and one still inside when it stops is not an exit.
+    Interior presence gaps away from the door (mid-room occlusions) produce no
+    events, so counts reflect real door crossings during the recording.
     """
     dets = sorted(teacher_dets, key=lambda d: d.video_ts_ms)
     events: list[dict] = []
@@ -134,8 +135,10 @@ def door_entry_exit(
         )
 
     for i, (start, end) in enumerate(intervals):
-        at_video_start = i == 0 and start <= end_margin_ms
-        if at_video_start or any_near(start, start + window_ms):
+        # Entries count only real door crossings DURING the recording: a teacher
+        # already in the room when the camera starts is NOT an entry (the old
+        # at_video_start rule that emitted enter@0 is intentionally dropped).
+        if any_near(start, start + window_ms):
             events.append({"kind": "enter", "ts_ms": start})
         is_last = i == len(intervals) - 1
         if not is_last or end < duration_ms - end_margin_ms:
@@ -462,6 +465,11 @@ def derive(
                     {"kind": "board_leave", "video_ts_ms": end, "track_no": teacher_no}
                 )
 
+    # Teacher board-activity breakdown (pointing / writing / near). Uses the
+    # per-detection pose features on Detection.activity + the board zone, so it
+    # is null (no board) or empty (no teacher) exactly when board time is.
+    board_activity = activity_mod.derive_board_activity(teacher_dets, board_polygon)
+
     occupancy = occupancy_buckets(dets_by_track, roles_map, duration_ms)
     counts = [b["students"] for b in occupancy]
     avg_students = round(sum(counts) / len(counts), 2) if counts else 0.0
@@ -496,6 +504,10 @@ def derive(
         "avg_students": avg_students,
         "max_students": max_students,
         "heatmap": heatmap,
+        "teacher_pointing_ms": board_activity["pointing_ms"],
+        "teacher_writing_ms": board_activity["writing_ms"],
+        "teacher_board_near_ms": board_activity["near_ms"],
+        "board_interactions": board_activity["segments"],
         "data_quality": data_quality,
     }
     return events, analytics

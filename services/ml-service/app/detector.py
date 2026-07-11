@@ -66,9 +66,17 @@ STANDING_MIN_BOX_H = 90 / 1440
 
 # COCO keypoint indices
 NOSE, L_EYE, R_EYE = 0, 1, 2
+L_EAR, R_EAR = 3, 4
 L_SHOULDER, R_SHOULDER = 5, 6
+L_ELBOW, R_ELBOW = 7, 8
+L_WRIST, R_WRIST = 9, 10
 L_HIP, R_HIP = 11, 12
 L_KNEE, R_KNEE = 13, 14
+
+# Min confidence for shoulder/elbow/wrist before an arm's geometry is trusted
+# for board-activity (pointing/writing) features. 0.3 admits partially occluded
+# but localized joints (a back-turned teacher writing on the board).
+KPT_CONF_ARM = 0.3
 
 _model = None
 _fallback_cpu = False
@@ -569,6 +577,92 @@ def _clip_bbox(cx: float, cy: float, w: float, h: float) -> dict:
     }
 
 
+def _torso_scale(
+    kxy: np.ndarray, kconf: np.ndarray, bbox: dict, aspect: float
+) -> float:
+    """Body-scale reference in frame-HEIGHT units (isotropic).
+
+    Keypoints are normalized (x by width, y by height); multiplying x by the
+    frame aspect (w/h) puts both axes in units of frame height so distances are
+    Euclidean. Priority: shoulder->hip length, then shoulder width * 1.6, then
+    bbox height / 3 (already a height-normalized value). Always >= a small floor
+    so it can divide safely.
+    """
+
+    def pt(i: int) -> tuple[float, float]:
+        return float(kxy[i][0]) * aspect, float(kxy[i][1])
+
+    def ok(*ids: int) -> bool:
+        return all(i < len(kconf) and kconf[i] > KPT_CONF_LOW for i in ids)
+
+    if ok(L_SHOULDER, R_SHOULDER, L_HIP, R_HIP):
+        sx = (pt(L_SHOULDER)[0] + pt(R_SHOULDER)[0]) / 2.0
+        sy = (pt(L_SHOULDER)[1] + pt(R_SHOULDER)[1]) / 2.0
+        hx = (pt(L_HIP)[0] + pt(R_HIP)[0]) / 2.0
+        hy = (pt(L_HIP)[1] + pt(R_HIP)[1]) / 2.0
+        d = math.hypot(sx - hx, sy - hy)
+        if d > 0.02:
+            return d
+    if ok(L_SHOULDER, R_SHOULDER):
+        d = math.hypot(
+            pt(L_SHOULDER)[0] - pt(R_SHOULDER)[0],
+            pt(L_SHOULDER)[1] - pt(R_SHOULDER)[1],
+        ) * 1.6
+        if d > 0.02:
+            return d
+    return max(0.02, bbox["h"] / 3.0)
+
+
+def _facing_score(kconf: np.ndarray) -> float:
+    """0..1 orientation cue: ~0 facing the students (face visible), ~1 back-turned
+    (facing the board). Ratio of face-keypoint visibility to shoulder visibility;
+    0.5 (unknown) when the shoulders themselves are not visible."""
+    face_ids = [i for i in (NOSE, L_EYE, R_EYE, L_EAR, R_EAR) if i < len(kconf)]
+    if not face_ids or len(kconf) <= R_SHOULDER:
+        return 0.5
+    face_vis = sum(float(kconf[i]) for i in face_ids) / len(face_ids)
+    body_vis = (float(kconf[L_SHOULDER]) + float(kconf[R_SHOULDER])) / 2.0
+    if body_vis < KPT_CONF_LOW:
+        return 0.5
+    return max(0.0, min(1.0, 1.0 - face_vis / (body_vis + 1e-6)))
+
+
+def _activity_features(
+    kxy: Optional[np.ndarray],
+    kconf: Optional[np.ndarray],
+    bbox: dict,
+    aspect: float,
+) -> Optional[dict]:
+    """Board-independent pose features for teacher-activity classification.
+
+    Returns {"ts": torso_scale, "fc": facing_score,
+             "arms": [[wrist_x, wrist_y, wrist_up_ratio, reach], ...]} (0..2 arms
+    that clear KPT_CONF_ARM), or None when no arm is usable. wrist_up_ratio =
+    (shoulder_y - wrist_y) / torso_scale is >0 when the hand is raised; reach is
+    shoulder->wrist distance in torso-lengths. Wrist x/y stay in normalized
+    coords so app.activity can test them against the (normalized) board polygon;
+    the board-relative decision happens at derive.
+    """
+    if kxy is None or kconf is None or len(kconf) <= R_WRIST:
+        return None
+    ts = _torso_scale(kxy, kconf, bbox, aspect)
+    arms: list[list[float]] = []
+    for sh, el, wr in ((L_SHOULDER, L_ELBOW, L_WRIST), (R_SHOULDER, R_ELBOW, R_WRIST)):
+        if min(float(kconf[sh]), float(kconf[el]), float(kconf[wr])) < KPT_CONF_ARM:
+            continue
+        wx, wy = float(kxy[wr][0]), float(kxy[wr][1])
+        sx, sy = float(kxy[sh][0]), float(kxy[sh][1])
+        up_ratio = (sy - wy) / ts if ts > 0 else 0.0
+        # reach: shoulder->wrist distance in torso-lengths (isotropic: x scaled
+        # by aspect to frame-height units, matching ts). Separates an extended
+        # pointing arm from a bent arm merely resting near the board.
+        reach = math.hypot((wx - sx) * aspect, wy - sy) / ts if ts > 0 else 0.0
+        arms.append([round(wx, 4), round(wy, 4), round(up_ratio, 4), round(reach, 4)])
+    if not arms:
+        return None
+    return {"ts": round(ts, 4), "fc": round(_facing_score(kconf), 3), "arms": arms}
+
+
 def _extract_frame(
     results,
     frame: np.ndarray,
@@ -618,6 +712,7 @@ def _extract_frame(
                 # is more faithful for the standing heuristic.
                 standing=_is_standing(w, h, kxy, kcf, frame_aspect),
                 back_to_camera=_back_to_camera(kcf),
+                activity=_activity_features(kxy, kcf, bbox, frame_aspect),
             )
         )
 

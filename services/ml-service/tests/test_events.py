@@ -198,6 +198,10 @@ _ANALYTICS_KEYS = {
     "avg_students",
     "max_students",
     "heatmap",
+    "teacher_pointing_ms",
+    "teacher_writing_ms",
+    "teacher_board_near_ms",
+    "board_interactions",
     "data_quality",
 }
 
@@ -282,10 +286,11 @@ def test_door_crossing_counted_when_edge_sample_is_within_window():
     dets += [_det(59_000, 1, x=0.07), _det(60_000, 1, x=0.06)]  # leaves via door
     events = door_entry_exit(dets, intervals, [DOOR], duration_ms=120_000)
     kinds = [e["kind"] for e in events]
-    assert kinds == ["enter", "exit", "enter", "exit"]
-    # first enter is the video-start rule; the 13s exit is door-adjacent via window
-    assert events[1]["ts_ms"] == 13_000
-    assert events[2]["ts_ms"] == 40_000
+    # Crossings-only: present-at-start is not an entry, so the first event is the
+    # exit at 13s (door-adjacent via the window), then re-enter at 40s, exit at 60s.
+    assert kinds == ["exit", "enter", "exit"]
+    assert events[0]["ts_ms"] == 13_000
+    assert events[1]["ts_ms"] == 40_000
 
 
 def test_mid_room_occlusion_gap_produces_no_door_events():
@@ -294,8 +299,9 @@ def test_mid_room_occlusion_gap_produces_no_door_events():
     intervals = [[0, 19_000], [30_000, 49_000]]
     events = door_entry_exit(dets, intervals, [DOOR], duration_ms=120_000)
     kinds = [e["kind"] for e in events]
-    # video-start enter only: the mid-room gap is an occlusion, not a crossing
-    assert kinds == ["enter"]
+    # No crossings at all: present-at-start is not an entry, and the mid-room gap
+    # is an occlusion, not a door crossing.
+    assert kinds == []
 
 
 def test_bridge_offscreen_gap_away_from_door():
