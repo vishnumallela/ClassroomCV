@@ -233,12 +233,12 @@ async def fetch_track_embeds(
 async def fetch_video_info(
     video_id: str, dsn: Optional[str] = None
 ) -> Optional[dict]:
-    """duration_ms/fps/width/height from the dashboard's videos table, or None."""
+    """duration_ms/fps/width/height/file_path from the videos table, or None."""
     try:
         conn = await _connect(dsn)
         try:
             row = await conn.fetchrow(
-                "SELECT duration_ms, fps, width, height FROM videos WHERE id = $1",
+                "SELECT duration_ms, fps, width, height, file_path FROM videos WHERE id = $1",
                 video_id,
             )
         finally:

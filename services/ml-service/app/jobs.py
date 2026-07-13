@@ -30,7 +30,7 @@ from typing import Callable, Optional
 
 import numpy as np
 
-from app import db, detector, events as events_mod, merge, roles, teacher_chain
+from app import db, detector, events as events_mod, merge, roles, teacher_chain, vlm_teacher
 from app.geometry import rdp_indices
 from app.models import AnalysisResult, Detection, VideoMeta
 
@@ -270,6 +270,7 @@ def run_pipeline(
         identities,
         zones,
         track_embeds={rid: list(e) for rid, e in embeds.items()},
+        video_path=video_path,
     )
     derive_s = time.perf_counter() - stage_start
     cb("deriving", 0.95)
@@ -372,6 +373,7 @@ def derive_result(
     identities: list[dict],
     zones: list[dict],
     track_embeds: Optional[dict[int, list[float]]] = None,
+    video_path: Optional[str] = None,
 ) -> dict:
     """roles + events + analytics from merged detections. Shared by analyze & rederive.
 
@@ -406,7 +408,22 @@ def derive_result(
     teacher_no = next(
         (t for t, (role, _) in roles_map.items() if role == "teacher"), None
     )
-    if teacher_no is not None:
+
+    # Vision-LLM fallback: the geometric ranker gives up (all-unknown) on a teacher
+    # who sits the whole lesson, because she scores like a student. Ask a vision
+    # model to point at the adult instructor and map that to a track. Only fires
+    # when nothing was selected AND we still have the video file, so easy videos
+    # never touch the API. The VLM-picked track is trusted as-is (skip the stitch,
+    # which is tuned for mobile teachers and would risk chimeras here).
+    teacher_from_vlm = False
+    if teacher_no is None and video_path is not None:
+        vlm = vlm_teacher.identify_teacher(video_path, dets_by_track, meta.duration_ms)
+        if vlm is not None and vlm[0] in dets_by_track:
+            teacher_no, conf, _votes = vlm
+            roles_map[teacher_no] = ("teacher", conf)
+            teacher_from_vlm = True
+
+    if teacher_no is not None and not teacher_from_vlm:
         embeds_by_raw = None
         if track_embeds:
             embeds_by_raw = {

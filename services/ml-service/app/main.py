@@ -169,6 +169,7 @@ async def rederive(req: RederiveRequest) -> dict:
         identities,
         [z.model_dump() for z in req.zones],
         track_embeds=track_embeds,
+        video_path=info.get("file_path"),
     )
     if detections:
         # Persist the rebuilt identity numbers (including teacher-fragment
