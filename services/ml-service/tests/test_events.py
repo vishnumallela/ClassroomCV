@@ -198,6 +198,7 @@ _ANALYTICS_KEYS = {
     "avg_students",
     "max_students",
     "heatmap",
+    "data_quality",
 }
 
 

@@ -27,6 +27,9 @@ from __future__ import annotations
 import logging
 import math
 import os
+import tempfile
+import urllib.parse
+import urllib.request
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Callable, Iterator, Optional
@@ -141,21 +144,53 @@ def model_loaded() -> bool:
     return _model is not None
 
 
+# Best YOLO26 pose weight per resolved device when Settings.model_name is
+# 'auto'. YOLO26 is NMS-free and reports up to +7.2 pose AP over YOLO11; a GPU
+# affords the x variant, while mps/cpu stay on m for fast dev iteration. Any of
+# these is overridable via MODEL_NAME (a .pt weight or a TensorRT .engine).
+_DEVICE_MODEL_DEFAULT = {
+    "cuda": "yolo26x-pose.pt",
+    "mps": "yolo26m-pose.pt",
+    "cpu": "yolo26m-pose.pt",
+}
+
+
 def get_device() -> str:
-    """Effective inference device ('mps' or 'cpu')."""
+    """Effective inference device: 'cuda', 'mps', or 'cpu'.
+
+    Resolves Settings.device. 'auto' prefers cuda, then mps, then cpu; an
+    explicit device is honoured but degrades to cpu when unavailable so a
+    misconfigured box does not crash. Once a runtime failure trips
+    _fallback_cpu, cpu is pinned for the rest of the process.
+    """
     if _fallback_cpu:
         return "cpu"
-    configured = get_settings().device
-    if configured == "mps":
-        try:
-            import torch
+    configured = (get_settings().device or "auto").strip().lower()
+    cuda_ok = mps_ok = False
+    try:
+        import torch
 
-            if torch.backends.mps.is_available():
-                return "mps"
-        except Exception:  # pragma: no cover - torch import issues
-            pass
-        return "cpu"
-    return configured
+        cuda_ok = bool(torch.cuda.is_available())
+        mps_ok = bool(torch.backends.mps.is_available())
+    except Exception:  # pragma: no cover - torch import issues
+        pass
+    if configured in ("", "auto"):
+        return "cuda" if cuda_ok else ("mps" if mps_ok else "cpu")
+    if configured == "cuda":
+        return "cuda" if cuda_ok else ("mps" if mps_ok else "cpu")
+    if configured == "mps":
+        return "mps" if mps_ok else "cpu"
+    return configured  # explicit 'cpu' or a specific 'cuda:N' device string
+
+
+def resolve_model_name() -> str:
+    """The YOLO weight to load: Settings.model_name, or the best device default
+    when it is 'auto'/empty."""
+    configured = (get_settings().model_name or "").strip()
+    if configured and configured.lower() != "auto":
+        return configured
+    base = get_device().split(":", 1)[0]  # 'cuda:0' -> 'cuda'
+    return _DEVICE_MODEL_DEFAULT.get(base, "yolo26m-pose.pt")
 
 
 def _get_model():
@@ -164,7 +199,9 @@ def _get_model():
         _ensure_lap_shim()  # must precede any ultralytics.trackers import
         from ultralytics import YOLO
 
-        _model = YOLO(get_settings().model_name)
+        name = resolve_model_name()
+        logger.info("loading pose model %s on device %s", name, get_device())
+        _model = YOLO(name)
     return _model
 
 
@@ -192,8 +229,8 @@ def _track_frame(model, frame: np.ndarray, device: str):
         verbose=False,
     )
     try:
-        # fp16 only on the GPU path; the cpu fallback stays fp32.
-        return model.track(frame, device=effective, half=effective == "mps", **kwargs)
+        # fp16 on any GPU path (cuda or mps); the cpu fallback stays fp32.
+        return model.track(frame, device=effective, half=effective != "cpu", **kwargs)
     except Exception as exc:
         if effective == "cpu":
             raise
@@ -227,6 +264,108 @@ def _validate_video_path(video_path: str) -> str:
                 f"video_path must be inside DATA_DIR ({base}): {raw!r}"
             )
     return str(p)
+
+
+def _media_url_host_allowed(url: str) -> bool:
+    """True when the URL's host[:port] is in Settings.media_url_allowlist.
+
+    The allowlist is the SSRF gate for object-store fetches: cv2/ffmpeg will
+    open ANY http/rtsp URL, and video_path arrives over the network, so only an
+    explicitly configured object-store host may be fetched.
+    """
+    allow = {
+        h.strip()
+        for h in (get_settings().media_url_allowlist or "").split(",")
+        if h.strip()
+    }
+    if not allow:
+        return False
+    return urllib.parse.urlparse(url).netloc in allow
+
+
+class _AllowlistRedirectHandler(urllib.request.HTTPRedirectHandler):
+    """Re-validate every redirect hop against media_url_allowlist.
+
+    urllib follows 3xx redirects by default, and the allowlist is only checked
+    on the INITIAL url. Without this, an allowlisted origin could 301/302 the
+    fetch to an internal address (169.254.169.254, an intranet host) that the
+    allowlist never saw -- the classic SSRF-via-redirect bypass. Here every hop
+    is re-validated, so a redirect to a non-allowlisted host is refused.
+    """
+
+    def redirect_request(self, req, fp, code, msg, headers, newurl):  # noqa: D102
+        if not _media_url_host_allowed(newurl):
+            raise ValueError(
+                f"media URL redirected to a non-allowlisted host: {newurl!r}"
+            )
+        return super().redirect_request(req, fp, code, msg, headers, newurl)
+
+
+# Opener whose only redirect handler re-validates the allowlist on each hop.
+_MEDIA_URL_OPENER = urllib.request.build_opener(_AllowlistRedirectHandler)
+# Cap the download so a huge (or malicious) allowlisted object cannot exhaust
+# disk. Defaults to 8 GiB (2x the API's 4 GiB upload cap, for headroom);
+# override with MEDIA_MAX_DOWNLOAD_BYTES.
+_MEDIA_MAX_DOWNLOAD_BYTES = int(os.environ.get("MEDIA_MAX_DOWNLOAD_BYTES", 8 * 1024**3))
+_DOWNLOAD_CHUNK = 1024 * 1024
+
+
+def _download_to_temp(url: str) -> str:
+    """Stream an allowlisted media URL to a temp file (chunked, no full buffer).
+
+    Redirects are re-validated against the allowlist on every hop, and the total
+    byte count is capped, so neither an SSRF-via-redirect nor an oversized object
+    can slip through. Placed inside DATA_DIR when configured so the downloaded
+    copy also satisfies _validate_video_path's DATA_DIR containment when the
+    pipeline re-validates.
+    """
+    data_dir = os.environ.get("DATA_DIR")
+    tmp_dir = data_dir if data_dir and os.path.isdir(data_dir) else tempfile.gettempdir()
+    fd, tmp = tempfile.mkstemp(prefix="mediacache_", suffix=".mp4", dir=tmp_dir)
+    try:
+        with os.fdopen(fd, "wb") as out:
+            # noqa: S310 (host allowlisted, redirects re-validated per hop)
+            with _MEDIA_URL_OPENER.open(url, timeout=30) as resp:
+                remaining = _MEDIA_MAX_DOWNLOAD_BYTES
+                while True:
+                    chunk = resp.read(_DOWNLOAD_CHUNK)
+                    if not chunk:
+                        break
+                    remaining -= len(chunk)
+                    if remaining < 0:
+                        raise ValueError(
+                            "media download exceeds "
+                            f"{_MEDIA_MAX_DOWNLOAD_BYTES} byte cap: {url!r}"
+                        )
+                    out.write(chunk)
+    except Exception:
+        try:
+            os.unlink(tmp)
+        except OSError:
+            pass
+        raise
+    return tmp
+
+
+def resolve_video_source(video_path: str) -> tuple[str, bool]:
+    """Resolve a request's video_path to a LOCAL file: returns (path, is_temp).
+
+    An http(s) URL whose host is allowlisted is downloaded to a temp file and
+    returned with is_temp=True (the caller unlinks it when done). This lets a
+    remote GPU worker fetch the video straight from MinIO/S3 by presigned URL
+    instead of the API node writing it to a shared filesystem, while cv2 still
+    decodes a LOCAL file (reliable over a multi-minute sequential read, unlike
+    streaming the whole video frame-by-frame over HTTP). Any other value goes
+    through the local-path SSRF guard (_validate_video_path); a non-allowlisted
+    URL is rejected there via ValueError.
+    """
+    if video_path.startswith(("http://", "https://")):
+        if not _media_url_host_allowed(video_path):
+            raise ValueError(
+                f"media URL host is not in media_url_allowlist: {video_path!r}"
+            )
+        return _download_to_temp(video_path), True
+    return _validate_video_path(video_path), False
 
 
 def _is_standing(
@@ -356,10 +495,15 @@ def _upper_crop(frame: np.ndarray, bbox: dict) -> Optional[np.ndarray]:
 def _embed_tracks(crops: dict[int, list[np.ndarray]]) -> dict[int, list[float]]:
     """L2-normalized median CLIP embedding (512 floats) per raw track.
 
-    One batched post-pass over all sampled crops (~1560 for the demo video at
-    batch 64), so the 5 fps detection loop stays untouched. Failures degrade
-    to {} instead of raising: losing re-ID evidence must never discard a
-    completed multi-minute YOLO pass — the merge falls back to hist+spatial.
+    One batched post-pass over all sampled crops, so the 5 fps detection loop
+    stays untouched. Preprocessing happens INSIDE the batch loop, not up front:
+    a 1-hour video can accumulate tens of thousands of crops, and materializing
+    every 3x224x224 CLIP tensor at once (~600 KB each) would need >10 GB and OOM
+    the worker. Streaming keeps peak tensor memory at one batch (~40 MB) no
+    matter how long the video is; the output is identical to a single pass.
+    Failures degrade to {} instead of raising: losing re-ID evidence must never
+    discard a completed multi-minute YOLO pass — the merge falls back to
+    hist+spatial.
     """
     flat: list[tuple[int, np.ndarray]] = [
         (raw_id, crop) for raw_id, samples in crops.items() for crop in samples
@@ -371,15 +515,16 @@ def _embed_tracks(crops: dict[int, list[np.ndarray]]) -> dict[int, list[float]]:
         from PIL import Image
 
         model, preprocess, device = _get_clip()
-        tensors = [
-            # cv2 frames are BGR; CLIP's preprocess expects an RGB PIL image.
-            preprocess(Image.fromarray(cv2.cvtColor(crop, cv2.COLOR_BGR2RGB)))
-            for _raw_id, crop in flat
-        ]
         feats: list[np.ndarray] = []
         with torch.no_grad():
-            for i in range(0, len(tensors), CLIP_BATCH_SIZE):
-                batch = torch.stack(tensors[i : i + CLIP_BATCH_SIZE]).to(device)
+            for i in range(0, len(flat), CLIP_BATCH_SIZE):
+                chunk = flat[i : i + CLIP_BATCH_SIZE]
+                tensors = [
+                    # cv2 frames are BGR; CLIP's preprocess expects an RGB PIL image.
+                    preprocess(Image.fromarray(cv2.cvtColor(crop, cv2.COLOR_BGR2RGB)))
+                    for _raw_id, crop in chunk
+                ]
+                batch = torch.stack(tensors).to(device)
                 feats.append(model.encode_image(batch).float().cpu().numpy())
         all_feats = np.concatenate(feats, axis=0)
     except Exception:

@@ -1,14 +1,16 @@
 """Board (blackboard / whiteboard) zone detection for classroom videos.
 
 Strategy chain (feature contract):
-1. YOLO-World open-vocabulary proposals ("blackboard", "whiteboard",
+0. YOLOE-26-seg open-vocabulary DETECT + SEGMENT in one pass (a single
+   YOLO26-family model that returns the region AND a mask, replacing the
+   YOLO-World -> SAM2 two-model chain). When it confidently finds a board
+   (score >= MIN_SCORE) the slower SAM2 strategies below are skipped. Like
+   YOLO-World it needs the optional `clip` text encoder (checked with importlib
+   BEFORE touching ultralytics text_model, which auto-pip-installs at runtime);
+   without it this strategy is skipped and the SAM2 chain runs unchanged.
+1. Fallback: YOLO-World open-vocabulary proposals ("blackboard", "whiteboard",
    "chalkboard", "projection screen"), each refined into a mask by SAM 2 and
-   geometrically scored. YOLOWorld.set_classes needs the optional `clip`
-   package (ultralytics' CLIP fork, git-only); when it is not installed this
-   strategy is skipped silently and the chain reports 'sam2_geometric'.
-   IMPORTANT: clip availability is checked with importlib BEFORE touching
-   ultralytics.nn.text_model, because importing that module auto-pip-installs
-   at runtime (not offline-safe).
+   geometrically scored.
 2. Always-available fallback: SAM 2 ('sam2.1_s.pt' preferred, 'sam2.1_b.pt'
    fallback; weights predownloaded into services/ml-service/) prompted with a
    grid of points over the upper ~65% of the frame.
@@ -54,6 +56,14 @@ FALLBACK_NATIVE_FPS = 30.0
 _SERVICE_DIR = Path(__file__).resolve().parent.parent
 SAM_MODEL_NAMES = ("sam2.1_s.pt", "sam2.1_b.pt")
 WORLD_MODEL_NAME = "yolov8s-worldv2.pt"
+# YOLOE-26-seg: open-vocabulary DETECT + SEGMENT in one YOLO26-family model. It
+# replaces the YOLO-World -> SAM2 two-model chain: a text prompt returns the
+# region AND a mask in a single pass (validated: whiteboard 0.65, door 0.64 on
+# the demo frame). yoloe-26s is fast and sufficient for a run-once static zone;
+# swap to yoloe-26l-seg for maximum open-vocab accuracy. Text-prompt mode needs
+# the same `clip` text encoder YOLO-World needs; absent that, the SAM2 fallback
+# path is used unchanged.
+YOLOE_MODEL_NAME = "yoloe-26s-seg.pt"
 BOARD_PROMPTS = ["blackboard", "whiteboard", "chalkboard", "projection screen"]
 DOOR_PROMPTS = ["door", "doorway", "classroom door", "entrance door", "double door"]
 # One YOLO-World model serves both targets; class indices < N_BOARD_CLASSES are
@@ -78,6 +88,9 @@ _world = None
 _world_failed = False
 _sam_fallback_cpu = False
 _world_fallback_cpu = False
+_yoloe = None
+_yoloe_failed = False
+_yoloe_fallback_cpu = False
 
 
 # --------------------------------------------------------------------------- #
@@ -307,6 +320,95 @@ def _get_world():
     return _world
 
 
+def _get_yoloe():
+    """YOLOE-26-seg with board+door prompts, or None when unusable.
+
+    One open-vocabulary model that DETECTS and SEGMENTS in a single pass, so it
+    replaces the YOLO-World -> SAM2 chain. Text-prompt mode needs the `clip`
+    text encoder (same dependency YOLO-World needs); when absent, returns None
+    and the caller falls back to the SAM2 grid path. Failure is cached.
+    """
+    global _yoloe, _yoloe_failed
+    if _yoloe is not None:
+        return _yoloe
+    if _yoloe_failed:
+        return None
+    if importlib.util.find_spec("clip") is None:
+        _yoloe_failed = True
+        logger.info(
+            "[board-detect] 'clip' package not installed; "
+            "YOLOE text-prompt disabled (SAM2 fallback only)"
+        )
+        return None
+    try:
+        from ultralytics import YOLOE
+
+        model = YOLOE(_weight_path(YOLOE_MODEL_NAME))
+        model.set_classes(WORLD_PROMPTS, model.get_text_pe(WORLD_PROMPTS))
+        _yoloe = model
+        logger.info("[board-detect] YOLOE model loaded: %s", YOLOE_MODEL_NAME)
+    except Exception:
+        logger.warning(
+            "[board-detect] YOLOE unavailable; using YOLO-World/SAM2 chain",
+            exc_info=True,
+        )
+        _yoloe_failed = True
+        return None
+    return _yoloe
+
+
+def _yoloe_masks(frame: np.ndarray) -> list[tuple[np.ndarray, float, int]]:
+    """YOLOE-26-seg open-vocab masks as (bool HxW mask, conf, class_index).
+
+    Detect + segment in one forward pass, so no SAM2 refinement is needed.
+    Masks are resized to the frame resolution (YOLOE emits them at model
+    stride). Class indices match WORLD_PROMPTS (< N_BOARD_CLASSES = board).
+    """
+    global _yoloe_fallback_cpu
+    model = _get_yoloe()
+    if model is None:
+        return []
+    device = "cpu" if _yoloe_fallback_cpu else _preferred_device()
+    try:
+        results = model.predict(
+            frame, conf=WORLD_MIN_CONF, imgsz=1280, device=device, verbose=False
+        )
+    except Exception as exc:
+        if device == "cpu":
+            logger.warning("[board-detect] YOLOE inference failed: %s", exc)
+            return []
+        logger.warning(
+            "[board-detect] YOLOE on %s failed (%s); falling back to cpu", device, exc
+        )
+        _yoloe_fallback_cpu = True
+        try:
+            results = model.predict(
+                frame, conf=WORLD_MIN_CONF, imgsz=1280, device="cpu", verbose=False
+            )
+        except Exception as exc2:
+            logger.warning("[board-detect] YOLOE inference failed: %s", exc2)
+            return []
+
+    r = results[0]
+    masks = r.masks
+    boxes = r.boxes
+    if masks is None or boxes is None or len(boxes) == 0:
+        return []
+    conf = boxes.conf.cpu().numpy()
+    cls = boxes.cls.cpu().numpy()
+    mdata = masks.data.cpu().numpy()
+    fh, fw = frame.shape[:2]
+    out: list[tuple[np.ndarray, float, int]] = []
+    for i in range(len(boxes)):
+        m = mdata[i]
+        if m.shape != (fh, fw):
+            m = cv2.resize(
+                m.astype(np.uint8), (fw, fh), interpolation=cv2.INTER_NEAREST
+            )
+        out.append((m.astype(bool), float(conf[i]), int(cls[i])))
+    return out
+
+
 def _sam_segment(
     frame: np.ndarray,
     *,
@@ -450,7 +552,21 @@ def _detect_on_frame(
     h, w = frame.shape[:2]
     candidates: list[tuple[float, list[list[float]], str]] = []
 
-    # Strategy 1: YOLO-World board proposals refined by SAM 2 (optional).
+    # Strategy 0 (preferred): YOLOE-26-seg open-vocab detect+segment (one model,
+    # native masks). class index < N_BOARD_CLASSES is a board prompt.
+    for mask, _conf, cidx in _yoloe_masks(frame):
+        if cidx >= N_BOARD_CLASSES:
+            continue
+        polygon = mask_to_polygon(mask)
+        if polygon:
+            candidates.append((score_mask(mask, frame), polygon, "yoloe26_seg"))
+    # If YOLOE confidently found a board, skip the slower SAM2 fallback entirely.
+    if candidates:
+        best = max(candidates, key=lambda c: c[0])
+        if best[0] >= MIN_SCORE:
+            return best
+
+    # Fallback: YOLO-World board proposals refined by SAM 2 (needs `clip`).
     proposals = [p for p in _yolo_world_proposals(frame) if p[2] < N_BOARD_CLASSES][
         :WORLD_MAX_PROPOSALS
     ]
@@ -461,7 +577,7 @@ def _detect_on_frame(
             if polygon:
                 candidates.append((score_mask(mask, frame), polygon, "yolo_world_sam2"))
 
-    # Strategy 2 (always): SAM 2 with a point grid over the upper frame.
+    # Fallback: SAM 2 with a point grid over the upper frame.
     points = [[gx * w, gy * h] for gy in GRID_Y for gx in GRID_X]
     for mask in _dedupe_masks(_sam_segment(frame, points=points)):
         polygon = mask_to_polygon(mask)
@@ -572,6 +688,18 @@ def _detect_door_on_frame(
     """Door strategy chain for one frame -> (score, polygon, method) | None."""
     h, w = frame.shape[:2]
     candidates: list[tuple[float, list[list[float]], str]] = []
+
+    # Strategy 0 (preferred): YOLOE-26-seg. class index >= N_BOARD_CLASSES = door.
+    for mask, _conf, cidx in _yoloe_masks(frame):
+        if cidx < N_BOARD_CLASSES:
+            continue
+        polygon = mask_to_polygon(mask)
+        if polygon:
+            candidates.append((score_door(mask, frame), polygon, "yoloe26_seg"))
+    if candidates:
+        best = max(candidates, key=lambda c: c[0])
+        if best[0] >= DOOR_MIN_SCORE:
+            return best
 
     proposals = [p for p in _yolo_world_proposals(frame) if p[2] >= N_BOARD_CLASSES][
         :WORLD_MAX_PROPOSALS

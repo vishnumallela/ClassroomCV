@@ -8,6 +8,8 @@ Covers:
 - _validate_video_path (SSRF / arbitrary-path guard in front of cv2).
 """
 
+from pathlib import Path
+
 import numpy as np
 import pytest
 
@@ -174,3 +176,159 @@ class TestValidateVideoPath:
         monkeypatch.setenv("DATA_DIR", str(data_dir))
         with pytest.raises(ValueError):
             _validate_video_path(str(data_dir / ".." / "secret.mp4"))
+
+
+# --------------------------------------------------------------------------- #
+# _embed_tracks streams crops in batches (bounded memory for long videos)
+# --------------------------------------------------------------------------- #
+
+
+def test_embed_tracks_streams_and_normalizes(monkeypatch):
+    """CLIP embedding must batch INSIDE the loop (not materialize every tensor
+    up front) so a 1-hour video's tens of thousands of crops cannot OOM, and it
+    must return a unit-norm median vector per raw track."""
+    import numpy as np
+    import torch
+
+    from app import detector as D
+
+    # Force multiple batches: 5 crops across 2 tracks with batch size 2.
+    monkeypatch.setattr(D, "CLIP_BATCH_SIZE", 2)
+
+    seen_batch_sizes: list[int] = []
+
+    class FakeModel:
+        def encode_image(self, batch):
+            seen_batch_sizes.append(int(batch.shape[0]))
+            # flatten each fake CxHxW crop tensor into a feature vector
+            return batch.reshape(batch.shape[0], -1)
+
+    def fake_preprocess(img):
+        m = float(np.asarray(img).mean())
+        return torch.full((3, 2, 2), m)  # a fake 3x2x2 "image" tensor
+
+    monkeypatch.setattr(D, "_get_clip", lambda: (FakeModel(), fake_preprocess, "cpu"))
+
+    crops = {
+        7: [np.full((8, 8, 3), v, np.uint8) for v in (10, 20, 30)],
+        9: [np.full((8, 8, 3), v, np.uint8) for v in (40, 50)],
+    }
+    out = D._embed_tracks(crops)
+
+    assert set(out.keys()) == {7, 9}
+    for vec in out.values():
+        assert len(vec) == 12  # 3*2*2 flattened
+        assert abs(float(np.linalg.norm(vec)) - 1.0) < 1e-5  # unit-normalized
+    # 5 crops at batch size 2 -> batches of [2, 2, 1]; never all 5 at once.
+    assert seen_batch_sizes == [2, 2, 1]
+    assert max(seen_batch_sizes) <= 2
+
+
+# --------------------------------------------------------------------------- #
+# resolve_video_source: object-store URL fetch (allowlist-gated) vs local path
+# --------------------------------------------------------------------------- #
+
+
+def test_media_url_host_allowed(monkeypatch):
+    from app import detector as D
+    from app.config import get_settings
+
+    monkeypatch.setenv("MEDIA_URL_ALLOWLIST", "")
+    get_settings.cache_clear()
+    assert D._media_url_host_allowed("http://localhost:9000/b/k.mp4") is False
+    monkeypatch.setenv("MEDIA_URL_ALLOWLIST", "minio:9000,localhost:9000")
+    get_settings.cache_clear()
+    assert D._media_url_host_allowed("http://localhost:9000/b/k.mp4") is True
+    assert D._media_url_host_allowed("http://evil:9000/b/k.mp4") is False
+    get_settings.cache_clear()
+
+
+def test_resolve_url_rejected_without_allowlist(monkeypatch):
+    from app import detector as D
+    from app.config import get_settings
+
+    monkeypatch.setenv("MEDIA_URL_ALLOWLIST", "")
+    get_settings.cache_clear()
+    with pytest.raises(ValueError, match="media URL host"):
+        D.resolve_video_source("https://cdn.example.com/x.mp4")
+    get_settings.cache_clear()
+
+
+def test_resolve_url_downloads_when_allowlisted(monkeypatch):
+    import io
+
+    from app import detector as D
+    from app.config import get_settings
+
+    monkeypatch.setenv("MEDIA_URL_ALLOWLIST", "host:1234")
+    monkeypatch.delenv("DATA_DIR", raising=False)
+    get_settings.cache_clear()
+    payload = b"FAKE-VIDEO-BYTES" * 1000
+    # The fetch now goes through the allowlist-revalidating opener, not the bare
+    # urlopen, so patch the opener's open().
+    monkeypatch.setattr(D._MEDIA_URL_OPENER, "open", lambda url, timeout=30: io.BytesIO(payload))
+    path, is_temp = D.resolve_video_source("http://host:1234/bucket/key.mp4")
+    try:
+        assert is_temp is True
+        assert Path(path).read_bytes() == payload
+    finally:
+        Path(path).unlink(missing_ok=True)
+    get_settings.cache_clear()
+
+
+def test_download_rejects_redirect_to_non_allowlisted_host(monkeypatch):
+    """A 3xx from an allowlisted origin to an internal host is refused (the
+    SSRF-via-redirect bypass): the redirect handler re-checks every hop."""
+    import io
+    import urllib.request
+
+    from app import detector as D
+    from app.config import get_settings
+
+    monkeypatch.setenv("MEDIA_URL_ALLOWLIST", "cache.example.com")
+    get_settings.cache_clear()
+    handler = D._AllowlistRedirectHandler()
+    with pytest.raises(ValueError, match="non-allowlisted host"):
+        handler.redirect_request(
+            None, None, 302, "Found", {}, "http://169.254.169.254/latest/meta-data/"
+        )
+    # A redirect back to an allowlisted host is allowed to proceed.
+    req = handler.redirect_request(
+        urllib.request.Request("http://cache.example.com/a.mp4"),
+        io.BytesIO(b""),
+        302,
+        "Found",
+        {},
+        "http://cache.example.com/b.mp4",
+    )
+    assert req is not None
+    get_settings.cache_clear()
+
+
+def test_download_rejects_oversize_object(monkeypatch):
+    """An allowlisted object larger than the byte cap aborts (disk-exhaustion
+    guard) and leaves no temp file behind."""
+    import io
+
+    from app import detector as D
+    from app.config import get_settings
+
+    monkeypatch.setenv("MEDIA_URL_ALLOWLIST", "host:1234")
+    monkeypatch.delenv("DATA_DIR", raising=False)
+    get_settings.cache_clear()
+    monkeypatch.setattr(D, "_MEDIA_MAX_DOWNLOAD_BYTES", 4096)
+    big = io.BytesIO(b"x" * (4096 * 4))
+    monkeypatch.setattr(D._MEDIA_URL_OPENER, "open", lambda url, timeout=30: big)
+    with pytest.raises(ValueError, match="byte cap"):
+        D.resolve_video_source("http://host:1234/bucket/huge.mp4")
+    get_settings.cache_clear()
+
+
+def test_resolve_local_path_passthrough(monkeypatch):
+    from app import detector as D
+
+    monkeypatch.delenv("DATA_DIR", raising=False)
+    asset = str((Path(__file__).resolve().parent / "assets" / "bus.jpg"))
+    path, is_temp = D.resolve_video_source(asset)
+    assert is_temp is False
+    assert path == str(Path(asset).resolve())

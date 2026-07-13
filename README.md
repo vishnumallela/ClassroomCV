@@ -1,10 +1,24 @@
-# ClassroomCV
+# Luminary
 
-Upload a classroom recording and get structured teaching analytics: teacher
-presence, entries and exits, time at the board, and student occupancy over time.
-The detection pipeline (YOLO11m-pose, BoT-SORT, re-identification, SAM 2 board
-detection) runs in a durable background worker; the dashboard reads the results
-over a typed API.
+_Every lesson, brought to light._
+
+Upload a classroom recording and get trustworthy teaching analytics: teacher
+presence, entries and exits, time at the board, circulation among the desks,
+how the class settled, and student occupancy over time — each shown with an
+honest confidence level, never a falsely precise number. No facial recognition,
+no named students, aggregate insights only.
+
+The detection pipeline (YOLO26-pose, BoT-SORT, CLIP re-identification, SAM 2
+zone detection) runs in a durable background worker; the dashboard reads the
+results over a typed API. Every analysed lesson also carries a **data-quality
+report** (`services/ml-service/app/quality.py`) — coverage, tracker
+fragmentation, and a re-identification-independent concurrent head count — so
+the dashboard can say how much each figure can be trusted.
+
+The **How it works** page (`/architecture`) explains the whole pipeline in plain
+language, and [`docs/architecture-decision.md`](docs/architecture-decision.md)
+is the SOTA + scalability decision record (detection/tracking upgrades, the
+80-camera streaming path, and the TimescaleDB tiering for high-volume ingest).
 
 ## Layout
 
@@ -12,7 +26,7 @@ over a typed API.
 apps/frontend/       Vite + TanStack Router SPA, shadcn UI, oRPC client
 apps/api-service/    Bun + Hono + oRPC, BullMQ pipeline, Drizzle + postgres.js
 packages/api-contracts/  Shared, type-only oRPC router types
-services/ml-service/     Python FastAPI, YOLO11m-pose + SAM 2 (uv-managed)
+services/ml-service/     Python FastAPI, YOLO26-pose + SAM 2 (uv-managed, GPU-ready)
 data/                    Uploaded videos, thumbnails
 docker-compose.yml       TimescaleDB (5433) and Redis (6379)
 ```
@@ -44,13 +58,14 @@ http://localhost:8787/admin/queues.
 
 ## Ports
 
-| Service              | Port |
-| -------------------- | ---- |
-| Frontend (Vite)      | 3001 |
-| API (Hono)           | 8787 |
-| ML service (FastAPI) | 8000 |
-| TimescaleDB          | 5433 |
-| Redis                | 6379 |
+| Service              | Port       |
+| -------------------- | ---------- |
+| Frontend (Vite)      | 3001       |
+| API (Hono)           | 8787       |
+| ML service (FastAPI) | 8000       |
+| TimescaleDB          | 5433       |
+| Redis                | 6379       |
+| MinIO (S3 + console) | 9000, 9001 |
 
 ## Commands
 
@@ -70,3 +85,9 @@ The api-service reads `API_SERVICE__*` variables with sensible local defaults
 (database on `localhost:5433`, Redis on `localhost:6379`, ML service on
 `localhost:8000`). The frontend reads `FRONTEND__API_URL`, defaulting to
 `http://localhost:8787`.
+
+Video + thumbnail bytes are stored per `API_SERVICE__STORAGE_BACKEND`: `local`
+(the default; writes into `DATA_DIR`) or `s3` (MinIO / S3 / R2 via Bun's native
+S3 client, configured with `API_SERVICE__S3_ENDPOINT` / `_BUCKET` / `_ACCESS_KEY`
+/ `_SECRET_KEY`). On-prem MinIO keeps student video on the school's own
+infrastructure; the worker caches a local copy for ffmpeg and the ML service.

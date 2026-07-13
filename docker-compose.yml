@@ -30,6 +30,43 @@ services:
       timeout: 3s
       retries: 10
 
+  # On-prem S3-compatible object storage for video + thumbnail bytes.
+  # Console at http://localhost:9001 (minioadmin / minioadmin). Only used when
+  # API_SERVICE__STORAGE_BACKEND=s3; the default "local" backend ignores it.
+  minio:
+    image: minio/minio:latest
+    container_name: classroom-minio
+    command: ["server", "/data", "--console-address", ":9001"]
+    ports:
+      - "9000:9000"
+      - "9001:9001"
+    environment:
+      MINIO_ROOT_USER: minioadmin
+      MINIO_ROOT_PASSWORD: minioadmin
+    volumes:
+      - classroom-minio-data:/data
+    healthcheck:
+      test: ["CMD", "mc", "ready", "local"]
+      interval: 5s
+      timeout: 5s
+      retries: 12
+
+  # One-shot: create the bucket once MinIO is up, then exit.
+  minio-setup:
+    image: minio/mc:latest
+    container_name: classroom-minio-setup
+    depends_on:
+      - minio
+    restart: "no"
+    entrypoint:
+      - /bin/sh
+      - -c
+      - >
+        until mc alias set local http://minio:9000 minioadmin minioadmin; do sleep 1; done &&
+        mc mb --ignore-existing local/luminary-videos &&
+        echo "bucket luminary-videos ready"
+
 volumes:
   classroom-db-data:
   classroom-redis-data:
+  classroom-minio-data:

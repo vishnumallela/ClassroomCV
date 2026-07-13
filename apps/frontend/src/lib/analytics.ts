@@ -81,7 +81,7 @@ export function lessonStats(
 }
 
 /**
- * Mean concurrent students over the buckets where anyone was present — undoes
+ * Mean concurrent students over the buckets where anyone was present, undoes
  * the dilution of avg_students by empty pre/post-lesson buckets, so it reads
  * closer to true class size. Additive: does not touch the blessed avg_students.
  */
@@ -100,4 +100,161 @@ export function peakOccupancy(
     if (!best || b.students > best.students) best = { ts_ms: b.ts_ms, students: b.students };
   }
   return best && best.students > 0 ? best : null;
+}
+
+// --------------------------------------------------------------------------- //
+// Lesson rhythm: punctuality, settle time, unsupervised stretches. All derived
+// from the presence + occupancy series the API already sends; nothing implies
+// metric distance, named attendance, or engagement (see docs decision doc).
+// --------------------------------------------------------------------------- //
+
+export type LessonRhythm = {
+  firstTeacherMs: number | null; // when a teacher-role adult first appears
+  settleMs: number | null; // lesson start -> students reach 90% of peak
+  longestUnsupervisedMs: number; // longest stretch with no teacher present
+  unsupervisedCount: number; // number of such stretches > a tracking-noise floor
+};
+
+const UNSUPERVISED_FLOOR_MS = 15_000; // shorter gaps are tracking dropout, not absence
+
+export function lessonRhythm(
+  presence: Interval[],
+  occupancy: { ts_ms: number; students: number }[],
+  durationMs: number,
+): LessonRhythm {
+  const pres = sortIv(presence);
+  const firstTeacherMs = pres.length ? pres[0]![0] : null;
+
+  // Settle: from first student presence until the count first reaches 90% of peak.
+  const occ = occupancy.filter((b) => b.students > 0);
+  let settleMs: number | null = null;
+  if (occ.length > 0) {
+    const peak = occ.reduce((m, b) => Math.max(m, b.students), 0);
+    const start = occ[0]!.ts_ms;
+    const settled = occ.find((b) => b.students >= 0.9 * peak);
+    if (settled) settleMs = Math.max(0, settled.ts_ms - start);
+  }
+
+  // Unsupervised: gaps between presence intervals, plus the lead/tail if the
+  // teacher was absent at the edges, longer than the tracking-noise floor.
+  let longest = 0;
+  let count = 0;
+  const consider = (ms: number) => {
+    if (ms > UNSUPERVISED_FLOOR_MS) {
+      count++;
+      longest = Math.max(longest, ms);
+    }
+  };
+  if (pres.length === 0) {
+    longest = durationMs;
+    count = durationMs > UNSUPERVISED_FLOOR_MS ? 1 : 0;
+  } else {
+    consider(pres[0]![0]); // before the teacher first arrives
+    for (let i = 1; i < pres.length; i++) consider(pres[i]![0] - pres[i - 1]![1]);
+    consider(durationMs - pres[pres.length - 1]![1]); // after the teacher leaves
+  }
+  return { firstTeacherMs, settleMs, longestUnsupervisedMs: longest, unsupervisedCount: count };
+}
+
+// --------------------------------------------------------------------------- //
+// Teacher circulation, from the dwell heatmap (teacher vs student per-cell
+// sample counts). Everything here is IMAGE-PLANE coverage, never metric
+// distance in feet, which would need camera calibration we do not have.
+// --------------------------------------------------------------------------- //
+
+export type Heatmap = { grid_w: number; grid_h: number; teacher: number[]; students: number[] };
+
+export type Circulation = {
+  coverage: number; // fraction of the active room the teacher's path touched
+  amongStudentsShare: number; // share of teacher time in cells where students sit
+  focusShare: number; // share of teacher time in her single most-used cell
+  reachedBackRows: boolean; // did she reach the row band farthest from the front
+  spread: number; // normalized dwell entropy 0..1 (Moodoo): 0 = one spot, 1 = even
+  style: "presenter" | "supervisor" | "balanced"; // Moodoo-style teaching pattern
+  samples: number;
+};
+
+// Moodoo (Martinez-Maldonado et al.) validates that a teacher's dwell
+// distribution separates "presenter/authoritative" (front-anchored, low spread)
+// from "supervisor" (mobile, high spread, reaches learners) teaching patterns.
+// We compute those from the dwell heatmap; they are image-plane, relative to
+// this lesson, and describe MOVEMENT PATTERN only, never teaching quality.
+const SPREAD_LOW = 0.35; // below this, dwell is concentrated in a few cells
+const SPREAD_HIGH = 0.6; // above this, dwell is well distributed
+const FOCUS_HIGH = 0.5; // >half of time in one cell = anchored
+
+export function circulation(hm: Heatmap | null | undefined): Circulation | null {
+  if (!hm || hm.grid_w <= 0 || hm.grid_h <= 0) return null;
+  const { grid_w, grid_h, teacher, students } = hm;
+  const total = teacher.reduce((s, n) => s + n, 0);
+  if (total <= 0) return null;
+
+  let teacherCells = 0;
+  let activeCells = 0;
+  let amongStudents = 0;
+  let topCell = 0;
+  let entropy = 0; // -sum p*ln p over occupied teacher cells
+  for (let i = 0; i < teacher.length; i++) {
+    const t = teacher[i]!;
+    const st = students[i] ?? 0;
+    if (t > 0 || st > 0) activeCells++;
+    if (t > 0) {
+      teacherCells++;
+      const p = t / total;
+      entropy -= p * Math.log(p);
+    }
+    if (t > 0 && st > 0) amongStudents += t;
+    if (t > topCell) topCell = t;
+  }
+  // Normalize entropy by ln(occupied cells) so spread is 0..1 and comparable
+  // across rooms regardless of how many cells the teacher visited.
+  const spread = teacherCells > 1 ? entropy / Math.log(teacherCells) : 0;
+  const focusShare = topCell / total;
+  const coverage = activeCells > 0 ? teacherCells / activeCells : 0;
+
+  // "Back rows" = the third of grid rows with the most student mass but the
+  // least camera proximity; we approximate it as the student-dense row band
+  // and ask whether the teacher ever entered it.
+  const rowStudents = Array.from({ length: grid_h }, (_v, r) => {
+    let mass = 0;
+    for (let c = 0; c < grid_w; c++) mass += students[r * grid_w + c] ?? 0;
+    return mass;
+  });
+  const studentRows = rowStudents
+    .map((mass, r) => ({ mass, r }))
+    .filter((x) => x.mass > 0)
+    .toSorted((a, b) => b.mass - a.mass);
+  const backBand = new Set(
+    studentRows.slice(0, Math.max(1, Math.round(grid_h / 3))).map((x) => x.r),
+  );
+  let reachedBackRows = false;
+  for (let r = 0; r < grid_h && !reachedBackRows; r++) {
+    if (!backBand.has(r)) continue;
+    for (let c = 0; c < grid_w; c++) {
+      if ((teacher[r * grid_w + c] ?? 0) > 0) {
+        reachedBackRows = true;
+        break;
+      }
+    }
+  }
+
+  // Classify the movement pattern (Moodoo): anchored + low spread reads as a
+  // front-of-room presenter; wide spread that reaches learners reads as a
+  // supervisor circulating the room; anything else is balanced.
+  let style: Circulation["style"] = "balanced";
+  if (focusShare >= FOCUS_HIGH || spread < SPREAD_LOW) {
+    style = "presenter";
+  } else if (spread >= SPREAD_HIGH && reachedBackRows && coverage >= 0.4) {
+    style = "supervisor";
+  }
+
+  return {
+    coverage,
+    amongStudentsShare: amongStudents / total,
+    focusShare,
+    reachedBackRows,
+    spread,
+    style,
+    samples: total,
+  };
 }

@@ -1,0 +1,1 @@
+ALTER TABLE "video_analytics" ADD COLUMN "data_quality" jsonb;

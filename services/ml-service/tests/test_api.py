@@ -14,7 +14,7 @@ def test_health_shape():
     assert r.status_code == 200
     body = r.json()
     assert body["status"] == "ok"
-    assert body["device"] in ("mps", "cpu")
+    assert body["device"] in ("mps", "cpu", "cuda")
     assert isinstance(body["model_loaded"], bool)
 
 

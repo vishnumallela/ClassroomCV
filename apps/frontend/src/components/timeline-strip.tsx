@@ -40,7 +40,9 @@ function StateLane({
             type="button"
             title={`${STATE_LABEL[s.state]} · ${msToClock(s.start)}–${msToClock(s.end)}`}
             aria-label={`${STATE_LABEL[s.state]} at ${msToClock(s.start)}`}
-            className={`absolute inset-y-0 ${STATE_COLOR[s.state]}`}
+            // z-20 beats the strip-wide seek overlay (z-10); without it the
+            // overlay eats these segments' hover tooltip and snap-to-start seek.
+            className={`absolute inset-y-0 z-20 ${STATE_COLOR[s.state]}`}
             style={{
               left: `${(s.start / durationMs) * 100}%`,
               width: `${Math.max(0.3, ((s.end - s.start) / durationMs) * 100)}%`,

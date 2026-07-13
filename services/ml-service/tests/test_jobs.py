@@ -13,8 +13,15 @@ import queue
 
 import pytest
 
-from app import db, jobs
+from app import db, detector, jobs
 from app.models import VideoMeta
+
+
+@pytest.fixture(autouse=True)
+def _passthrough_resolve(monkeypatch):
+    """These tests mock detect_video with fake paths, so bypass the real
+    URL/local resolution (which would reject a non-existent /tmp path)."""
+    monkeypatch.setattr(detector, "resolve_video_source", lambda vp: (vp, False))
 
 
 @pytest.fixture

@@ -11,9 +11,20 @@ import {
   updateVideo,
   type VideoRow,
 } from "@api/db/queries";
+import { mkdir } from "node:fs/promises";
 import { generateThumbnail, probeVideo } from "@api/lib/media";
 import { logger } from "@api/lib/logger";
-import { mlDetectBoard, mlGetJob, mlGetJobResult, mlStartAnalysis } from "@api/lib/ml";
+import { mlDetectBoard, mlDetectDoor, mlGetJob, mlGetJobResult, mlStartAnalysis } from "@api/lib/ml";
+import { isS3, presignGet, putLocalFile } from "@api/lib/storage";
+
+// The bytes source for ffprobe/ffmpeg/the ML worker. On s3 this is a presigned
+// URL (valid 6 h, long enough for a slow analysis) so nothing downloads the
+// whole video onto the API node: ffprobe reads only the header, ffmpeg only a
+// seeked frame, and the ML worker fetches its own local copy. On local it is
+// just the file path.
+function mediaSource(filePath: string): string {
+  return isS3 ? (presignGet(filePath, 6 * 60 * 60) ?? filePath) : filePath;
+}
 import type { AnalyzeJobData } from "@api/lib/queue";
 
 const POLL_INTERVAL_MS = 5_000;
@@ -57,13 +68,20 @@ async function probeStep(
 ): Promise<void> {
   const video = await requireCurrentRun(videoId, attemptId, jobId, "probe");
   await updateStatus(videoId, { status: "probing", progress: 0.02 });
-  const meta = await probeVideo(video.filePath);
+  const source = mediaSource(video.filePath);
+  const meta = await probeVideo(source);
 
   let thumbnailPath: string | undefined;
   try {
     const mark = meta.durationMs ? (meta.durationMs / 1000) * 0.1 : 1;
     const out = join(dirname(video.filePath), "thumb.jpg");
-    if (await generateThumbnail(video.filePath, out, mark)) thumbnailPath = out;
+    await mkdir(dirname(out), { recursive: true });
+    if (await generateThumbnail(source, out, mark)) {
+      thumbnailPath = out;
+      await putLocalFile(out).catch((err) =>
+        logger.warn({ err, videoId }, "thumbnail upload to object store failed (non-fatal)"),
+      );
+    }
   } catch (err) {
     logger.warn({ err, videoId }, "thumbnail generation failed (non-fatal)");
   }
@@ -89,7 +107,7 @@ async function detectBoardStep(
   try {
     const video = await getVideo(videoId);
     if (!video) return;
-    const res = await mlDetectBoard(videoId, video.filePath);
+    const res = await mlDetectBoard(videoId, mediaSource(video.filePath));
     if (res.polygon && res.confidence >= 0.5) {
       await requireCurrentRun(videoId, attemptId, jobId, "detect-board insert");
       await insertZone(videoId, {
@@ -104,6 +122,34 @@ async function detectBoardStep(
   }
 }
 
+async function detectDoorStep(
+  videoId: string,
+  attemptId: string | undefined,
+  jobId: string,
+): Promise<void> {
+  await requireCurrentRun(videoId, attemptId, jobId, "detect-door");
+  if (await hasZoneKind(videoId, "door")) return;
+  try {
+    const video = await getVideo(videoId);
+    if (!video) return;
+    const res = await mlDetectDoor(videoId, mediaSource(video.filePath));
+    // Doors score lower than boards (tall/narrow geometry, softer color term),
+    // so the API auto-accept gate is lower than board's 0.5. The ML side has
+    // already rejected anything below DOOR_MIN_SCORE and returned a null polygon.
+    if (res.polygon && res.confidence >= 0.4) {
+      await requireCurrentRun(videoId, attemptId, jobId, "detect-door insert");
+      await insertZone(videoId, {
+        kind: "door",
+        polygon: res.polygon,
+        meta: { auto: true, confidence: res.confidence, method: res.method },
+      });
+    }
+  } catch (err) {
+    if (err instanceof UnrecoverableError) throw err;
+    logger.warn({ err, videoId }, "door auto-detect failed (continuing without door)");
+  }
+}
+
 async function startAnalysisStep(
   videoId: string,
   attemptId: string | undefined,
@@ -114,7 +160,7 @@ async function startAnalysisStep(
   const runTokens = [attemptId, jobId].filter((t): t is string => Boolean(t));
   return mlStartAnalysis({
     videoId,
-    videoPath: video.filePath,
+    videoPath: mediaSource(video.filePath),
     sampleFps: 5,
     zones,
     idempotencyKey: `${videoId}:${attemptId ?? "initial"}`,
@@ -190,6 +236,7 @@ export async function processAnalyzeJob(job: Job<AnalyzeJobData>): Promise<void>
   try {
     await probeStep(videoId, attemptId, jobId);
     await detectBoardStep(videoId, attemptId, jobId);
+    await detectDoorStep(videoId, attemptId, jobId);
     const mlJobId = await startAnalysisStep(videoId, attemptId, jobId);
     await pollUntilDone(videoId, mlJobId, attemptId, jobId, job);
     await ingestStep(videoId, mlJobId, attemptId, jobId);

@@ -16,15 +16,34 @@ class Settings(BaseSettings):
     )
 
     database_url: str = "postgres://postgres:postgres@localhost:5433/classroom"
-    model_name: str = "yolo11m-pose.pt"
-    device: str = "mps"
-    # Inference: 640 letterboxes the 2560-wide CCTV frame down 4x and destroys
-    # back-row keypoints; 1280 is the single largest quality lever. conf=0.1
-    # matches the floor the golden baseline ran with; lowering it is coupled
-    # to tracker thresholds and needs offline scenario validation first.
+
+    # Model + device are device-aware and env-overridable, so the SAME code runs
+    # on a Mac (MPS) for development and on an NVIDIA GPU in production.
+    #
+    #   device="auto"     -> cuda if available, else mps, else cpu.
+    #   model_name="auto" -> the best YOLO26 pose model for the resolved device:
+    #                        yolo26x-pose on cuda (a GPU has the headroom),
+    #                        yolo26m-pose on mps/cpu (keeps dev iteration fast).
+    #
+    # YOLO26 is NMS-free and reports up to +7.2 pose AP over YOLO11 (COCO
+    # m-pose 68.8, l-pose 70.4). On a GPU, export to TensorRT for a ~5x fp16
+    # speedup and point MODEL_NAME at the engine, e.g.:
+    #   yolo export model=yolo26x-pose.pt format=engine half=True dynamic=True
+    #   MODEL_NAME=yolo26x-pose.engine DEVICE=cuda IMGSZ=1536
+    # For a large live fleet prefer yolo26l-pose (batched) over x (see docs).
+    model_name: str = "auto"
+    device: str = "auto"
+    # 1280 halves a 2560px CCTV frame so small back-row people survive letterbox
+    # downscale; on a GPU with headroom raise to 1536 (env IMGSZ) for more recall.
     imgsz: int = 1280
     det_conf: float = 0.1
     max_det: int = 100
+    # Comma-separated host[:port] allowlist for presigned media URLs. Empty
+    # (default) rejects ALL URLs, so /analyze only reads local files (the SSRF
+    # guard). Set to the object-store host (e.g. "minio:9000,localhost:9000")
+    # to let the service fetch a video directly from MinIO/S3 by presigned URL,
+    # instead of the API node downloading it to a shared filesystem.
+    media_url_allowlist: str = ""
     tracker_cfg: str = str(
         Path(__file__).resolve().parent / "trackers" / "classroom_botsort.yaml"
     )

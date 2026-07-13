@@ -2,10 +2,23 @@
 <html lang="en">
   <head>
     <meta charset="UTF-8" />
+    <link rel="icon" type="image/svg+xml" href="/favicon.svg" />
     <meta name="viewport" content="width=device-width, initial-scale=1.0" />
-    <title>classroomCV</title>
+    <meta name="theme-color" content="#1e2b26" />
+    <meta
+      name="description"
+      content="Luminary turns classroom video into trustworthy teaching insights: aggregate only, no facial recognition."
+    />
+    <title>Luminary</title>
   </head>
   <body>
+    <script>
+      // Apply the saved theme before first paint (no flash). Default: chalk (light).
+      try {
+        var t = localStorage.getItem("luminary-theme");
+        if (t === "dark") document.documentElement.classList.add("dark");
+      } catch (e) {}
+    </script>
     <div id="root"></div>
     <script type="module" src="/src/main.tsx"></script>
   </body>

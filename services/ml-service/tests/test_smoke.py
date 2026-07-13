@@ -6,8 +6,14 @@ from app.config import get_settings
 def test_settings_load():
     s = get_settings()
     assert s.database_url.startswith("postgres://")
-    assert s.device in ("mps", "cpu")
-    assert s.model_name.endswith("yolo11m-pose.pt")
+    # device + model are now device-aware ('auto'); assert the RESOLVED values.
+    from app import detector
+
+    assert detector.get_device() in ("mps", "cpu", "cuda")
+    resolved = detector.resolve_model_name()
+    assert resolved.endswith((".pt", ".engine"))
+    # the 'auto' default is a YOLO pose weight
+    assert "pose" in resolved
 
 
 def test_app_importable():
