@@ -48,14 +48,19 @@ class Settings(BaseSettings):
         Path(__file__).resolve().parent / "trackers" / "classroom_botsort.yaml"
     )
 
-    # Vision-LLM teacher-ID fallback (Groq, OpenAI-compatible endpoint). Runs ONLY
+    # Vision-LLM teacher-ID fallback (Gemini native generateContent API). Runs ONLY
     # when the geometric ranker returns all-unknown: a teacher who comes in and
     # sits the whole lesson scores like a student (low standing/movement), so pose
     # and motion cannot find her, but a vision model can (adult, not in uniform, at
-    # the teacher's desk). Empty GROQ_API_KEY disables it, so most videos never
+    # the teacher's desk). Empty GEMINI_API_KEY disables it, so most videos never
     # touch the API. See app/vlm_teacher.py.
-    groq_api_key: str = ""
-    vlm_model: str = "meta-llama/llama-4-scout-17b-16e-instruct"
+    #
+    # vlm_model defaults to the "-latest" alias, not a dated version: Gemini 2.5
+    # Flash/Flash-Lite already 404 for new API keys despite still being listed in
+    # the model catalog, so a pinned version silently breaks on the next
+    # deprecation. The alias keeps pointing at Google's current stable Flash model.
+    gemini_api_key: str = ""
+    vlm_model: str = "gemini-flash-latest"
     vlm_teacher_fallback: bool = True
     vlm_frames: int = 6  # frames sampled across the lesson to vote over
     vlm_min_votes: int = 2  # the winning track must win at least this many frames
