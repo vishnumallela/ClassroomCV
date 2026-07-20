@@ -9,12 +9,21 @@ Design (learned the hard way):
 - LOCATE-then-map, NOT set-of-marks. We send the RAW frame and ask the model for the
   teacher's normalized centre point, then map that point to the nearest track. Drawing
   numbered boxes and asking "which number?" only works with <~10 people; past that,
-  lighter models miscount or misread the tiny labels (Scout returned null on a 22-box
-  frame but pointed at the right person on the same raw frame).
+  lighter models miscount or misread the tiny labels.
 - MAJORITY VOTE over several frames absorbs the occasional point that drifts onto a
   neighbour in a crowded frame.
-- Groq sits behind Cloudflare: httpx with a real User-Agent works; urllib's default UA
-  gets an HTTP 403 "error code 1010".
+
+Provider history (2026-07-20): started on Groq/Llama-4-Scout (deprecated by Groq
+soon after); Qwen3.6 on Groq rejected (thinking-mode <think> blocks blew the token
+budget and it hit persistent rate limits); OpenRouter's free vision tier mostly
+returned 404 "no endpoints support image input" despite being listed, and the one
+model that worked (Nemotron) only answered ~50% of calls (Nvidia's shared free-tier
+worker pool saturates). Landed on Gemini (`gemini-flash-latest`) after a 6-frame
+production-pattern re-test went 6/6 correct with zero failures. `gemini-2.5-flash`
+and `-lite` are ALREADY 404 for new API keys despite still being listed in the
+model catalog, which is why we pin to the `-latest` alias, not a dated version:
+Google keeps it pointed at whatever their current stable Flash model is, so a
+future deprecation like this one won't need a code change.
 
 Fail-closed: any missing key / disabled flag / error / inconclusive vote returns None,
 and the caller keeps the all-unknown result rather than inventing a teacher.
@@ -40,7 +49,7 @@ from app.models import Detection
 
 logger = logging.getLogger(__name__)
 
-_ENDPOINT = "https://api.groq.com/openai/v1/chat/completions"
+_ENDPOINT_TMPL = "https://generativelanguage.googleapis.com/v1beta/models/{model}:generateContent"
 _PROMPT = (
     "This is a classroom CCTV frame. Exactly one person is the TEACHER (an adult "
     "instructor); everyone else is a child wearing a school uniform. Give the pixel "
@@ -61,35 +70,47 @@ def _b64_jpeg(frame, max_w: int = 2000) -> str:
     return base64.b64encode(buf).decode()
 
 
+def _strip_code_fence(text: str) -> str:
+    """Gemini sometimes wraps JSON in ```json ... ``` — strip the fence before parsing."""
+    return re.sub(r"```(?:json)?\s*|\s*```", "", text)
+
+
+def _parse_point(content: str) -> Optional[tuple[float, float]]:
+    content = _strip_code_fence(content)
+    m = re.findall(r'\{[^{}]*"x"[^{}]*\}', content, re.S)
+    if not m:
+        return None
+    try:
+        j = json.loads(m[-1])
+    except json.JSONDecodeError:
+        return None
+    if j.get("x") is None or j.get("y") is None:
+        return None
+    try:
+        return float(j["x"]), float(j["y"])
+    except (TypeError, ValueError):
+        return None
+
+
 def _ask_point(
     client: httpx.Client, key: str, model: str, b64: str
 ) -> Optional[tuple[float, float]]:
     """Return the teacher's (x, y) in 0..1, or None. Retries on rate-limit."""
+    url = _ENDPOINT_TMPL.format(model=model)
     payload = {
-        "model": model,
-        "temperature": 0,
-        "max_tokens": 200,
-        "messages": [
+        "contents": [
             {
-                "role": "user",
-                "content": [
-                    {"type": "text", "text": _PROMPT},
-                    {
-                        "type": "image_url",
-                        "image_url": {"url": f"data:image/jpeg;base64,{b64}"},
-                    },
-                ],
+                "parts": [
+                    {"text": _PROMPT},
+                    {"inline_data": {"mime_type": "image/jpeg", "data": b64}},
+                ]
             }
         ],
-    }
-    headers = {
-        "Authorization": f"Bearer {key}",
-        "Content-Type": "application/json",
-        "User-Agent": "classroomcv-ml/1.0",
+        "generationConfig": {"temperature": 0, "maxOutputTokens": 2000},
     }
     for attempt in range(3):
         try:
-            r = client.post(_ENDPOINT, json=payload, headers=headers)
+            r = client.post(url, params={"key": key}, json=payload)
         except Exception as exc:  # network error — treat as a missing answer
             logger.warning("VLM request error: %s", exc)
             return None
@@ -99,20 +120,14 @@ def _ask_point(
         if r.status_code != 200:
             logger.warning("VLM HTTP %s: %s", r.status_code, r.text[:200])
             return None
-        content = r.json()["choices"][0]["message"]["content"]
-        m = re.findall(r'\{[^{}]*"x"[^{}]*\}', content, re.S)
-        if not m:
-            return None
+        body = r.json()
         try:
-            j = json.loads(m[-1])
-        except json.JSONDecodeError:
+            parts = body["candidates"][0]["content"]["parts"]
+            content = "".join(p.get("text", "") for p in parts)
+        except (KeyError, IndexError):
+            logger.warning("VLM unexpected response shape: %s", json.dumps(body)[:200])
             return None
-        if j.get("x") is None or j.get("y") is None:
-            return None
-        try:
-            return float(j["x"]), float(j["y"])
-        except (TypeError, ValueError):
-            return None
+        return _parse_point(content)
     return None  # exhausted retries (persistent 429)
 
 
@@ -133,7 +148,7 @@ def identify_teacher(
     s = get_settings()
     if (
         not s.vlm_teacher_fallback
-        or not s.groq_api_key
+        or not s.gemini_api_key
         or not video_path
         or not dets_by_track
         or duration_ms <= 0
@@ -173,7 +188,7 @@ def identify_teacher(
                     ok, frame = cap.read()
                     if not ok:
                         continue
-                    pt = _ask_point(client, s.groq_api_key, s.vlm_model, _b64_jpeg(frame))
+                    pt = _ask_point(client, s.gemini_api_key, s.vlm_model, _b64_jpeg(frame))
                     if pt is None:
                         continue
                     answered += 1
