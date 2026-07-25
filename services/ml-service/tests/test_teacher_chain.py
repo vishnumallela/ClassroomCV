@@ -21,6 +21,40 @@ def _d(ts, raw, track, x, y=0.45, h=0.45, standing=True):
     )
 
 
+def test_find_switch_index_flags_a_fragment_that_relocates():
+    # The tracker id sits on the teacher at cx~0.36, then slides onto a pupil at
+    # cx~0.18 and stays there (measured shape of a real intra-fragment switch).
+    dets = [_d(ts, 10, 1, 0.36) for ts in range(0, 20_000, 200)]
+    dets += [_d(ts, 10, 1, 0.18) for ts in range(20_000, 36_000, 200)]
+    cut = tc.find_switch_index(dets)
+    assert cut is not None
+    # the split lands at the relocation, not somewhere arbitrary
+    assert abs(dets[cut].video_ts_ms - 20_000) <= 2_000
+
+
+def test_find_switch_index_ignores_a_fragment_that_stays_put():
+    # A teacher working at the board drifts a little but never relocates.
+    dets = [
+        _d(ts, 10, 1, 0.36 + (0.02 if (ts // 1000) % 2 else -0.02))
+        for ts in range(0, 36_000, 200)
+    ]
+    assert tc.find_switch_index(dets) is None
+
+
+def test_find_switch_index_needs_enough_detections_on_both_sides():
+    # A long run plus a couple of stray frames elsewhere is noise, not a switch.
+    dets = [_d(ts, 10, 1, 0.36) for ts in range(0, 20_000, 200)]
+    dets += [_d(ts, 10, 1, 0.05) for ts in range(20_000, 20_800, 200)]
+    assert tc.find_switch_index(dets) is None
+
+
+def test_claim_to_idx_trims_the_tail():
+    frag = tc.Fragment(raw_id=10, host_track_no=1, dets=[_d(ts, 10, 1, 0.3) for ts in range(0, 5_000, 500)])
+    assert len(tc.Claim(frag, 0).dets) == 10  # unbounded claim is unchanged
+    assert len(tc.Claim(frag, 0, 4).dets) == 4
+    assert len(tc.Claim(frag, 6, None).dets) == 4
+
+
 def test_reclaims_continuation_held_by_student_track():
     # Teacher identity (track 1) is a mobile tall fragment raw 10 across 0..30s;
     # her continuation was stolen by student track 2 as raw 20 (30.5..50s),

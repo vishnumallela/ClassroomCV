@@ -500,7 +500,58 @@ def derive_result(
                         continue
                     surviving.append(c)
                 claims = surviving
+
+            # TRIM a claim whose fragment changes PERSON mid-way. A tracker id
+            # can slide off the teacher onto a pupil she walks past, and because
+            # the chain works at whole-fragment granularity the wrong person then
+            # wears the teacher label for as long as the id stays on them. The
+            # veto above cannot catch it: it only inspects claims from ANOTHER
+            # identity, and it judges a span as a whole, so a fragment that is
+            # genuinely her for most of its life passes. find_switch_index is a
+            # free geometric screen (no API calls) that proposes a split; the VLM
+            # only arbitrates the few fragments it flags, and a claim is trimmed
+            # only when one side is confirmed hers and the other is refused.
+            dropped: list[list[Detection]] = []
+            if settings.vlm_verify_teacher and video_path is not None:
+                kept: list[teacher_chain.Claim] = []
+                for c in claims:
+                    cut = teacher_chain.find_switch_index(c.dets)
+                    if cut is None:
+                        kept.append(c)
+                        continue
+                    head, tail = c.dets[:cut], c.dets[cut:]
+                    head_ok = vlm_teacher.vlm_supports_span(video_path, head, n_frames=4)
+                    tail_ok = vlm_teacher.vlm_supports_span(video_path, tail, n_frames=4)
+                    if head_ok is True and tail_ok is False:
+                        kept.append(
+                            teacher_chain.Claim(c.fragment, c.from_idx, c.from_idx + cut)
+                        )
+                        dropped.append(tail)
+                    elif tail_ok is True and head_ok is False:
+                        kept.append(
+                            teacher_chain.Claim(c.fragment, c.from_idx + cut, c.to_idx)
+                        )
+                        dropped.append(head)
+                    else:
+                        kept.append(c)  # both sides her (she walked), or unclear
+                        continue
+                    logger.info(
+                        "VLM TRIM stitch claim: raw %s switches person at %.1fs "
+                        "(head %s, tail %s) -> %d dets evicted",
+                        c.fragment.raw_id,
+                        c.dets[cut].video_ts_ms / 1000 if cut < len(c.dets) else -1,
+                        head_ok,
+                        tail_ok,
+                        len(dropped[-1]),
+                    )
+                claims = kept
+
             next_no = max(dets_by_track, default=0) + 1
+            for dets_out in dropped:
+                for d in dets_out:
+                    d.track_no = next_no
+                roles_map[next_no] = ("student", None)
+                next_no += 1
             for frag, lo, hi in evictions:
                 for d in frag.dets[lo:hi]:
                     d.track_no = next_no

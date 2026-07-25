@@ -110,6 +110,13 @@ SEATED_STATIC_SPREAD = 0.05
 # has a fragment born long before she arrived.
 SIT_COLLAPSE_RATIO = 0.60
 SIT_MAX_GAP_MS = 2_000
+# --- intra-fragment person switch (see find_switch_index) ---------------------
+# Each side of a candidate split needs this many detections before the split is
+# worth judging (a handful of frames is noise, not a sustained relocation).
+SWITCH_MIN_SIDE_DETS = 20
+# Mean horizontal position shift between the two halves that makes a fragment
+# suspicious. Measured: contaminated fragment 0.15, every clean fragment <=0.05.
+SWITCH_MIN_CX_SHIFT = 0.12
 # When several fragments are alive at a handoff and all clear the height and
 # proximity gates, the teacher is the one that MOVES: a fidgety seated student
 # spreads ~0.1, she spreads most of the frame. Candidate cost subtracts a
@@ -225,11 +232,12 @@ class Fragment:
 @dataclass
 class Claim:
     fragment: Fragment
-    from_idx: int  # claim covers dets[from_idx:]
+    from_idx: int  # claim covers dets[from_idx:to_idx]
+    to_idx: Optional[int] = None  # exclusive end; None runs to the fragment's end
 
     @property
     def dets(self) -> list[Detection]:
-        return self.fragment.dets[self.from_idx :]
+        return self.fragment.dets[self.from_idx : self.to_idx]
 
 
 def _chain_tol(gap_ms: int) -> float:
@@ -254,6 +262,43 @@ def _seated_static(frag: "Fragment", from_idx: int) -> bool:
     if dets[-1].video_ts_ms - dets[0].video_ts_ms < SEATED_STATIC_MIN_MS:
         return False
     return frag.spread(from_idx) < SEATED_STATIC_SPREAD
+
+
+def find_switch_index(dets: list[Detection]) -> Optional[int]:
+    """Index where a raw fragment looks like it changed PERSON, or None.
+
+    A tracker id can slide off the teacher onto someone else mid-fragment (she
+    walks past a standing pupil and the box follows him). The chain reasons at
+    whole-fragment granularity, so such a fragment poisons the teacher identity
+    for as long as the id stays on the wrong person, and no height/position gate
+    at the fragment level can see it — measured on real footage the drift is
+    gradual, with no single step above the chain's jump tolerance.
+
+    The signature is a SUSTAINED shift in mean horizontal position between the
+    two halves of the fragment: on the contaminated fragment the two halves sat
+    0.15 apart while every clean fragment in the same video stayed <=0.05.
+    (Box height does NOT discriminate — it moved 11% on the bad fragment and
+    16% on a good one — so only position is used.)
+
+    This is a cheap RECALL filter, not a verdict: a teacher who genuinely walks
+    across the room and stays there also shifts, so the caller must confirm the
+    split with an independent check (the VLM) before trimming anything.
+    """
+    n = len(dets)
+    if n < 2 * SWITCH_MIN_SIDE_DETS:
+        return None
+    xs = [_center(d)[0] for d in dets]
+    prefix = [0.0]
+    for x in xs:
+        prefix.append(prefix[-1] + x)
+    best_shift, best_idx = 0.0, None
+    for i in range(SWITCH_MIN_SIDE_DETS, n - SWITCH_MIN_SIDE_DETS + 1):
+        head = prefix[i] / i
+        tail = (prefix[n] - prefix[i]) / (n - i)
+        shift = abs(tail - head)
+        if shift > best_shift:
+            best_shift, best_idx = shift, i
+    return best_idx if best_shift >= SWITCH_MIN_CX_SHIFT else None
 
 
 def _sustained_ratio(
