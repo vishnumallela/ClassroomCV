@@ -18,6 +18,6 @@ export default defineConfig({
     tailwindcss(),
   ],
   resolve: { alias: { "@": path.resolve(import.meta.dirname, "src") } },
-  server: { port: Number(process.env.FRONTEND__PORT ?? 3001) },
+  server: { port: Number(process.env.FRONTEND__PORT ?? 3011) },
   build: { sourcemap: false },
 });
