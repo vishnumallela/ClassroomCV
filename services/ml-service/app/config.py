@@ -64,6 +64,34 @@ class Settings(BaseSettings):
     vlm_teacher_fallback: bool = True
     vlm_frames: int = 6  # frames sampled across the lesson to vote over
     vlm_min_votes: int = 2  # the winning track must win at least this many frames
+    # VLM verifies/overrides the GEOMETRIC teacher pick (not just the all-unknown
+    # fallback): whoever the model points at (point-in-bbox) is the teacher, so a
+    # student the heuristic wrongly crowned is demoted. Off by default so it is
+    # A/B-testable. vlm_verify_frames is denser than vlm_frames because verify
+    # runs on every video and wants coverage even when she's occluded in a frame.
+    vlm_verify_teacher: bool = False
+    vlm_verify_frames: int = 12
+    # REJECT the geometric teacher when the VLM answered at least this many frames
+    # but NEVER once pointed at the geometric pick (0 point-in-bbox votes for it) and
+    # found no clear teacher of its own. Distinguishes "the VLM says she isn't the
+    # teacher" (demote) from "the VLM couldn't answer" (answered < this -> keep the
+    # geometric pick, so a network failure never un-labels a correct teacher).
+    vlm_reject_min_answered: int = 4
+    # Frames sampled across a stitch CLAIM's time span to VLM-verify it before it is
+    # applied. The teacher-chain stitcher can wrongly fold a student fragment that
+    # ends where the teacher's tracked chain begins into the teacher (a backward
+    # claim passing the height-rise test = the chimera you SEE as "student labelled
+    # teacher until the real teacher comes"). If the VLM answers frames across the
+    # claimed span and never points inside it, the claim is vetoed. See
+    # vlm_teacher.vlm_supports_span.
+    vlm_claim_verify_frames: int = 6
+    # VLM entry-backfill (reclaim the teacher's pre-chain entry/seated detections).
+    # OFF by default: on real crowded footage her entry is hyper-fragmented and
+    # occluded by foreground students, so the trajectory trace over-claims (grabs
+    # students). Kept behind a flag for future work — a robust version needs a
+    # per-candidate-fragment VLM verification pass (see vlm_teacher.vlm_supports_span),
+    # which is many more VLM calls. See vlm_teacher.backfill_teacher_entry.
+    vlm_backfill_entry: bool = False
 
 
 @lru_cache

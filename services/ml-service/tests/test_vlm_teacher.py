@@ -36,6 +36,15 @@ def test_parse_point_no_json_returns_none():
     assert V._parse_point("I cannot see a teacher in this image.") is None
 
 
+def test_parse_answer_distinguishes_absent_from_failure():
+    # explicit null -> "absent" (the model SAW no teacher: a refute signal),
+    # a point -> "point", garbage -> "none" (no signal). This split is what lets
+    # claim-verify count "no teacher in this frame" against a chained student.
+    assert V._parse_answer('{"x": null, "y": null}') == ("absent", None)
+    assert V._parse_answer('{"x": 0.4, "y": 0.6}') == ("point", (0.4, 0.6))
+    assert V._parse_answer("no teacher here, sorry") == ("none", None)
+
+
 def test_parse_point_picks_last_json_object_if_several():
     # A reasoning-style response may echo the schema before the real answer.
     text = 'Example: {"x": 0.1, "y": 0.1}\nAnswer: {"x": 0.8, "y": 0.2}'
@@ -111,6 +120,15 @@ def _wire_offline(monkeypatch, points):
     monkeypatch.setattr(V, "_ask_point", lambda *a, **kw: next(it, None))
 
 
+def _wire_offline_answers(monkeypatch, answers):
+    """answers: list of (status, pt) for _ask_answer, in order.
+    status in {"point","absent","fail","none"}; pt is (x,y) or None."""
+    monkeypatch.setattr(V.detector, "resolve_video_source", lambda p: (p, False))
+    monkeypatch.setattr(V.cv2, "VideoCapture", lambda _path: _FakeCapture())
+    it = iter(answers)
+    monkeypatch.setattr(V, "_ask_answer", lambda *a, **kw: next(it, ("fail", None)))
+
+
 def _six_frame_dets(track_positions: dict[int, tuple[float, float]]):
     """One identity per track, present across the whole 100s window so every
     sampled timestamp has a centre for every track."""
@@ -166,5 +184,324 @@ def test_all_frames_fail_returns_none(monkeypatch):
         dets = _six_frame_dets({1: (0.5, 0.5)})
         _wire_offline(monkeypatch, [None, None, None, None, None, None])
         assert V.identify_teacher("video.mp4", dets, 100_000) is None
+    finally:
+        get_settings.cache_clear()
+
+
+# --------------------------------------------------------------------------- #
+# Point-in-bbox mapping + locate_teacher (VLM verify/override)
+# --------------------------------------------------------------------------- #
+
+
+def test_point_to_track_picks_containing_box():
+    boxes = {1: (0.0, 0.0, 0.2, 0.2), 2: (0.4, 0.4, 0.3, 0.5)}
+    assert V._point_to_track(0.5, 0.6, boxes) == 2  # only box 2 contains (0.5,0.6)
+
+
+def test_point_to_track_none_when_point_in_empty_space():
+    boxes = {1: (0.0, 0.0, 0.2, 0.2)}
+    assert V._point_to_track(0.9, 0.9, boxes) is None  # ambiguous -> no vote
+
+
+def test_point_to_track_prefers_adult_over_foreground_kid_on_overlap():
+    # A tall standing box (teacher) and a shorter foreground box (kid) both contain
+    # the torso point; the point sits more centrally in her box, so she wins.
+    teacher = (0.40, 0.20, 0.15, 0.60)
+    kid = (0.35, 0.45, 0.25, 0.30)
+    assert V._point_to_track(0.475, 0.55, {1: teacher, 2: kid}) == 1
+
+
+def test_locate_teacher_votes_by_point_in_bbox(monkeypatch):
+    monkeypatch.setenv("GEMINI_API_KEY", "fake-key")
+    monkeypatch.setenv("VLM_MIN_VOTES", "2")
+    from app.config import get_settings
+
+    get_settings.cache_clear()
+    try:
+        def span(track_no, x):
+            return [
+                Detection(ts, track_no, {"x": x, "y": 0.3, "w": 0.2, "h": 0.4}, 0.9, True, False, track_no=track_no)
+                for ts in range(0, 100_000, 5_000)
+            ]
+
+        dets = {1: span(1, 0.1), 2: span(2, 0.7)}  # box1 left, box2 right (disjoint)
+        # 3 points land in box 2, 1 in box 1 -> track 2 wins by point-in-bbox.
+        _wire_offline(monkeypatch, [(0.8, 0.5), (0.8, 0.5), (0.8, 0.5), (0.15, 0.5)])
+        res = V.locate_teacher("video.mp4", dets, 100_000, n_frames=4)
+        assert res.track == 2
+        assert res.answered == 4
+        assert res.votes[2] == 3 and res.votes[1] == 1
+    finally:
+        get_settings.cache_clear()
+
+
+def test_locate_teacher_no_vote_when_points_land_in_empty_space(monkeypatch):
+    monkeypatch.setenv("GEMINI_API_KEY", "fake-key")
+    from app.config import get_settings
+
+    get_settings.cache_clear()
+    try:
+        dets = {
+            1: [Detection(ts, 1, {"x": 0.1, "y": 0.3, "w": 0.2, "h": 0.4}, 0.9, True, False, track_no=1) for ts in range(0, 100_000, 5_000)]
+        }
+        # every point is far from the only box -> no vote -> no teacher, but the VLM
+        # DID answer all 4 frames: track None yet answered==4 (the reject signal).
+        _wire_offline(monkeypatch, [(0.9, 0.9), (0.95, 0.9), (0.9, 0.95), (0.99, 0.99)])
+        res = V.locate_teacher("video.mp4", dets, 100_000, n_frames=4)
+        assert res.track is None
+        assert res.answered == 4
+        assert res.votes.get(1, 0) == 0  # box 1 never got a point -> caller REJECTs it
+    finally:
+        get_settings.cache_clear()
+
+
+def test_locate_teacher_answered_zero_when_every_call_fails(monkeypatch):
+    """All _ask_point return None (e.g. HTTP errors): answered==0 so the caller
+    KEEPS the geometric pick instead of demoting a possibly-correct teacher."""
+    monkeypatch.setenv("GEMINI_API_KEY", "fake-key")
+    from app.config import get_settings
+
+    get_settings.cache_clear()
+    try:
+        dets = {
+            1: [Detection(ts, 1, {"x": 0.1, "y": 0.3, "w": 0.2, "h": 0.4}, 0.9, True, False, track_no=1) for ts in range(0, 100_000, 5_000)]
+        }
+        _wire_offline(monkeypatch, [None, None, None, None])
+        res = V.locate_teacher("video.mp4", dets, 100_000, n_frames=4)
+        assert res.track is None
+        assert res.answered == 0  # nothing answered -> not a rejection, a failure
+        assert res.votes == {}
+    finally:
+        get_settings.cache_clear()
+
+
+def test_locate_teacher_answered_when_no_winner_clears_threshold(monkeypatch):
+    """Votes scatter below vlm_min_votes: track is None but answered counts every
+    frame and votes are reported, so the caller can see the geometric pick got 0."""
+    monkeypatch.setenv("GEMINI_API_KEY", "fake-key")
+    monkeypatch.setenv("VLM_MIN_VOTES", "2")
+    from app.config import get_settings
+
+    get_settings.cache_clear()
+    try:
+        def span(track_no, x):
+            return [
+                Detection(ts, track_no, {"x": x, "y": 0.3, "w": 0.15, "h": 0.4}, 0.9, True, False, track_no=track_no)
+                for ts in range(0, 100_000, 5_000)
+            ]
+
+        # geometric pick would be track 1; VLM points once at box 2, once at box 3,
+        # twice into empty space -> no winner, track 1 gets 0 votes, answered==4.
+        dets = {1: span(1, 0.1), 2: span(2, 0.45), 3: span(3, 0.8)}
+        _wire_offline(monkeypatch, [(0.5, 0.5), (0.85, 0.5), (0.99, 0.01), (0.99, 0.99)])
+        res = V.locate_teacher("video.mp4", dets, 100_000, n_frames=4)
+        assert res.track is None
+        assert res.answered == 4
+        assert res.votes.get(1, 0) == 0  # the geometric pick -> REJECT territory
+    finally:
+        get_settings.cache_clear()
+
+
+# --------------------------------------------------------------------------- #
+# vlm_supports_span: VLM-veto of a teacher-chain claim (point-in-fragment-box)
+# --------------------------------------------------------------------------- #
+
+
+def _span_dets(x=0.1, y=0.3, w=0.2, h=0.4):
+    """One fragment's detections across a 100s span at ~5fps (200ms), so the
+    evenly-spaced sample targets always land within _TS_TOLERANCE_MS of a det."""
+    return [
+        Detection(ts, 1, {"x": x, "y": y, "w": w, "h": h}, 0.9, True, False, track_no=1)
+        for ts in range(0, 100_000, 200)
+    ]
+
+
+def test_vlm_supports_span_true_when_points_land_inside(monkeypatch):
+    """The VLM points INTO the fragment's box every frame -> it IS the teacher."""
+    monkeypatch.setenv("GEMINI_API_KEY", "fake-key")
+    from app.config import get_settings
+
+    get_settings.cache_clear()
+    try:
+        dets = _span_dets(0.1, 0.3, 0.2, 0.4)  # box x in [0.1,0.3], y in [0.3,0.7]
+        _wire_offline_answers(monkeypatch, [("point", (0.15, 0.5))] * 6)  # all inside
+        assert V.vlm_supports_span("v.mp4", dets, n_frames=6) is True
+    finally:
+        get_settings.cache_clear()
+
+
+def test_vlm_supports_span_false_when_teacher_absent_across_span(monkeypatch):
+    """The raw-79 chimera shape: the VLM reports "no teacher" for most of the span
+    (she hasn't entered yet), and the one 'inside' hit is the handoff frame where
+    the student's box has drifted onto her. Support fraction 1/6 -> VETO."""
+    monkeypatch.setenv("GEMINI_API_KEY", "fake-key")
+    from app.config import get_settings
+
+    get_settings.cache_clear()
+    try:
+        dets = _span_dets(0.1, 0.3, 0.2, 0.4)
+        answers = [("absent", None)] * 5 + [("point", (0.15, 0.5))]  # 5 absent, 1 inside
+        _wire_offline_answers(monkeypatch, answers)
+        assert V.vlm_supports_span("v.mp4", dets, n_frames=6) is False
+    finally:
+        get_settings.cache_clear()
+
+
+def test_vlm_supports_span_false_when_points_land_outside(monkeypatch):
+    """The teacher is consistently somewhere else -> every point refutes -> VETO."""
+    monkeypatch.setenv("GEMINI_API_KEY", "fake-key")
+    from app.config import get_settings
+
+    get_settings.cache_clear()
+    try:
+        dets = _span_dets(0.1, 0.3, 0.2, 0.4)
+        _wire_offline_answers(monkeypatch, [("point", (0.9, 0.9))] * 6)  # all OUTSIDE
+        assert V.vlm_supports_span("v.mp4", dets, n_frames=6) is False
+    finally:
+        get_settings.cache_clear()
+
+
+def test_vlm_supports_span_none_when_vlm_fails(monkeypatch):
+    """Every call fails (no usable signal) -> None, so the caller KEEPS the claim
+    (a network failure must never drop a genuine crouch-steal reclaim)."""
+    monkeypatch.setenv("GEMINI_API_KEY", "fake-key")
+    from app.config import get_settings
+
+    get_settings.cache_clear()
+    try:
+        dets = _span_dets()
+        _wire_offline_answers(monkeypatch, [("fail", None)] * 6)
+        assert V.vlm_supports_span("v.mp4", dets, n_frames=6) is None
+    finally:
+        get_settings.cache_clear()
+
+
+def test_vlm_supports_span_none_on_too_few_answers(monkeypatch):
+    """Only 2 usable answers (1 in, 1 out): below the min-answered floor -> None
+    (keep the claim; don't veto on thin evidence)."""
+    monkeypatch.setenv("GEMINI_API_KEY", "fake-key")
+    from app.config import get_settings
+
+    get_settings.cache_clear()
+    try:
+        dets = _span_dets(0.1, 0.3, 0.2, 0.4)
+        answers = [("point", (0.15, 0.5)), ("point", (0.9, 0.9))] + [("fail", None)] * 4
+        _wire_offline_answers(monkeypatch, answers)
+        assert V.vlm_supports_span("v.mp4", dets, n_frames=6) is None
+    finally:
+        get_settings.cache_clear()
+
+
+def test_vlm_supports_span_true_when_mostly_inside_with_a_few_misses(monkeypatch):
+    """A genuine reclaim isn't sunk by a couple of drift frames: 4 inside, 2 out
+    -> support 0.67 >= floor -> keep."""
+    monkeypatch.setenv("GEMINI_API_KEY", "fake-key")
+    from app.config import get_settings
+
+    get_settings.cache_clear()
+    try:
+        dets = _span_dets(0.1, 0.3, 0.2, 0.4)
+        answers = [("point", (0.15, 0.5))] * 4 + [("point", (0.95, 0.95)), ("absent", None)]
+        _wire_offline_answers(monkeypatch, answers)
+        assert V.vlm_supports_span("v.mp4", dets, n_frames=6) is True
+    finally:
+        get_settings.cache_clear()
+
+
+# --------------------------------------------------------------------------- #
+# backfill_teacher_entry: reclaim the teacher's pre-chain entry/seated fragments
+# --------------------------------------------------------------------------- #
+
+
+def _backfill_tracks(teacher_first=100_000):
+    """Teacher track 39 from teacher_first on (first det centre ~(0.70,0.50)); her
+    seated fragment (track 11, centre ~(0.72,0.55)) exists in the entry window just
+    before it; track 7 is a real student far to the left (centre ~(0.15,0.55))."""
+    return {
+        39: [_det(ts, 39, 0.65, 0.35, 0.10, 0.30) for ts in range(teacher_first, 120_000, 200)],
+        11: [_det(ts, 11, 0.67, 0.40, 0.10, 0.30) for ts in range(88_000, teacher_first, 200)],
+        7: [_det(ts, 7, 0.10, 0.40, 0.10, 0.30) for ts in range(0, 120_000, 200)],
+    }
+
+
+def test_backfill_tracks_continuous_trajectory(monkeypatch):
+    """The VLM points at her seated fragment (track 11) along a smooth path, then
+    reports no teacher (she hadn't entered) -> reclaim track 11's entry dets."""
+    monkeypatch.setenv("GEMINI_API_KEY", "fake-key")
+    from app.config import get_settings
+
+    get_settings.cache_clear()
+    try:
+        dbt = _backfill_tracks()
+        # points land on track 11's centre (0.72,0.55), continuous with the seed.
+        _wire_offline_answers(monkeypatch, [("point", (0.72, 0.55))] * 4 + [("absent", None)] * 2)
+        out = V.backfill_teacher_entry("v.mp4", dbt, 39, step_ms=2000)
+        assert out, "should reclaim the seated entry fragment"
+        assert {d.track_no for d in out} == {11}
+        assert all(88_000 <= d.video_ts_ms < 100_000 for d in out)  # window-bounded
+    finally:
+        get_settings.cache_clear()
+
+
+def test_backfill_requires_min_anchors(monkeypatch):
+    """A single continuous anchor is below _BACKFILL_MIN_ANCHORS -> reclaim nothing
+    (one point is not a trajectory)."""
+    monkeypatch.setenv("GEMINI_API_KEY", "fake-key")
+    from app.config import get_settings
+
+    get_settings.cache_clear()
+    try:
+        dbt = _backfill_tracks()
+        _wire_offline_answers(monkeypatch, [("point", (0.72, 0.55))] + [("absent", None)] * 2)
+        assert V.backfill_teacher_entry("v.mp4", dbt, 39, step_ms=2000) == []
+    finally:
+        get_settings.cache_clear()
+
+
+def test_backfill_rejects_discontinuous_stray(monkeypatch):
+    """A point that jumps far to a student (track 7) is > _BACKFILL_MAX_MOVE from the
+    trace and is skipped; only the continuously-tracked fragment (11) is reclaimed."""
+    monkeypatch.setenv("GEMINI_API_KEY", "fake-key")
+    from app.config import get_settings
+
+    get_settings.cache_clear()
+    try:
+        dbt = _backfill_tracks()
+        _wire_offline_answers(
+            monkeypatch,
+            [("point", (0.72, 0.55)),   # -> track 11, continuous with seed
+             ("point", (0.72, 0.55)),   # -> track 11
+             ("point", (0.15, 0.55)),   # -> jumps to student 7: > MAX_MOVE -> SKIP
+             ("point", (0.72, 0.55)),   # -> back on track 11
+             ("absent", None), ("absent", None)],
+        )
+        out = V.backfill_teacher_entry("v.mp4", dbt, 39, step_ms=2000)
+        assert {d.track_no for d in out} == {11}  # the far student was never anchored
+    finally:
+        get_settings.cache_clear()
+
+
+def test_backfill_stops_immediately_when_teacher_absent(monkeypatch):
+    """If the VLM reports no teacher right away (she isn't in the room before the
+    chain start), reclaim nothing."""
+    monkeypatch.setenv("GEMINI_API_KEY", "fake-key")
+    from app.config import get_settings
+
+    get_settings.cache_clear()
+    try:
+        dbt = _backfill_tracks()
+        _wire_offline_answers(monkeypatch, [("absent", None)] * 2)
+        assert V.backfill_teacher_entry("v.mp4", dbt, 39, step_ms=2000) == []
+    finally:
+        get_settings.cache_clear()
+
+
+def test_backfill_empty_without_key(monkeypatch):
+    monkeypatch.setenv("GEMINI_API_KEY", "")
+    from app.config import get_settings
+
+    get_settings.cache_clear()
+    try:
+        assert V.backfill_teacher_entry("v.mp4", _backfill_tracks(), 39) == []
     finally:
         get_settings.cache_clear()

@@ -31,6 +31,7 @@ from typing import Callable, Optional
 import numpy as np
 
 from app import db, detector, events as events_mod, merge, roles, teacher_chain, vlm_teacher
+from app.config import get_settings
 from app.geometry import rdp_indices
 from app.models import AnalysisResult, Detection, VideoMeta
 
@@ -409,21 +410,60 @@ def derive_result(
         (t for t, (role, _) in roles_map.items() if role == "teacher"), None
     )
 
-    # Vision-LLM fallback: the geometric ranker gives up (all-unknown) on a teacher
-    # who sits the whole lesson, because she scores like a student. Ask a vision
-    # model to point at the adult instructor and map that to a track. Only fires
-    # when nothing was selected AND we still have the video file, so easy videos
-    # never touch the API. The VLM-picked track is trusted as-is (skip the stitch,
-    # which is tuned for mobile teachers and would risk chimeras here).
-    teacher_from_vlm = False
-    if teacher_no is None and video_path is not None:
+    # Teacher selection, layered on top of the geometric ranker:
+    #  - VLM VERIFY (vlm_verify_teacher on): the vision model is the authority on
+    #    WHO. locate_teacher points at the teacher (point-in-bbox) and votes; the
+    #    winner OVERRIDES the geometric pick, and if the model confirms NO teacher
+    #    the unverified geometric pick is demoted — this is what pulls "teacher"
+    #    off a student the ranker wrongly crowned.
+    #  - LEGACY FALLBACK (off): the VLM runs only when the ranker gave up
+    #    (all-unknown), e.g. a teacher who sits the whole lesson.
+    # The stitch below runs on whichever teacher survives (un-gated) so a
+    # crouch/lean id-steal is still reclaimed.
+    settings = get_settings()
+    if settings.vlm_verify_teacher and video_path is not None:
+        vlm = vlm_teacher.locate_teacher(video_path, dets_by_track, meta.duration_ms)
+        if vlm.track is not None and vlm.track in dets_by_track:
+            # The model CONFIDENTLY pointed at a track -> it is the authority on
+            # who. Confirm the geometric pick or OVERRIDE onto whoever it points
+            # at (demoting a wrongly-crowned student).
+            if teacher_no is not None and teacher_no != vlm.track:
+                roles_map[teacher_no] = ("student", None)  # demote the wrong crown
+                logger.info(
+                    "VLM verify OVERRIDE: geometric teacher %s -> VLM %s",
+                    teacher_no,
+                    vlm.track,
+                )
+            teacher_no = vlm.track
+            roles_map[teacher_no] = ("teacher", vlm.confidence)
+        elif (
+            teacher_no is not None
+            and vlm.answered >= settings.vlm_reject_min_answered
+            and vlm.votes.get(teacher_no, 0) == 0
+        ):
+            # REJECT: the VLM answered enough frames and NEVER once pointed at the
+            # geometric pick (and crowned no one of its own) -> she isn't the
+            # teacher. Demote her so a student the ranker wrongly crowned loses the
+            # label. Guarded on answered, so a network failure (answered 0) can
+            # never un-label a correct teacher — that guard IS the fix for the
+            # demote-on-failure bug (an HTTP 400 once demoted the real teacher).
+            logger.info(
+                "VLM verify REJECT: geometric teacher %s got 0/%d VLM votes -> no teacher",
+                teacher_no,
+                vlm.answered,
+            )
+            roles_map[teacher_no] = ("student", None)
+            teacher_no = None
+        # else: the VLM pointed at the geometric pick at least once, or answered
+        # too few frames, or failed outright (answered 0). KEEP the geometric pick
+        # — an unconfirmed pick beats throwing away a correct one.
+    elif teacher_no is None and video_path is not None:
         vlm = vlm_teacher.identify_teacher(video_path, dets_by_track, meta.duration_ms)
         if vlm is not None and vlm[0] in dets_by_track:
             teacher_no, conf, _votes = vlm
             roles_map[teacher_no] = ("teacher", conf)
-            teacher_from_vlm = True
 
-    if teacher_no is not None and not teacher_from_vlm:
+    if teacher_no is not None:
         embeds_by_raw = None
         if track_embeds:
             embeds_by_raw = {
@@ -435,6 +475,31 @@ def derive_result(
         )
         if stitched is not None:
             claims, evictions = stitched
+            # VLM-veto REACH-ACROSS claims: the stitcher can wrongly fold a student
+            # fragment that ends where the teacher's tracked chain begins (a
+            # backward claim passing the height-rise test) into the teacher — the
+            # chimera seen as "student labelled teacher until the real teacher
+            # comes". A claim whose fragment came from ANOTHER identity must
+            # actually be the teacher across its span; if the VLM answered frames
+            # there and never pointed inside it, drop the claim so the student keeps
+            # her identity. Fragments already in the teacher's own identity (incl.
+            # the seed) are no-ops here, so they never trigger a VLM call.
+            if settings.vlm_verify_teacher and video_path is not None:
+                surviving = []
+                for c in claims:
+                    if (
+                        c.fragment.host_track_no != teacher_no
+                        and vlm_teacher.vlm_supports_span(video_path, c.dets) is False
+                    ):
+                        logger.info(
+                            "VLM VETO stitch claim: raw %s from track %s (%d dets) -> not the teacher",
+                            c.fragment.raw_id,
+                            c.fragment.host_track_no,
+                            len(c.dets),
+                        )
+                        continue
+                    surviving.append(c)
+                claims = surviving
             next_no = max(dets_by_track, default=0) + 1
             for frag, lo, hi in evictions:
                 for d in frag.dets[lo:hi]:
@@ -474,6 +539,41 @@ def derive_result(
                 board_polygon=board_polygon,
                 raw_ids_by_track=raw_ids_by_track,
             )
+
+        # VLM ENTRY-BACKFILL: the chain seeds on her MOBILE (teaching) phase and
+        # skips seated/static fragments, so a teacher who enters and sits before
+        # teaching stays labelled student until the chain kicks in. Sample backward
+        # from her first detection, ask the VLM where she is, and reclaim the raw
+        # fragments she is actually in. OFF by default (vlm_backfill_entry): on
+        # crowded footage her entry is hyper-fragmented and occluded, so the trace
+        # over-claims foreground students — a robust version needs a per-fragment
+        # vlm_supports_span verification pass. Runs whether or not the stitch fired.
+        if settings.vlm_backfill_entry and video_path is not None:
+            backfill = vlm_teacher.backfill_teacher_entry(
+                video_path, dets_by_track, teacher_no
+            )
+            if backfill:
+                for d in backfill:
+                    d.track_no = teacher_no
+                dets_by_track = {}
+                for d in detections:
+                    if d.track_no is not None:
+                        dets_by_track.setdefault(d.track_no, []).append(d)
+                for dets in dets_by_track.values():
+                    dets.sort(key=lambda d: d.video_ts_ms)
+                raw_ids_by_track = {
+                    no: sorted({d.raw_track_id for d in dets})
+                    for no, dets in dets_by_track.items()
+                }
+                roles_map = {
+                    no: role for no, role in roles_map.items() if no in dets_by_track
+                }
+                features = roles.compute_features(
+                    dets_by_track,
+                    meta.duration_ms,
+                    board_polygon=board_polygon,
+                    raw_ids_by_track=raw_ids_by_track,
+                )
 
     events, analytics = events_mod.derive(
         dets_by_track, roles_map, meta.duration_ms, zones
