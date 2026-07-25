@@ -217,6 +217,24 @@ def score_mask(mask: np.ndarray, frame: Optional[np.ndarray] = None) -> float:
     return float(_clamp01(geom))
 
 
+# Weight of the open-vocabulary model's OWN confidence when blended into a
+# candidate's geometric score. The geometric scorer assumes a board is a flat,
+# uniform surface, so a board densely covered in writing/diagrams fails the
+# color-uniformity term and a confident YOLOE detection ("blackboard" 0.87) can
+# land just under the pipeline's 0.5 auto-accept gate (observed: 0.49). Blending
+# trusts the semantic model — but only ever LIFTS the score (max), so geometry
+# still vetoes wrong shapes: a wall at high conf but low geom stays low. Applies to
+# YOLOE/YOLO-World candidates, not SAM2-grid ones (which carry no semantic signal).
+_OPEN_VOCAB_CONF_WEIGHT = 0.4
+
+
+def _open_vocab_score(geom: float, conf: float) -> float:
+    """Lift a geometric score toward a confident semantic detection: never below
+    geom, up to (1-w)*geom + w*conf when the model is more sure than the geometry."""
+    w = _OPEN_VOCAB_CONF_WEIGHT
+    return float(_clamp01(max(geom, (1.0 - w) * geom + w * conf)))
+
+
 def mask_to_polygon(mask: np.ndarray) -> Optional[list[list[float]]]:
     """Largest contour -> approxPolyDP simplified to 4..12 normalized points.
 
@@ -554,12 +572,13 @@ def _detect_on_frame(
 
     # Strategy 0 (preferred): YOLOE-26-seg open-vocab detect+segment (one model,
     # native masks). class index < N_BOARD_CLASSES is a board prompt.
-    for mask, _conf, cidx in _yoloe_masks(frame):
+    for mask, conf, cidx in _yoloe_masks(frame):
         if cidx >= N_BOARD_CLASSES:
             continue
         polygon = mask_to_polygon(mask)
         if polygon:
-            candidates.append((score_mask(mask, frame), polygon, "yoloe26_seg"))
+            score = _open_vocab_score(score_mask(mask, frame), conf)
+            candidates.append((score, polygon, "yoloe26_seg"))
     # If YOLOE confidently found a board, skip the slower SAM2 fallback entirely.
     if candidates:
         best = max(candidates, key=lambda c: c[0])
@@ -690,12 +709,13 @@ def _detect_door_on_frame(
     candidates: list[tuple[float, list[list[float]], str]] = []
 
     # Strategy 0 (preferred): YOLOE-26-seg. class index >= N_BOARD_CLASSES = door.
-    for mask, _conf, cidx in _yoloe_masks(frame):
+    for mask, conf, cidx in _yoloe_masks(frame):
         if cidx < N_BOARD_CLASSES:
             continue
         polygon = mask_to_polygon(mask)
         if polygon:
-            candidates.append((score_door(mask, frame), polygon, "yoloe26_seg"))
+            score = _open_vocab_score(score_door(mask, frame), conf)
+            candidates.append((score, polygon, "yoloe26_seg"))
     if candidates:
         best = max(candidates, key=lambda c: c[0])
         if best[0] >= DOOR_MIN_SCORE:

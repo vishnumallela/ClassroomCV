@@ -45,6 +45,16 @@ TALL_BLOB = rect_mask(0.42, 0.50, 0.55, 0.95)  # tall, lower — person-like
 # --------------------------------------------------------------------------- #
 
 
+def test_open_vocab_score_lifts_confident_detection_but_geometry_vetoes():
+    # a confident semantic detection with decent-but-sub-gate geometry is lifted
+    # over the 0.5 auto-accept gate (the covered-board case: geom 0.49, conf 0.74)
+    assert bd._open_vocab_score(0.49, 0.74) >= 0.5
+    # low confidence never lifts (max keeps the geometric score)
+    assert bd._open_vocab_score(0.49, 0.10) == pytest.approx(0.49)
+    # geometry still vetoes a wrong shape (a wall) even at high confidence
+    assert bd._open_vocab_score(0.10, 0.90) < 0.5
+
+
 def test_wide_upper_rectangle_beats_tall_lower_blob():
     wide = bd.score_mask(BOARD_MASK)
     tall = bd.score_mask(TALL_BLOB)
