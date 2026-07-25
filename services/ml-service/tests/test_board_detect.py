@@ -63,6 +63,17 @@ def test_wide_upper_rectangle_beats_tall_lower_blob():
     assert tall < bd.MIN_SCORE  # would not even produce a polygon
 
 
+def test_board_low_and_small_in_frame_is_not_penalised_for_framing():
+    # A ceiling-mounted camera puts the board's centre BELOW the frame middle and
+    # a wide room makes it a small share of the frame (measured cy 0.59, area 3.8%
+    # in a real classroom, where detection then fell just under the 0.5 gate).
+    # Camera framing must not sink a clean board: it scores close to the canonical
+    # upper-frame board rather than ~30% lower.
+    low_small = rect_mask(0.40, 0.494, 0.598, 0.686)
+    assert bd.score_mask(low_small) >= 0.9 * bd.score_mask(BOARD_MASK)
+    assert bd.score_mask(low_small) >= 0.5
+
+
 def test_score_empty_and_degenerate_masks_are_zero():
     assert bd.score_mask(np.zeros((H, W), dtype=bool)) == 0.0
     sliver = np.zeros((H, W), dtype=bool)

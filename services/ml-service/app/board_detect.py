@@ -201,8 +201,16 @@ def score_mask(mask: np.ndarray, frame: Optional[np.ndarray] = None) -> float:
         return 0.0
 
     aspect_s = _ramp(stats["aspect"], 1.1, 1.9, 6.0, 12.0)
-    position_s = _ramp(stats["cy"], 0.05, 0.12, 0.48, 0.68)
-    area_s = _ramp(stats["area_frac"], 0.03, 0.06, 0.35, 0.45)
+    # Position/area priors describe where a board sits in a CLASSROOM FRAME, and
+    # both were originally tuned on one camera. A ceiling-mounted camera puts the
+    # board's centre well below the frame middle (measured cy 0.59 in a room where
+    # detection then failed), and a wide room makes it a small share of the frame
+    # (3.8%). Both are normal, so full credit extends to cy 0.62 and to 3.5% area;
+    # the far knees still reject floor-level blobs and wall-sized regions, and the
+    # area>50% / full-width / aspect gates below remain the real false-positive
+    # guards.
+    position_s = _ramp(stats["cy"], 0.05, 0.12, 0.62, 0.82)
+    area_s = _ramp(stats["area_frac"], 0.015, 0.035, 0.35, 0.45)
     rect_s = _clamp01((stats["rectangularity"] - 0.70) / 0.25)
 
     geom = 0.30 * aspect_s + 0.25 * position_s + 0.20 * area_s + 0.25 * rect_s
