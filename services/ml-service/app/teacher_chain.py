@@ -117,6 +117,13 @@ SWITCH_MIN_SIDE_DETS = 20
 # Mean horizontal position shift between the two halves that makes a fragment
 # suspicious. Measured: contaminated fragment 0.15, every clean fragment <=0.05.
 SWITCH_MIN_CX_SHIFT = 0.12
+# --- bounded gap fill (see gap_fill_candidates) -------------------------------
+# How many candidates a freed window may offer the VLM. Each costs a handful of
+# API calls, and the ranking puts her first, so a small number is enough.
+GAP_FILL_MAX_CANDIDATES = 2
+# A candidate must have at least this many detections inside the window; fewer
+# is a flicker, not someone standing there for the duration.
+GAP_FILL_MIN_DETS = 5
 # When several fragments are alive at a handoff and all clear the height and
 # proximity gates, the teacher is the one that MOVES: a fidgety seated student
 # spreads ~0.1, she spreads most of the frame. Candidate cost subtracts a
@@ -299,6 +306,54 @@ def find_switch_index(dets: list[Detection]) -> Optional[int]:
         if shift > best_shift:
             best_shift, best_idx = shift, i
     return best_idx if best_shift >= SWITCH_MIN_CX_SHIFT else None
+
+
+def gap_fill_candidates(
+    dets_by_track: dict[int, list[Detection]],
+    teacher_no: int,
+    start_ms: int,
+    end_ms: int,
+    anchor: tuple[float, float],
+    blocked: Optional[set[tuple[int, int]]] = None,
+    limit: int = GAP_FILL_MAX_CANDIDATES,
+) -> list[list[Detection]]:
+    """Who might be the teacher inside a freed window, best guess first.
+
+    When a person-switching claim is trimmed the teacher is left unlabelled for
+    the vacated span even though she IS tracked there under some other id. This
+    proposes the fragments that could be her, restricted to that window, ranked
+    by proximity to `anchor` (her last known position before the gap) minus a
+    mobility reward — she is the adult walking, not a pupil sitting where she
+    happened to pass.
+
+    Deliberately a BOUNDED proposal, not a re-chain: it only ever offers
+    detections inside [start_ms, end_ms], so acting on it cannot disturb the
+    timeline outside the gap. `blocked` keeps the just-trimmed detections out,
+    and the caller must confirm a candidate (VLM) before claiming it.
+    """
+    scored: list[tuple[float, list[Detection]]] = []
+    for track_no, dets in dets_by_track.items():
+        if track_no == teacher_no:
+            continue
+        by_raw: dict[int, list[Detection]] = {}
+        for d in dets:
+            if not (start_ms <= d.video_ts_ms <= end_ms):
+                continue
+            if blocked and (d.raw_track_id, d.video_ts_ms) in blocked:
+                continue
+            by_raw.setdefault(d.raw_track_id, []).append(d)
+        for group in by_raw.values():
+            if len(group) < GAP_FILL_MIN_DETS:
+                continue
+            group.sort(key=lambda d: d.video_ts_ms)
+            cs = [_center(d) for d in group]
+            xs = sorted(c[0] for c in cs)
+            ys = sorted(c[1] for c in cs)
+            mid = (xs[len(xs) // 2], ys[len(ys) // 2])
+            spread = max(max(xs) - min(xs), max(ys) - min(ys))
+            scored.append((_dist(mid, anchor) - MOBILITY_REWARD * min(1.0, spread), group))
+    scored.sort(key=lambda z: z[0])
+    return [g for _cost, g in scored[:limit]]
 
 
 def _sustained_ratio(

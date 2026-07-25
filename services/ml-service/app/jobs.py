@@ -546,6 +546,43 @@ def derive_result(
                     )
                 claims = kept
 
+            # BOUNDED GAP-FILL: a trim leaves the teacher unlabelled across the
+            # vacated span even though she IS tracked there under another id.
+            # Offer only fragments INSIDE that window (never a re-chain: a full
+            # re-derive is greedy and was measured trading a 20s gap for ~180s of
+            # lost timeline), rank them, and claim the first the VLM confirms.
+            filled: list[list[Detection]] = []
+            if dropped and settings.vlm_verify_teacher and video_path is not None:
+                blocked = {
+                    (d.raw_track_id, d.video_ts_ms) for lst in dropped for d in lst
+                }
+                for lst in dropped:
+                    start_ms, end_ms = lst[0].video_ts_ms, lst[-1].video_ts_ms
+                    before = [
+                        d for c in claims for d in c.dets if d.video_ts_ms <= start_ms
+                    ]
+                    if not before:
+                        continue
+                    tail = max(before, key=lambda d: d.video_ts_ms).bbox
+                    anchor = (tail["x"] + tail["w"] / 2.0, tail["y"] + tail["h"] / 2.0)
+                    for cand in teacher_chain.gap_fill_candidates(
+                        dets_by_track, teacher_no, start_ms, end_ms, anchor, blocked
+                    ):
+                        if (
+                            vlm_teacher.vlm_supports_span(video_path, cand, n_frames=4)
+                            is True
+                        ):
+                            filled.append(cand)
+                            logger.info(
+                                "VLM GAP-FILL: raw %s claimed for %.1f-%.1fs "
+                                "(%d dets) after the trim",
+                                cand[0].raw_track_id,
+                                start_ms / 1000,
+                                end_ms / 1000,
+                                len(cand),
+                            )
+                            break
+
             next_no = max(dets_by_track, default=0) + 1
             for dets_out in dropped:
                 for d in dets_out:
@@ -559,6 +596,9 @@ def derive_result(
                 next_no += 1
             for c in claims:
                 for d in c.dets:
+                    d.track_no = teacher_no
+            for cand in filled:  # gap-fill runs last: it wins over the eviction
+                for d in cand:
                     d.track_no = teacher_no
             # The chain moved detections between identities: rebuild the
             # per-track views from the rewritten track_nos, drop identities

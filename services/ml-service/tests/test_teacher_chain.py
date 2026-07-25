@@ -48,6 +48,52 @@ def test_find_switch_index_needs_enough_detections_on_both_sides():
     assert tc.find_switch_index(dets) is None
 
 
+def test_gap_fill_only_offers_detections_inside_the_window():
+    # A pupil track spans the whole video; only its slice inside the freed
+    # window may be offered, so acting on it cannot disturb the timeline.
+    dbt = {1: [], 2: []}
+    dbt[2] = [_d(ts, 20, 2, 0.35) for ts in range(0, 60_000, 200)]
+    cands = tc.gap_fill_candidates(dbt, teacher_no=1, start_ms=20_000, end_ms=30_000, anchor=(0.35, 0.45))
+    assert cands, "the pupil track overlaps the window"
+    assert all(20_000 <= d.video_ts_ms <= 30_000 for d in cands[0])
+
+
+def test_gap_fill_offers_the_mobile_candidate_for_judging():
+    # A static pupil sitting exactly where the teacher was is a plausible decoy,
+    # so ranking alone cannot settle it — what matters is that the mobile figure
+    # (the walking adult) is OFFERED, so the VLM gets to judge her.
+    dbt = {1: [], 2: [], 3: []}
+    dbt[2] = [_d(ts, 20, 2, 0.30) for ts in range(20_000, 30_000, 200)]  # static at anchor
+    dbt[3] = [
+        _d(ts, 30, 3, 0.32 + 0.30 * (ts - 20_000) / 10_000) for ts in range(20_000, 30_000, 200)
+    ]  # walks 0.32 -> 0.62
+    cands = tc.gap_fill_candidates(dbt, teacher_no=1, start_ms=20_000, end_ms=30_000, anchor=(0.30, 0.45))
+    assert {c[0].raw_track_id for c in cands} == {20, 30}
+
+
+def test_gap_fill_ranks_a_far_candidate_below_a_near_one():
+    # Distance to her last known position is the primary ranking signal.
+    dbt = {1: [], 2: [], 3: []}
+    dbt[2] = [_d(ts, 20, 2, 0.34) for ts in range(20_000, 30_000, 200)]  # near anchor
+    dbt[3] = [_d(ts, 30, 3, 0.90) for ts in range(20_000, 30_000, 200)]  # across the room
+    cands = tc.gap_fill_candidates(dbt, teacher_no=1, start_ms=20_000, end_ms=30_000, anchor=(0.35, 0.45))
+    assert cands[0][0].raw_track_id == 20
+
+
+def test_gap_fill_excludes_blocked_detections():
+    # The just-trimmed detections must never be offered back.
+    dbt = {1: [], 2: []}
+    dbt[2] = [_d(ts, 20, 2, 0.35) for ts in range(20_000, 30_000, 200)]
+    blocked = {(d.raw_track_id, d.video_ts_ms) for d in dbt[2]}
+    assert tc.gap_fill_candidates(dbt, 1, 20_000, 30_000, (0.35, 0.45), blocked) == []
+
+
+def test_gap_fill_ignores_a_flicker():
+    dbt = {1: [], 2: []}
+    dbt[2] = [_d(ts, 20, 2, 0.35) for ts in range(20_000, 20_600, 200)]  # 3 dets
+    assert tc.gap_fill_candidates(dbt, 1, 20_000, 30_000, (0.35, 0.45)) == []
+
+
 def test_claim_to_idx_trims_the_tail():
     frag = tc.Fragment(raw_id=10, host_track_no=1, dets=[_d(ts, 10, 1, 0.3) for ts in range(0, 5_000, 500)])
     assert len(tc.Claim(frag, 0).dets) == 10  # unbounded claim is unchanged
