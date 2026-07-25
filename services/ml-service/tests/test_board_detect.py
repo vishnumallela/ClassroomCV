@@ -191,6 +191,43 @@ def test_chain_falls_back_when_world_proposal_scores_worse(monkeypatch):
     assert method == "sam2_geometric"
 
 
+def test_door_ignores_low_confidence_open_vocab_candidate(monkeypatch):
+    # A tall panel that scores well on door GEOMETRY (cork notice board) but which
+    # the open-vocab model is not confident is a door. It must be rejected, and the
+    # geometric fallbacks must NOT then re-pick it: a wrong door zone fabricates
+    # entry/exit events, so no door is the better answer.
+    monkeypatch.setattr(bd, "_yoloe_masks", lambda frame: [(TALL_BLOB, 0.05, 5)])
+    monkeypatch.setattr(bd, "_yoloe", object())  # the model did look at the frame
+
+    def _boom(*a, **k):
+        raise AssertionError("geometry must not override a declined open-vocab door")
+
+    monkeypatch.setattr(bd, "_sam_segment", _boom)
+    monkeypatch.setattr(bd, "_yolo_world_proposals", _boom)
+    assert bd._detect_door_on_frame(FRAME) is None
+
+
+def test_door_accepts_confident_open_vocab_candidate(monkeypatch):
+    monkeypatch.setattr(bd, "_yoloe_masks", lambda frame: [(TALL_BLOB, 0.90, 5)])
+    monkeypatch.setattr(bd, "_yoloe", object())
+    result = bd._detect_door_on_frame(FRAME)
+    assert result is not None
+    score, poly, method = result
+    assert method == "yoloe26_seg"
+    assert score >= bd.DOOR_MIN_SCORE
+    assert_polygon_sane(poly)
+
+
+def test_door_still_uses_geometry_when_open_vocab_unavailable(monkeypatch):
+    # No `clip` -> no YOLOE at all: the SAM2 geometric path stays the fallback,
+    # so door detection keeps working on installs without the text encoder.
+    monkeypatch.setattr(bd, "_yolo_world_proposals", lambda frame: [])
+    monkeypatch.setattr(bd, "_sam_segment", lambda frame, **kw: [TALL_BLOB])
+    result = bd._detect_door_on_frame(FRAME)
+    assert result is not None
+    assert result[2] == "sam2_geometric"
+
+
 def test_detect_board_null_polygon_below_threshold(monkeypatch):
     monkeypatch.delenv("DATA_DIR", raising=False)
     monkeypatch.setattr(bd, "_sample_frames", lambda p: [(300, FRAME)])

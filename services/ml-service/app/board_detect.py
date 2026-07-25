@@ -82,6 +82,15 @@ GRID_Y = (0.15, 0.30, 0.45, 0.60)
 DOOR_GRID_X = (0.08, 0.22, 0.38, 0.50, 0.62, 0.78, 0.92)
 DOOR_GRID_Y = (0.28, 0.45, 0.62, 0.78)
 DOOR_MIN_SCORE = 0.22
+# A tall rectangle is inherently ambiguous — door, notice board, cupboard, window
+# — so door geometry ALONE is not evidence. Measured across three classrooms: the
+# semantically correct door always came back confident (0.90, 0.65) while every
+# false positive sat at <=0.16, yet the geometric score ignored that and let a
+# 0.05-confidence cork notice-board (score 0.69) beat a 0.65-confidence real door
+# (score 0.61). Door candidates must therefore clear this open-vocabulary
+# confidence before geometry ranks them; the margin between the two populations
+# is wide, so the exact value is not delicate.
+DOOR_MIN_CONF = 0.35
 
 _sam = None
 _world = None
@@ -373,6 +382,17 @@ def _get_yoloe():
         _yoloe_failed = True
         return None
     return _yoloe
+
+
+def _yoloe_ran() -> bool:
+    """True once a YOLOE model has actually been loaded.
+
+    Checked AFTER _yoloe_masks() has run, so it reports whether the
+    open-vocabulary strategy really got a look at the frame. Reads the cached
+    model instead of calling _get_yoloe(), so asking the question never triggers
+    a model load (unit tests monkeypatch _yoloe_masks and must stay offline).
+    """
+    return _yoloe is not None
 
 
 def _yoloe_masks(frame: np.ndarray) -> list[tuple[np.ndarray, float, int]]:
@@ -709,8 +729,10 @@ def _detect_door_on_frame(
     candidates: list[tuple[float, list[list[float]], str]] = []
 
     # Strategy 0 (preferred): YOLOE-26-seg. class index >= N_BOARD_CLASSES = door.
+    # Only candidates the model is actually CONFIDENT are a door are ranked (see
+    # DOOR_MIN_CONF) — geometry alone cannot tell a door from a notice board.
     for mask, conf, cidx in _yoloe_masks(frame):
-        if cidx < N_BOARD_CLASSES:
+        if cidx < N_BOARD_CLASSES or conf < DOOR_MIN_CONF:
             continue
         polygon = mask_to_polygon(mask)
         if polygon:
@@ -720,10 +742,19 @@ def _detect_door_on_frame(
         best = max(candidates, key=lambda c: c[0])
         if best[0] >= DOOR_MIN_SCORE:
             return best
+    if _yoloe_ran():
+        # The open-vocabulary model saw the frame and named no confident door, so
+        # there is no door here. Falling through to the geometric strategies would
+        # just re-pick the tall blob YOLOE already declined (a cork notice board
+        # scores 0.69 on door geometry), and a WRONG door zone is worse than none:
+        # it fabricates entry/exit events. A missing door is a supported mode.
+        return None
 
-    proposals = [p for p in _yolo_world_proposals(frame) if p[2] >= N_BOARD_CLASSES][
-        :WORLD_MAX_PROPOSALS
-    ]
+    proposals = [
+        p
+        for p in _yolo_world_proposals(frame)
+        if p[2] >= N_BOARD_CLASSES and p[1] >= DOOR_MIN_CONF
+    ][:WORLD_MAX_PROPOSALS]
     if proposals:
         masks = _sam_segment(frame, bboxes=[box for box, _, _ in proposals])
         for mask in masks:
