@@ -575,8 +575,9 @@ def derive_result(
                     raw_ids_by_track=raw_ids_by_track,
                 )
 
+    frame_aspect = (meta.width / meta.height) if meta.height else 1.0
     events, analytics = events_mod.derive(
-        dets_by_track, roles_map, meta.duration_ms, zones
+        dets_by_track, roles_map, meta.duration_ms, zones, frame_aspect
     )
 
     tracks = []

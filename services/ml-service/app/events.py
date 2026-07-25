@@ -405,10 +405,14 @@ def derive(
     roles_map: dict[int, tuple[str, Optional[float]]],
     duration_ms: int,
     zones: list[dict],
+    aspect: float = 1.0,
 ) -> tuple[list[dict], dict]:
     """Return (events, analytics) dicts matching the SPEC AnalysisResult shapes.
 
     Never raises on the no-teacher case: teacher analytics become zeros/null.
+
+    aspect (frame width/height) is forwarded to the board-activity classifier so
+    the writing micro-motion is measured isotropically; defaults to 1.0.
     """
     board_polygon = next(
         (z["polygon"] for z in zones if z.get("kind") == "board"), None
@@ -468,7 +472,9 @@ def derive(
     # Teacher board-activity breakdown (pointing / writing / near). Uses the
     # per-detection pose features on Detection.activity + the board zone, so it
     # is null (no board) or empty (no teacher) exactly when board time is.
-    board_activity = activity_mod.derive_board_activity(teacher_dets, board_polygon)
+    board_activity = activity_mod.derive_board_activity(
+        teacher_dets, board_polygon, aspect
+    )
 
     occupancy = occupancy_buckets(dets_by_track, roles_map, duration_ms)
     counts = [b["students"] for b in occupancy]

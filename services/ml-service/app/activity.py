@@ -51,8 +51,14 @@ WRIST_NEAR_EXPAND = 0.06
 # while rejecting a resting arm.
 HANDS_UP_MIN = -0.30
 # Writing additionally requires the teacher to be facing the board (occluded
-# face). facing_score ~0 faces the students, ~0.85 back-turned.
-FACING_GATE = 0.5
+# face). facing_score ~0 faces the students, ~0.85 back-turned; a teacher writing
+# in SIDE profile (facing the board but not fully back-turned) scores ~0.35. The
+# original 0.5 gate rejected side-on writers, mislabelling their writing as
+# POINTING (observed: 114s pointing / 19s writing on a teacher who writes side-on).
+# 0.40 admits side-profile writing; on_board + the writing micro-motion still keep
+# a class-facing pointer out of WRITING (verified: a pointing-only teacher stays 0
+# writing even below this gate), so lowering it introduces no false writing.
+FACING_GATE = 0.40
 # POINTING requires the arm to be EXTENDED toward the board: the shoulder->wrist
 # reach must be at least this many torso-lengths. A bent arm resting near the
 # board is not a point. NOTE: unlike the reference's literal 1.2, this is
@@ -101,8 +107,15 @@ class _WristMotion:
     but confined to a small region (spread) over the recent window.
     """
 
-    def __init__(self, window_ms: int = WRITE_WINDOW_MS) -> None:
+    def __init__(self, window_ms: int = WRITE_WINDOW_MS, aspect: float = 1.0) -> None:
         self.window_ms = window_ms
+        # Stored wrist x is width-normalized and y is height-normalized, so on a
+        # 16:9 frame a horizontal stroke's normalized dx is ~1/aspect of the same
+        # physical vertical motion. Writing is mostly horizontal, so without this
+        # correction its micro-motion under-measures and the frame falls through to
+        # POINTING. Scaling x by aspect puts both axes in frame-height units
+        # (matching torso_scale, which is already aspect-corrected).
+        self.aspect = aspect if aspect > 1e-6 else 1.0
         self._buf: list[tuple[int, float, float]] = []  # (ts_ms, x/ts, y/ts)
 
     def reset(self) -> None:
@@ -110,7 +123,7 @@ class _WristMotion:
 
     def update(self, ts_ms: int, wx: float, wy: float, scale: float) -> None:
         s = scale if scale > 1e-6 else 1e-6
-        self._buf.append((ts_ms, wx / s, wy / s))
+        self._buf.append((ts_ms, wx * self.aspect / s, wy / s))
         cutoff = ts_ms - self.window_ms
         if self._buf[0][0] < cutoff:
             self._buf = [p for p in self._buf if p[0] >= cutoff]
@@ -203,13 +216,21 @@ def _classify_frame(
     motion.update(det.video_ts_ms, wx, wy, scale)
 
     on_board = point_in_polygon(wx, wy, board_polygon)
+    # WRITING is checked BEFORE the raised-hand gate: a wrist INSIDE the board
+    # polygon that shows local micro-motion while facing the board is writing
+    # regardless of its shoulder-relative height. A teacher writing at chest /
+    # mid-board height has the wrist below the shoulder (up < HANDS_UP_MIN) yet is
+    # plainly writing; requiring "raised" here dropped ~22% of on-board writing
+    # frames (they fell into NONE). on_board already proves the hand is up at the
+    # board, so the raised gate is only needed to keep a hand-at-the-side out of
+    # POINTING below.
+    if on_board and motion.is_writing() and float(act.get("fc", 0.0)) >= FACING_GATE:
+        return WRITING
+
     hand_near = on_board or _in_box(wx, wy, near_box)
     hand_raised = up >= HANDS_UP_MIN
     if not (hand_near and hand_raised):
         return NONE
-
-    if on_board and motion.is_writing() and float(act.get("fc", 0.0)) >= FACING_GATE:
-        return WRITING
     # A raised hand near the board is only POINTING when the arm is extended;
     # a bent arm (low reach) resting at the board is not a point (matches the
     # reference, which returns NONE for a hand-down-at-board frame).
@@ -234,12 +255,16 @@ def _clean(periods: list[list]) -> list[list]:
 def derive_board_activity(
     teacher_dets: list[Detection],
     board_polygon: Optional[list[list[float]]],
+    aspect: float = 1.0,
 ) -> dict:
     """Classify the teacher's board activity into pointing / writing / near.
 
     Returns {"pointing_ms", "writing_ms", "near_ms", "segments"} where segments
     is [{kind, start_ms, end_ms}, ...]. The three *_ms values are None when no
     board zone exists (the activity is undefined without a board).
+
+    aspect (frame width/height) makes the writing micro-motion isotropic; it
+    defaults to 1.0 for legacy callers (unchanged behaviour) — see _WristMotion.
     """
     if not board_polygon:
         return {
@@ -263,7 +288,7 @@ def derive_board_activity(
             j < n and dets[j].video_ts_ms - dets[j - 1].video_ts_ms < ACTIVITY_GAP_MS
         ):
             j += 1
-        motion = _WristMotion()
+        motion = _WristMotion(aspect=aspect)
         sm = _Debounce()
         for d in dets[i:j]:
             sm.update(

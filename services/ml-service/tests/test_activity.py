@@ -80,6 +80,33 @@ def test_writing_micro_motion_on_board():
     assert any(s["kind"] == "writing" for s in out["segments"])
 
 
+def test_side_profile_writing_counts_as_writing():
+    # A teacher writing in SIDE profile faces the board but isn't fully back-turned,
+    # so facing_score ~0.45 -- rejected by the old 0.5 gate (mislabelled pointing),
+    # admitted by the 0.40 gate. Same on-board local micro-motion as above.
+    dets = []
+    for i in range(26):
+        jitter = 0.006 if i % 2 == 0 else -0.006
+        dets.append(_det(i * STEP_MS, arms=[[0.55 + jitter, 0.22 + jitter, 0.35]], fc=0.45))
+    out = _run(dets)
+    assert out["writing_ms"] > 0, out
+    assert any(s["kind"] == "writing" for s in out["segments"])
+    assert out["pointing_ms"] == 0, out
+
+
+def test_low_hand_writing_on_board_is_writing():
+    # Writing at chest / mid-board height: wrist ON the board and moving locally,
+    # but the hand is BELOW the shoulder (up -0.40 < HANDS_UP_MIN). Still WRITING --
+    # the raised-hand gate only guards POINTING, not on-board writing.
+    dets = []
+    for i in range(26):
+        jitter = 0.006 if i % 2 == 0 else -0.006
+        dets.append(_det(i * STEP_MS, arms=[[0.55 + jitter, 0.22 + jitter, -0.40]], fc=0.85))
+    out = _run(dets)
+    assert out["writing_ms"] > 0, out
+    assert any(s["kind"] == "writing" for s in out["segments"])
+
+
 def test_gap_breaks_segments():
     # Two pointing bursts separated by a >5 s absence must not bridge.
     first = [_det(i * STEP_MS, arms=[[0.55, 0.20, 0.45]]) for i in range(20)]
