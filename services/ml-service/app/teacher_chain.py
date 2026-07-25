@@ -34,6 +34,10 @@ timeline fragment by fragment:
   from the rise onward.
 - START: a fragment born shortly after her disappearance, near it and
   teacher-sized, is claimed whole.
+- SIT: her box dies in a height collapse (she sat down) and a fresh fragment
+  born within ~2s at the same spot is seated-sized; claimed whole even though
+  it is static and sub-height. Birth-at-the-collapse separates her seated self
+  from a desk-visit steal (that pupil's fragment predates her arrival).
 - RECOVER: when she crossed the room untracked (crouched walk, occlusion) no
   position anchor exists; a strongly teacher-like fragment (tall, mobile,
   embed-compatible) starting within the recovery window is claimed anyway.
@@ -94,6 +98,18 @@ MIN_CLAIM_DETS = 3
 # fragment — walk in, write, walk off — so its overall spread stays high.)
 SEATED_STATIC_MIN_MS = 6_000
 SEATED_STATIC_SPREAD = 0.05
+# --- sit-down continuation (SIT) ----------------------------------------------
+# When the teacher SITS, her box dies in a height collapse (sitting roughly
+# halves it, like a crouch) and the tracker births a FRESH raw id on the seated
+# figure moments later at the same spot. That newborn fragment is seated-sized
+# and near-static, so CONTINUE / START / RECOVER all reject it and she turns
+# into a "student" for as long as she stays seated. The SIT branch claims it:
+# chain tail must have died sub-height (< SIT_COLLAPSE_RATIO), and the fragment
+# must be born within SIT_MAX_GAP_MS of the death. Birth-at-the-collapse is what
+# separates her seated self from the desk-visit steal — the pupil she leans over
+# has a fragment born long before she arrived.
+SIT_COLLAPSE_RATIO = 0.60
+SIT_MAX_GAP_MS = 2_000
 # When several fragments are alive at a handoff and all clear the height and
 # proximity gates, the teacher is the one that MOVES: a fidgety seated student
 # spreads ~0.1, she spreads most of the frame. Candidate cost subtracts a
@@ -437,6 +453,33 @@ def stitch_teacher(
             )
             if candidate is None or cost < candidate_cost:
                 candidate, candidate_cost = Claim(f, 0), cost
+
+        if candidate is None and model.ratio(chain_dets[-1]) < SIT_COLLAPSE_RATIO:
+            # SIT: her box died in a height collapse (she sat down) and a fresh
+            # raw id was born moments later on the seated figure at the same
+            # spot. Seated-sized + near-static, so every other branch rejects
+            # it; claim it whole. A teacher-sized birth is left to START (it is
+            # a stand-up, not a sit), and any cross-identity SIT claim is
+            # re-verified by the VLM claim-veto in jobs.derive_result.
+            for f in fragments:
+                if id(f) in claimed_from or f.first_ms <= t:
+                    continue
+                gap = f.first_ms - t
+                if gap > SIT_MAX_GAP_MS:
+                    continue
+                head = f.center_near(f.first_ms)
+                if head is None or _dist(head, p) > HANDOFF_DIST:
+                    continue
+                if len(f.dets) < MIN_CLAIM_DETS:
+                    continue
+                early = f.dets[:SUSTAIN_SAMPLES]
+                if float(np.mean([model.ratio(d) for d in early])) >= START_RATIO:
+                    continue  # teacher-sized from birth -> START's business
+                if not _embed_ok(teacher_embed, embeds_by_raw, f.raw_id):
+                    continue
+                cost = _dist(head, p) + gap / 1000.0 * 0.01
+                if candidate is None or cost < candidate_cost:
+                    candidate, candidate_cost = Claim(f, 0), cost
 
         if candidate is None:
             # RECOVER: she crossed the room untracked; no position anchor.

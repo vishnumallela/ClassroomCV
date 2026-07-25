@@ -63,6 +63,62 @@ def test_keeps_own_earlier_fragment_when_seed_is_the_later_one():
     assert all(f.raw_id != 10 for f, _lo, _hi in evictions)
 
 
+def _walk_then_sit(dbt, *, end_x=0.8):
+    """Teacher raw 10 (track 1) walks 0..20s, then her box collapses over the
+    final second (she sits: h 0.45 -> 0.20) and the raw id dies."""
+    for ts in range(0, 19_001, 500):
+        dbt[1].append(_d(ts, 10, 1, 0.5 + (end_x - 0.5) * ts / 19_000))
+    for i, h in enumerate((0.38, 0.30, 0.20)):
+        dbt[1].append(_d(19_500 + i * 500, 10, 1, end_x, h=h, standing=False))
+
+
+def test_sit_claims_seated_fragment_born_at_collapse():
+    # After the sit-down collapse, a FRESH raw id (20, student track 2) is born
+    # 0.5s later at her spot, seated-sized and static. CONTINUE/START/RECOVER
+    # all reject it (sub-height, static); the SIT branch claims it.
+    dbt = {1: [], 2: []}
+    _walk_then_sit(dbt)
+    for ts in range(21_000, 36_001, 500):
+        dbt[2].append(_d(ts, 20, 2, 0.8, h=0.22, standing=False))
+    claims, _ = tc.stitch_teacher(1, dbt)
+    assert 20 in {c.fragment.raw_id for c in claims}
+
+
+def test_sit_ignores_preexisting_seated_fragment():
+    # The desk-visit steal shape: she collapses NEXT TO a pupil whose fragment
+    # has existed since ts=0. Birth-at-the-collapse is required, so the
+    # long-lived seated fragment is not claimed.
+    dbt = {1: [], 2: []}
+    _walk_then_sit(dbt)
+    for ts in range(0, 36_001, 500):
+        dbt[2].append(_d(ts, 20, 2, 0.82, h=0.22, standing=False))
+    claims, _ = tc.stitch_teacher(1, dbt)
+    assert 20 not in {c.fragment.raw_id for c in claims}
+
+
+def test_sit_requires_the_chain_to_die_in_a_collapse():
+    # Her chain ends at FULL height (she walked out of tracking, no sit-down);
+    # a seated fragment born moments later nearby must not be claimed.
+    dbt = {1: [], 2: []}
+    for ts in range(0, 20_001, 500):
+        dbt[1].append(_d(ts, 10, 1, 0.5 + 0.3 * ts / 20_000))
+    for ts in range(21_000, 36_001, 500):
+        dbt[2].append(_d(ts, 20, 2, 0.8, h=0.22, standing=False))
+    claims, _ = tc.stitch_teacher(1, dbt)
+    assert 20 not in {c.fragment.raw_id for c in claims}
+
+
+def test_sit_rejects_fragment_born_too_late():
+    # Collapse happens, but the seated fragment appears 5s later — outside the
+    # SIT birth window; someone else took the seat.
+    dbt = {1: [], 2: []}
+    _walk_then_sit(dbt)
+    for ts in range(25_500, 40_001, 500):
+        dbt[2].append(_d(ts, 20, 2, 0.8, h=0.22, standing=False))
+    claims, _ = tc.stitch_teacher(1, dbt)
+    assert 20 not in {c.fragment.raw_id for c in claims}
+
+
 def test_evicts_a_wrongly_merged_seated_student_fragment():
     # A seated corner student raw 30 was merged into the teacher identity.
     # The chain claims the real teacher fragment and evicts the student.
