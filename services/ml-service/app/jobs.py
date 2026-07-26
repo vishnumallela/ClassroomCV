@@ -552,12 +552,26 @@ def derive_result(
             # re-derive is greedy and was measured trading a 20s gap for ~180s of
             # lost timeline), rank them, and claim the first the VLM confirms.
             filled: list[list[Detection]] = []
-            if dropped and settings.vlm_verify_teacher and video_path is not None:
+            if settings.vlm_verify_teacher and video_path is not None:
+                # Holes in the teacher's timeline: the chain builds a PATH, so
+                # wherever it stepped over her (or a trim vacated a span) she is
+                # tracked under some other id and shows up as a student. The
+                # chain already reclaimed her OWN skipped fragments for free;
+                # what is left needs an identity judgement, so each hole offers
+                # a couple of candidates and the VLM decides. Bounded by hole
+                # length and count so a fragmented lesson cannot run away.
                 blocked = {
                     (d.raw_track_id, d.video_ts_ms) for lst in dropped for d in lst
                 }
-                for lst in dropped:
-                    start_ms, end_ms = lst[0].video_ts_ms, lst[-1].video_ts_ms
+                claimed = sorted(d.video_ts_ms for c in claims for d in c.dets)
+                holes = [
+                    (a, b)
+                    for a, b in zip(claimed, claimed[1:])
+                    if b - a >= teacher_chain.GAP_FILL_MIN_MS
+                ]
+                if claimed and meta.duration_ms - claimed[-1] >= teacher_chain.GAP_FILL_MIN_MS:
+                    holes.append((claimed[-1], meta.duration_ms))  # she may teach on past the chain
+                for start_ms, end_ms in holes[: teacher_chain.GAP_FILL_MAX_HOLES]:
                     before = [
                         d for c in claims for d in c.dets if d.video_ts_ms <= start_ms
                     ]
@@ -573,9 +587,9 @@ def derive_result(
                             is True
                         ):
                             filled.append(cand)
+                            blocked |= {(d.raw_track_id, d.video_ts_ms) for d in cand}
                             logger.info(
-                                "VLM GAP-FILL: raw %s claimed for %.1f-%.1fs "
-                                "(%d dets) after the trim",
+                                "VLM GAP-FILL: raw %s claimed for %.1f-%.1fs (%d dets)",
                                 cand[0].raw_track_id,
                                 start_ms / 1000,
                                 end_ms / 1000,

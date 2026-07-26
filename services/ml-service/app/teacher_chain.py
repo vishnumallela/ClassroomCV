@@ -124,6 +124,12 @@ GAP_FILL_MAX_CANDIDATES = 2
 # A candidate must have at least this many detections inside the window; fewer
 # is a flicker, not someone standing there for the duration.
 GAP_FILL_MIN_DETS = 5
+# Only holes at least this long are worth spending VLM calls on; a sub-3s hole
+# is tracker flicker and barely visible on the overlay.
+GAP_FILL_MIN_MS = 3_000
+# Hard cap on holes verified per video, so a badly fragmented lesson cannot turn
+# into an unbounded number of API calls.
+GAP_FILL_MAX_HOLES = 6
 # When several fragments are alive at a handoff and all clear the height and
 # proximity gates, the teacher is the one that MOVES: a fidgety seated student
 # spreads ~0.1, she spreads most of the frame. Candidate cost subtracts a
@@ -308,6 +314,32 @@ def find_switch_index(dets: list[Detection]) -> Optional[int]:
     return best_idx if best_shift >= SWITCH_MIN_CX_SHIFT else None
 
 
+def _longest_unclaimed_run(
+    frag: "Fragment", claimed_ts: set[int]
+) -> Optional[tuple[int, int]]:
+    """Longest contiguous [start, end) of frag.dets whose timestamps are free.
+
+    A hole fill must not double-label: the teacher is one person, so a fragment
+    may only contribute frames the chain has not already claimed from someone
+    else. Runs shorter than MIN_CLAIM_DETS are noise.
+    """
+    free = [i for i, d in enumerate(frag.dets) if d.video_ts_ms not in claimed_ts]
+    if len(free) < MIN_CLAIM_DETS:
+        return None
+    best = run_start = free[0]
+    best_end = prev = free[0]
+    for i in free[1:]:
+        if i == prev + 1:
+            prev = i
+            continue
+        if prev + 1 - run_start > best_end + 1 - best:
+            best, best_end = run_start, prev
+        run_start = prev = i
+    if prev + 1 - run_start > best_end + 1 - best:
+        best, best_end = run_start, prev
+    return (best, best_end + 1) if best_end + 1 - best >= MIN_CLAIM_DETS else None
+
+
 def gap_fill_candidates(
     dets_by_track: dict[int, list[Detection]],
     teacher_no: int,
@@ -449,6 +481,7 @@ def stitch_teacher(
 
     claims: list[Claim] = [Claim(fragment=seed, from_idx=0)]
     claimed_from: dict[int, int] = {id(seed): 0}  # fragment -> claimed from_idx
+    claimed_to: dict[int, int] = {}  # fragment -> claimed end (hole fills only)
 
     # --- backward: fragments ending just before the seed begins --------------
     start_t = seed.first_ms
@@ -618,14 +651,45 @@ def stitch_teacher(
         claims.append(candidate)
         claimed_from[id(candidate.fragment)] = candidate.from_idx
 
+    # --- hole fill: her OWN fragments the greedy walk stepped over -------------
+    # The forward walk builds a PATH: each step takes the single cheapest next
+    # fragment and never looks back, so a fragment of her own identity sitting
+    # between two claims is left unclaimed — and unclaimed fragments of the
+    # teacher identity are EVICTED to a student track, which is exactly why she
+    # turns into "Student N" for a few seconds mid-lesson. Reclaim any
+    # own-identity fragment that fills a hole in the claimed timeline and still
+    # looks like her. No appearance check is needed: the merge already grouped
+    # it with her, and the walk dropped it for reasons of path cost, not identity.
+    claimed_ts = {d.video_ts_ms for c in claims for d in c.dets}
+    for f in fragments:
+        if id(f) in claimed_from or f.host_track_no != teacher_no:
+            continue
+        run = _longest_unclaimed_run(f, claimed_ts)
+        if run is None:
+            continue
+        a, b = run
+        sub = f.dets[a:b]
+        if _seated_static(Fragment(f.raw_id, f.host_track_no, sub), 0):
+            continue
+        if float(np.mean([model.ratio(d) for d in sub])) < START_RATIO:
+            continue
+        claims.append(Claim(f, a, b))
+        claimed_from[id(f)] = a
+        claimed_to[id(f)] = b
+        claimed_ts.update(d.video_ts_ms for d in sub)
+
     # --- evictions: teacher-identity ranges the chain rejected ----------------
     evictions: list[tuple[Fragment, int, int]] = []
     for f in fragments:
         if f.host_track_no != teacher_no:
             continue
-        upto = claimed_from.get(id(f))
-        if upto is None:
+        start = claimed_from.get(id(f))
+        if start is None:
             evictions.append((f, 0, len(f.dets)))
-        elif upto >= MIN_CLAIM_DETS:
-            evictions.append((f, 0, upto))
+            continue
+        if start >= MIN_CLAIM_DETS:
+            evictions.append((f, 0, start))
+        end = claimed_to.get(id(f), len(f.dets))
+        if len(f.dets) - end >= MIN_CLAIM_DETS:
+            evictions.append((f, end, len(f.dets)))
     return claims, evictions

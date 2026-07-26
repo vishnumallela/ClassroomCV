@@ -48,6 +48,43 @@ def test_find_switch_index_needs_enough_detections_on_both_sides():
     assert tc.find_switch_index(dets) is None
 
 
+def test_hole_fill_reclaims_her_own_fragment_the_walk_stepped_over():
+    # Her identity holds three fragments; the greedy walk chains raw 10 -> raw 12
+    # and steps over raw 11, which sits in the hole between them. Unclaimed
+    # fragments of her identity are evicted to a student track, so without the
+    # hole fill she becomes "Student N" for those seconds.
+    dbt = {1: []}
+    for ts in range(0, 20_001, 500):
+        dbt[1].append(_d(ts, 10, 1, 0.2 + 0.3 * ts / 20_000))
+    for ts in range(21_000, 27_000, 500):  # the stepped-over middle
+        dbt[1].append(_d(ts, 11, 1, 0.52 + 0.1 * (ts - 21_000) / 6_000))
+    for ts in range(28_000, 50_001, 500):
+        dbt[1].append(_d(ts, 12, 1, 0.62 + 0.2 * (ts - 28_000) / 22_000))
+    claims, evictions = tc.stitch_teacher(1, dbt)
+    assert 11 in {c.fragment.raw_id for c in claims}
+    assert all(f.raw_id != 11 for f, _lo, _hi in evictions)
+
+
+def test_hole_fill_contributes_only_unclaimed_frames():
+    # A hole-filling fragment that overlaps frames the walk already claimed may
+    # contribute ONLY the free ones -- she cannot be two boxes in one frame.
+    # (The walk's own CONTINUE handoff shares its boundary frame between two
+    # fragments; that is pre-existing and separate from the hole fill.)
+    dbt = {1: []}
+    for ts in range(0, 20_001, 500):
+        dbt[1].append(_d(ts, 10, 1, 0.2 + 0.3 * ts / 20_000))
+    for ts in range(28_000, 50_001, 500):
+        dbt[1].append(_d(ts, 12, 1, 0.62 + 0.2 * (ts - 28_000) / 22_000))
+    # sits in the hole but also overlaps the tail fragment's first seconds
+    for ts in range(21_000, 33_001, 500):
+        dbt[1].append(_d(ts, 11, 1, 0.52 + 0.1 * (ts - 21_000) / 12_000))
+    claims, _ = tc.stitch_teacher(1, dbt)
+    fill = next((c for c in claims if c.fragment.raw_id == 11), None)
+    assert fill is not None, "the hole fragment should be reclaimed"
+    others = {d.video_ts_ms for c in claims if c.fragment.raw_id != 11 for d in c.dets}
+    assert not ({d.video_ts_ms for d in fill.dets} & others)
+
+
 def test_gap_fill_only_offers_detections_inside_the_window():
     # A pupil track spans the whole video; only its slice inside the freed
     # window may be offered, so acting on it cannot disturb the timeline.
