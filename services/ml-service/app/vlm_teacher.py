@@ -39,6 +39,7 @@ import os
 import re
 import time
 from collections import Counter
+from concurrent.futures import ThreadPoolExecutor, as_completed
 from typing import NamedTuple, Optional
 
 import cv2
@@ -125,6 +126,46 @@ def _parse_answer(content: str) -> tuple[str, Optional[tuple[float, float]]]:
 def _parse_point(content: str) -> Optional[tuple[float, float]]:
     status, pt = _parse_answer(content)
     return pt if status == "point" else None
+
+
+# Per-call ceiling. Generous on purpose: a DROPPED answer is not free. The
+# teacher's votes split across her own fragments (she is tracked as ~10 ids), so
+# the winner often leads on a third of the votes, and losing a couple of answers
+# flips which fragment seeds the chain — measured as a swing from 91% to 62%
+# teacher coverage. Concurrency, not a short timeout, is what keeps the derive
+# inside the API's 120s budget: the worst case is one timeout, not one per frame.
+_HTTP_TIMEOUT = 45.0
+# Frames are independent questions, so they go out together. Kept modest so a
+# burst does not trip provider rate limits, which would cost answers again.
+_VLM_CONCURRENCY = 4
+
+
+def _ask_batch(
+    key: str, model: str, frames: list[tuple[int, str]]
+) -> dict[int, tuple[str, Optional[tuple[float, float]]]]:
+    """Ask about many frames CONCURRENTLY -> {tag: (status, point)}.
+
+    Frames must already be decoded: cv2.VideoCapture is not thread-safe, so the
+    caller reads sequentially and only the HTTP round-trips fan out. A call that
+    raises is recorded as "fail", which every caller treats as no signal.
+    """
+    out: dict[int, tuple[str, Optional[tuple[float, float]]]] = {}
+    if not frames:
+        return out
+    with httpx.Client(timeout=_HTTP_TIMEOUT) as client:
+        with ThreadPoolExecutor(max_workers=min(_VLM_CONCURRENCY, len(frames))) as pool:
+            futures = {
+                pool.submit(_ask_answer, client, key, model, b64): tag
+                for tag, b64 in frames
+            }
+            for fut in as_completed(futures):
+                tag = futures[fut]
+                try:
+                    out[tag] = fut.result()
+                except Exception as exc:  # never let one frame sink the batch
+                    logger.warning("VLM batch call failed: %s", exc)
+                    out[tag] = ("fail", None)
+    return out
 
 
 def _ask_answer(
@@ -350,27 +391,35 @@ def locate_teacher(
     votes: Counter = Counter()
     answered = 0
     try:
+        # Decode first (cv2 is not thread-safe), then ask about every frame at once.
+        shots: list[tuple[int, str]] = []
+        boxes_by_ts: dict[int, dict[int, tuple[float, float, float, float]]] = {}
         cap = cv2.VideoCapture(local_path)
         try:
-            with httpx.Client(timeout=60) as client:
-                for tgt in targets:
-                    stored = min(all_ts, key=lambda m: abs(m - tgt))
-                    boxes = boxes_at(stored)
-                    if not boxes:
-                        continue
-                    cap.set(cv2.CAP_PROP_POS_MSEC, float(stored))
-                    ok, frame = cap.read()
-                    if not ok:
-                        continue
-                    pt = _ask_point(client, s.gemini_api_key, s.vlm_model, _b64_jpeg(frame))
-                    if pt is None:
-                        continue
-                    answered += 1
-                    track = _point_to_track(pt[0], pt[1], boxes)
-                    if track is not None:
-                        votes[track] += 1
+            for tgt in targets:
+                stored = min(all_ts, key=lambda m: abs(m - tgt))
+                if stored in boxes_by_ts:
+                    continue
+                boxes = boxes_at(stored)
+                if not boxes:
+                    continue
+                cap.set(cv2.CAP_PROP_POS_MSEC, float(stored))
+                ok, frame = cap.read()
+                if not ok:
+                    continue
+                boxes_by_ts[stored] = boxes
+                shots.append((stored, _b64_jpeg(frame)))
         finally:
             cap.release()
+        for stored, (status, pt) in _ask_batch(
+            s.gemini_api_key, s.vlm_model, shots
+        ).items():
+            if status != "point":
+                continue
+            answered += 1
+            track = _point_to_track(pt[0], pt[1], boxes_by_ts[stored])
+            if track is not None:
+                votes[track] += 1
     except Exception as exc:  # any decode/network failure -> fail closed
         logger.warning("VLM locate-teacher failed: %s", exc)
         return TeacherVerdict(None, 0.0, dict(votes), answered)
@@ -466,37 +515,39 @@ def vlm_supports_span(
 
     local_path, is_temp = detector.resolve_video_source(video_path)
     support = refute = 0
-    seen: set[int] = set()
     try:
+        shots: list[tuple[int, str]] = []
+        box_by_ts: dict[int, tuple[float, float, float, float]] = {}
         cap = cv2.VideoCapture(local_path)
         try:
-            with httpx.Client(timeout=60) as client:
-                for tgt in targets:
-                    got = box_at(int(tgt))
-                    if got is None:
-                        continue
-                    stored, (x, y, w, h) = got
-                    if stored in seen:
-                        continue
-                    seen.add(stored)
-                    cap.set(cv2.CAP_PROP_POS_MSEC, float(stored))
-                    ok, frame = cap.read()
-                    if not ok:
-                        continue
-                    status, pt = _ask_answer(
-                        client, s.gemini_api_key, s.vlm_model, _b64_jpeg(frame)
-                    )
-                    if status == "point":
-                        px, py = pt
-                        if x <= px <= x + w and y <= py <= y + h:
-                            support += 1
-                        else:
-                            refute += 1  # teacher is someone else here
-                    elif status == "absent":
-                        refute += 1  # VLM says no teacher in this frame at all
-                    # "fail"/"none": no usable signal -> ignore
+            for tgt in targets:
+                got = box_at(int(tgt))
+                if got is None:
+                    continue
+                stored, box = got
+                if stored in box_by_ts:
+                    continue
+                cap.set(cv2.CAP_PROP_POS_MSEC, float(stored))
+                ok, frame = cap.read()
+                if not ok:
+                    continue
+                box_by_ts[stored] = box
+                shots.append((stored, _b64_jpeg(frame)))
         finally:
             cap.release()
+        for stored, (status, pt) in _ask_batch(
+            s.gemini_api_key, s.vlm_model, shots
+        ).items():
+            if status == "point":
+                x, y, w, h = box_by_ts[stored]
+                px, py = pt
+                if x <= px <= x + w and y <= py <= y + h:
+                    support += 1
+                else:
+                    refute += 1  # teacher is someone else here
+            elif status == "absent":
+                refute += 1  # VLM says no teacher in this frame at all
+            # "fail"/"none": no usable signal -> ignore
     except Exception as exc:  # any decode/network failure -> keep the claim
         logger.warning("VLM claim-verify failed: %s", exc)
         return None

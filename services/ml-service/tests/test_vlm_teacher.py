@@ -113,11 +113,23 @@ class _FakeCapture:
 
 
 def _wire_offline(monkeypatch, points):
-    """points: list of (x, y) or None, one per call to _ask_point, in order."""
+    """points: list of (x, y) or None, one per VLM call.
+
+    Patches both the single-shot helper (identify_teacher) and the per-frame
+    helper the concurrent batch calls (locate_teacher). Frames are asked in
+    parallel, so which frame receives which point is not fixed — these fixtures
+    are written so the tally does not depend on the pairing.
+    """
     monkeypatch.setattr(V.detector, "resolve_video_source", lambda p: (p, False))
     monkeypatch.setattr(V.cv2, "VideoCapture", lambda _path: _FakeCapture())
     it = iter(points)
     monkeypatch.setattr(V, "_ask_point", lambda *a, **kw: next(it, None))
+
+    def _answer(*_a, **_kw):
+        pt = next(it, None)
+        return ("point", pt) if pt is not None else ("fail", None)
+
+    monkeypatch.setattr(V, "_ask_answer", _answer)
 
 
 def _wire_offline_answers(monkeypatch, answers):
