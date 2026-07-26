@@ -22,7 +22,7 @@ from typing import Optional
 
 from app import activity as activity_mod
 from app import quality
-from app.geometry import bboxes_intersect, expand_bbox, polygon_bbox
+from app.geometry import at_board, bboxes_intersect, expand_bbox, polygon_bbox
 from app.models import Detection
 
 PRESENCE_GAP_MS = 5_000
@@ -222,18 +222,16 @@ def board_condition(det: Detection, board_polygon: list[list[float]]) -> bool:
     back_to_camera used to bypass the x-range gate, but any back-turned box
     within the 12% expansion counted as at-board: pixel-verified board_enter
     fired at 225.0s with the teacher standing among desks 0.28 of the frame
-    LEFT of the board. Standing at the board puts the bbox center inside the
-    board's x-range anyway (the zone spans the board's full width), so the
-    bypass only ever admitted false positives.
+    LEFT of the board.
+
+    The x-range itself carries a margin (geometry.BOARD_X_MARGIN) because a
+    teacher at a narrow projector screen works from BESIDE it; without the margin
+    this read 0:30 of board time on a lesson she spent ~4 minutes presenting at
+    it, while the activity classifier — which asks the same question a different
+    way — counted 1:19 of pointing, an impossible pair. Both now share
+    geometry.at_board.
     """
-    poly_box = polygon_bbox(board_polygon)
-    expanded = expand_bbox(poly_box, BOARD_EXPAND)
-    b = det.bbox
-    det_box = (b["x"], b["y"], b["x"] + b["w"], b["y"] + b["h"])
-    if not bboxes_intersect(det_box, expanded):
-        return False
-    cx = b["x"] + b["w"] / 2.0
-    return poly_box[0] <= cx <= poly_box[2]
+    return at_board(det.bbox, board_polygon, BOARD_EXPAND)
 
 
 def board_intervals_from_samples(

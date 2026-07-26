@@ -25,6 +25,35 @@ def bboxes_intersect(
     return a[0] <= b[2] and b[0] <= a[2] and a[1] <= b[3] and b[1] <= a[3]
 
 
+# A teacher working at a narrow projector screen stands BESIDE it, not in front
+# of it, so requiring her body centre inside the board's own x-range misses her
+# for most of a lesson (measured: board spans x 0.40-0.60, she works from
+# 0.29-0.40 for 197s of a 307s lesson). This margin admits "just beside the
+# board" while still rejecting someone standing out among the desks.
+BOARD_X_MARGIN = 0.10
+
+
+def at_board(
+    bbox: dict, board_polygon: list[list[float]], expand: float
+) -> bool:
+    """Is this person at the board? The single definition, shared by everything.
+
+    Two tests that disagreed used to produce contradictory analytics — "pointing
+    at board" could exceed "time at board", which is impossible. Both callers now
+    ask this, so the board-activity kinds are a subset of board time by
+    construction.
+
+    A person is at the board when their box clips the board expanded by `expand`
+    AND their centre-x is within the board's x-range widened by BOARD_X_MARGIN.
+    """
+    poly_box = polygon_bbox(board_polygon)
+    x0, y0, w, h = bbox["x"], bbox["y"], bbox["w"], bbox["h"]
+    if not bboxes_intersect((x0, y0, x0 + w, y0 + h), expand_bbox(poly_box, expand)):
+        return False
+    cx = x0 + w / 2.0
+    return poly_box[0] - BOARD_X_MARGIN <= cx <= poly_box[2] + BOARD_X_MARGIN
+
+
 def rdp_indices(points: list[tuple[float, float]], epsilon: float) -> list[int]:
     """Ramer-Douglas-Peucker simplification; returns kept indices, ascending.
 

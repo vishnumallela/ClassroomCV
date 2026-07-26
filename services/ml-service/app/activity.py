@@ -28,7 +28,7 @@ from __future__ import annotations
 import math
 from typing import Optional
 
-from app.geometry import bboxes_intersect, expand_bbox, point_in_polygon, polygon_bbox
+from app.geometry import at_board, expand_bbox, point_in_polygon, polygon_bbox
 from app.models import Detection
 
 # Frame labels (lowercase to match the API/DB board_interactions kinds).
@@ -196,9 +196,7 @@ def _classify_frame(
     motion: _WristMotion,
 ) -> str:
     """Raw per-frame label from stored pose features + board geometry."""
-    b = det.bbox
-    det_box = (b["x"], b["y"], b["x"] + b["w"], b["y"] + b["h"])
-    if not bboxes_intersect(det_box, at_box):
+    if not at_board(det.bbox, board_polygon, AT_BOARD_EXPAND):
         motion.reset()
         return NONE
 
