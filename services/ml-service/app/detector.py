@@ -497,7 +497,14 @@ def _upper_crop(frame: np.ndarray, bbox: dict) -> Optional[np.ndarray]:
             ),
             interpolation=cv2.INTER_AREA,
         )
-    return crop
+        return crop
+    # A slice is a VIEW: it keeps the whole decoded frame alive for as long as
+    # the crop is held, and crops are held until the post-loop CLIP embed. Most
+    # people in a classroom are smaller than the 224 px cap, so they skip the
+    # resize above and would pin a full frame each — 6 MB at 1080p, 11 MB at
+    # 1440p. That is what exhausted a 28 GB container two thirds of the way
+    # through a 37-minute lesson while the crops themselves measured 25 MB.
+    return crop.copy()
 
 
 def _embed_tracks(crops: dict[int, list[np.ndarray]]) -> dict[int, list[float]]:

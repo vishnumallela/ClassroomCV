@@ -152,9 +152,38 @@ _calls_used = 0
 _calls_budget = 0
 
 
+# Resolved media for the current derive. Every helper below needs the video as
+# a LOCAL file, but on a remote worker video_path is a presigned URL, so calling
+# detector.resolve_video_source per helper downloads the whole file per call —
+# measured at 886 MB each over an SSH tunnel, which stalls a long lesson for an
+# hour. Resolve once, share it, and release at the end of the derive.
+_media_cache: dict[str, tuple[str, bool]] = {}
+
+
+def release_media() -> None:
+    """Drop any temp media downloaded for this derive."""
+    for local, is_temp in _media_cache.values():
+        if is_temp:
+            try:
+                os.unlink(local)
+            except OSError:
+                pass
+    _media_cache.clear()
+
+
+def _resolve_cached(video_path: str) -> str:
+    """Local path for video_path, downloading at most once per derive."""
+    hit = _media_cache.get(video_path)
+    if hit is None:
+        hit = detector.resolve_video_source(video_path)
+        _media_cache[video_path] = hit
+    return hit[0]
+
+
 def begin_derive(budget: int) -> None:
     """Start a fresh vision-model budget for one derive. 0 disables the cap."""
     global _calls_used, _calls_budget
+    release_media()
     _calls_used, _calls_budget = 0, max(0, budget)
 
 
@@ -312,7 +341,7 @@ def identify_teacher(
                 out[no] = (d.bbox["x"] + d.bbox["w"] / 2.0, d.bbox["y"] + d.bbox["h"] / 2.0)
         return out
 
-    local_path, is_temp = detector.resolve_video_source(video_path)
+    local_path = _resolve_cached(video_path)
     votes: Counter = Counter()
     answered = 0
     try:
@@ -343,12 +372,6 @@ def identify_teacher(
     except Exception as exc:  # any decode/network failure -> fail closed
         logger.warning("VLM teacher-id failed: %s", exc)
         return None
-    finally:
-        if is_temp:
-            try:
-                os.unlink(local_path)
-            except OSError:
-                pass
 
     if not votes:
         return None
@@ -487,7 +510,7 @@ def locate_teacher(
                 )
         return out
 
-    local_path, is_temp = detector.resolve_video_source(video_path)
+    local_path = _resolve_cached(video_path)
     votes: Counter = Counter()
     answered = 0
     try:
@@ -523,12 +546,6 @@ def locate_teacher(
     except Exception as exc:  # any decode/network failure -> fail closed
         logger.warning("VLM locate-teacher failed: %s", exc)
         return TeacherVerdict(None, 0.0, dict(votes), answered)
-    finally:
-        if is_temp:
-            try:
-                os.unlink(local_path)
-            except OSError:
-                pass
 
     if not votes:
         logger.info(
@@ -623,7 +640,7 @@ def vlm_supports_span(
             return d.video_ts_ms, (b["x"], b["y"], b["w"], b["h"])
         return None
 
-    local_path, is_temp = detector.resolve_video_source(video_path)
+    local_path = _resolve_cached(video_path)
     support = refute = 0
     try:
         shots: list[tuple[int, str]] = []
@@ -661,12 +678,6 @@ def vlm_supports_span(
     except Exception as exc:  # any decode/network failure -> keep the claim
         logger.warning("VLM claim-verify failed: %s", exc)
         return None
-    finally:
-        if is_temp:
-            try:
-                os.unlink(local_path)
-            except OSError:
-                pass
 
     judged = support + refute
     if judged < _CLAIM_VERIFY_MIN_ANSWERED:
@@ -746,56 +757,49 @@ def backfill_teacher_entry(
         st = min(stored_ts, key=lambda m: abs(m - target))
         return by_ts[st] if abs(st - target) <= _TS_TOLERANCE_MS else []
 
-    local_path, is_temp = detector.resolve_video_source(video_path)
+    local_path = _resolve_cached(video_path)
     anchored: dict[int, int] = {}  # raw_track_id -> earliest ts we placed her in it
     anchors = 0
     absent = 0
+    cap = cv2.VideoCapture(local_path)
     try:
-        cap = cv2.VideoCapture(local_path)
-        try:
-            with httpx.Client(timeout=60) as client:
-                t = T - step_ms
-                while t >= max(0, T - _BACKFILL_MAX_WINDOW_MS):
-                    here = dets_at(t)
-                    if here:
-                        cap.set(cv2.CAP_PROP_POS_MSEC, float(t))
-                        ok, frame = cap.read()
-                        if ok:
-                            status, pt = _ask_answer(
-                                client, s.gemini_api_key, s.vlm_model, _b64_jpeg(frame)
-                            )
-                            if status == "absent":
-                                absent += 1
-                                if absent >= _BACKFILL_ABSENT_STOP:
-                                    break  # she hadn't entered yet -> stop walking back
-                            elif status == "point":
-                                absent = 0
-                                if math.hypot(pt[0] - prev[0], pt[1] - prev[1]) <= _BACKFILL_MAX_MOVE:
-                                    prev = pt  # trust the VLM point as her position
-                                    d = min(
-                                        here,
-                                        key=lambda det: math.hypot(
-                                            _bbox_center(det.bbox)[0] - pt[0],
-                                            _bbox_center(det.bbox)[1] - pt[1],
-                                        ),
-                                    )
-                                    cd = _bbox_center(d.bbox)
-                                    if math.hypot(cd[0] - pt[0], cd[1] - pt[1]) <= _BACKFILL_NEAR_DET:
-                                        anchored[d.raw_track_id] = t  # walking back -> ends earliest
-                                        anchors += 1
-                                # discontinuous point -> stray; skip (don't move prev)
-                    t -= step_ms
-        except Exception as exc:  # decode/network failure -> reclaim nothing
-            logger.warning("VLM entry-backfill failed: %s", exc)
-            return []
-        finally:
-            cap.release()
+        with httpx.Client(timeout=60) as client:
+            t = T - step_ms
+            while t >= max(0, T - _BACKFILL_MAX_WINDOW_MS):
+                here = dets_at(t)
+                if here:
+                    cap.set(cv2.CAP_PROP_POS_MSEC, float(t))
+                    ok, frame = cap.read()
+                    if ok:
+                        status, pt = _ask_answer(
+                            client, s.gemini_api_key, s.vlm_model, _b64_jpeg(frame)
+                        )
+                        if status == "absent":
+                            absent += 1
+                            if absent >= _BACKFILL_ABSENT_STOP:
+                                break  # she hadn't entered yet -> stop walking back
+                        elif status == "point":
+                            absent = 0
+                            if math.hypot(pt[0] - prev[0], pt[1] - prev[1]) <= _BACKFILL_MAX_MOVE:
+                                prev = pt  # trust the VLM point as her position
+                                d = min(
+                                    here,
+                                    key=lambda det: math.hypot(
+                                        _bbox_center(det.bbox)[0] - pt[0],
+                                        _bbox_center(det.bbox)[1] - pt[1],
+                                    ),
+                                )
+                                cd = _bbox_center(d.bbox)
+                                if math.hypot(cd[0] - pt[0], cd[1] - pt[1]) <= _BACKFILL_NEAR_DET:
+                                    anchored[d.raw_track_id] = t  # walking back -> ends earliest
+                                    anchors += 1
+                            # discontinuous point -> stray; skip (don't move prev)
+                t -= step_ms
+    except Exception as exc:  # decode/network failure -> reclaim nothing
+        logger.warning("VLM entry-backfill failed: %s", exc)
+        return []
     finally:
-        if is_temp:
-            try:
-                os.unlink(local_path)
-            except OSError:
-                pass
+        cap.release()
 
     if anchors < _BACKFILL_MIN_ANCHORS or not anchored:
         return []

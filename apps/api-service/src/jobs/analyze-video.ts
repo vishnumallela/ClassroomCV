@@ -161,7 +161,14 @@ async function startAnalysisStep(
   return mlStartAnalysis({
     videoId,
     videoPath: mediaSource(video.filePath),
-    sampleFps: 5,
+    // Detection holds every sampled frame's detections in memory until the
+    // post-loop embed, so peak RSS scales with fps x duration x people. A
+    // 37-minute 2560x1440 lesson at 5 fps peaked at 31 GB and was OOM-killed
+    // inside the container's cgroup; 2.5 fps halves that. The activity
+    // classifier was calibrated at ~5 fps, so writing micro-motion is measured
+    // over fewer samples here — revisit once the embed is streamed per-track
+    // rather than accumulated.
+    sampleFps: 2.5,
     zones,
     idempotencyKey: `${videoId}:${attemptId ?? "initial"}`,
     runTokens,

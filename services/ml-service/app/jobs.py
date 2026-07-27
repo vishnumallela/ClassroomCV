@@ -724,6 +724,10 @@ def derive_result(
                     raw_ids_by_track=raw_ids_by_track,
                 )
 
+    # Every vision-model helper is done with the video by here; drop the shared
+    # copy (a temp download on a remote worker) before the analytics pass.
+    vlm_teacher.release_media()
+
     frame_aspect = (meta.width / meta.height) if meta.height else 1.0
     events, analytics = events_mod.derive(
         dets_by_track, roles_map, meta.duration_ms, zones, frame_aspect
