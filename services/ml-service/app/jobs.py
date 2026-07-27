@@ -436,6 +436,34 @@ def derive_result(
                 )
             teacher_no = vlm.track
             roles_map[teacher_no] = ("teacher", vlm.confidence)
+            # Fold every fragment the model pooled as her into that identity, so
+            # the chain starts owning her whole timeline instead of rediscovering
+            # it fragment by fragment through a greedy walk that can take a wrong
+            # fork. A fragment pooled in error is not permanent: the chain only
+            # keeps what it can claim and evicts the rest back to a student track.
+            pooled = set(vlm.fragments or ())
+            moved = 0
+            for d in detections:
+                if d.raw_track_id in pooled and d.track_no != teacher_no:
+                    d.track_no = teacher_no
+                    moved += 1
+            if moved:
+                dets_by_track = {}
+                for d in detections:
+                    if d.track_no is not None:
+                        dets_by_track.setdefault(d.track_no, []).append(d)
+                for dets in dets_by_track.values():
+                    dets.sort(key=lambda d: d.video_ts_ms)
+                roles_map = {
+                    no: role for no, role in roles_map.items() if no in dets_by_track
+                }
+                roles_map[teacher_no] = ("teacher", vlm.confidence)
+                logger.info(
+                    "VLM pooled %d det(s) from fragments %s into teacher %d",
+                    moved,
+                    sorted(pooled),
+                    teacher_no,
+                )
         elif (
             teacher_no is not None
             and vlm.answered >= settings.vlm_reject_min_answered

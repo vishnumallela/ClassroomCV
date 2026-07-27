@@ -205,6 +205,35 @@ def test_all_frames_fail_returns_none(monkeypatch):
 # --------------------------------------------------------------------------- #
 
 
+def test_pool_fragments_groups_her_disjoint_fragments():
+    # She is tracked as three ids that never share a frame -> one person, so the
+    # votes are summed instead of competing (measured: 3/12 becomes 6/12).
+    from collections import Counter
+
+    votes = Counter({12: 3, 573: 2, 652: 1})
+    frames = {12: set(range(0, 100)), 573: set(range(200, 300)), 652: set(range(400, 500))}
+    assert sorted(V.pool_fragments(votes, frames)) == [12, 573, 652]
+
+
+def test_pool_fragments_refuses_co_present_fragments():
+    # Two boxes in the same frames are two people, however the votes fell.
+    from collections import Counter
+
+    votes = Counter({12: 4, 99: 3})
+    frames = {12: set(range(0, 100)), 99: set(range(50, 150))}
+    assert V.pool_fragments(votes, frames) == [12]
+
+
+def test_pool_fragments_tolerates_a_handoff_overlap():
+    # A dying id and its successor can share a frame or two; that is tracker
+    # noise at a handoff, not evidence of two people.
+    from collections import Counter
+
+    votes = Counter({12: 3, 13: 2})
+    frames = {12: set(range(0, 101)), 13: set(range(100, 200))}
+    assert sorted(V.pool_fragments(votes, frames)) == [12, 13]
+
+
 def test_point_to_track_picks_containing_box():
     boxes = {1: (0.0, 0.0, 0.2, 0.2), 2: (0.4, 0.4, 0.3, 0.5)}
     assert V._point_to_track(0.5, 0.6, boxes) == 2  # only box 2 contains (0.5,0.6)

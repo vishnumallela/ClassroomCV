@@ -81,6 +81,10 @@ class TeacherVerdict(NamedTuple):
     confidence: float
     votes: dict
     answered: int
+    # Raw tracker fragments pooled as the same person (see pool_fragments). The
+    # caller folds these into the teacher identity so the chain starts holding
+    # her whole timeline instead of rediscovering it fragment by fragment.
+    fragments: list = []
 
 
 def _b64_jpeg(frame, max_w: int = 2000) -> str:
@@ -325,6 +329,38 @@ def identify_teacher(
     return track_no, confidence, dict(votes)
 
 
+# Two fragments sharing at least this many sampled frames are two people: one
+# person cannot be two boxes at once. Below it, brief overlap is tracker noise
+# at a handoff (a dying id and its successor can share a frame or two).
+_CO_PRESENT_MIN = 3
+
+
+def pool_fragments(votes: Counter, frames_of_raw: dict[int, set[int]]) -> list[int]:
+    """Group the vote-getting fragments that can be the SAME person.
+
+    The teacher is tracked as many raw ids, so her votes split between them and
+    the leader can win on a third of them — which makes the pick a coin flip
+    that swung teacher coverage from 91% to 62% when a couple of answers were
+    lost. Every one of those votes is the same correct answer ("she is here"),
+    so they should be counted together rather than against each other.
+
+    Co-presence is the veto: fragments appearing in the same frames are
+    different people. Taking the best-supported fragment first and admitting
+    only fragments non-co-present with everything already pooled gives the
+    largest defensible group. Only fragments the model actually pointed at are
+    eligible, so this never speculates that some unseen track might be her.
+    """
+    pool: list[int] = []
+    for raw, _n in votes.most_common():
+        seen = frames_of_raw.get(raw, set())
+        if all(
+            len(seen & frames_of_raw.get(other, set())) < _CO_PRESENT_MIN
+            for other in pool
+        ):
+            pool.append(raw)
+    return pool
+
+
 def _point_to_track(
     px: float, py: float, boxes: dict[int, tuple[float, float, float, float]]
 ) -> Optional[int]:
@@ -379,12 +415,27 @@ def locate_teacher(
     lo, hi = duration_ms * 0.1, duration_ms * 0.9
     targets = [lo + (hi - lo) * i / max(1, n - 1) for i in range(n)]
 
+    # Vote on RAW tracker fragments, not merged tracks. A merged identity can be
+    # chimeric — measured here, the four vote-getting tracks were all co-present
+    # with one another, so each held several people and pooling them was
+    # impossible. Raw fragments are one person by construction, so hers are
+    # mutually non-co-present and can be recognised as the same teacher.
+    track_of_raw: dict[int, int] = {}
+    frames_of_raw: dict[int, set[int]] = {}
+    for no, dets in dets_by_track.items():
+        for d in dets:
+            track_of_raw.setdefault(d.raw_track_id, no)
+            frames_of_raw.setdefault(d.raw_track_id, set()).add(d.video_ts_ms)
+
     def boxes_at(ts: int) -> dict[int, tuple[float, float, float, float]]:
+        """Raw-fragment boxes visible at ts, keyed by raw_track_id."""
         out: dict[int, tuple[float, float, float, float]] = {}
-        for no, dets in dets_by_track.items():
+        for dets in dets_by_track.values():
             d = min(dets, key=lambda d: abs(d.video_ts_ms - ts))
             if abs(d.video_ts_ms - ts) <= _TS_TOLERANCE_MS:
-                out[no] = (d.bbox["x"], d.bbox["y"], d.bbox["w"], d.bbox["h"])
+                out[d.raw_track_id] = (
+                    d.bbox["x"], d.bbox["y"], d.bbox["w"], d.bbox["h"]
+                )
         return out
 
     local_path, is_temp = detector.resolve_video_source(video_path)
@@ -435,8 +486,10 @@ def locate_teacher(
             "VLM locate-teacher: no confident point-in-bbox votes (answered=%d)", answered
         )
         return TeacherVerdict(None, 0.0, {}, answered)
-    track_no, win = votes.most_common(1)[0]
-    if win < s.vlm_min_votes:
+    # Pool the fragments that can be one person, so her own ids stop competing.
+    pool = pool_fragments(votes, frames_of_raw)
+    pooled_votes = sum(votes[r] for r in pool)
+    if pooled_votes < s.vlm_min_votes:
         logger.info(
             "VLM locate-teacher inconclusive: votes=%s (need >=%d, answered=%d)",
             dict(votes),
@@ -444,15 +497,23 @@ def locate_teacher(
             answered,
         )
         return TeacherVerdict(None, 0.0, dict(votes), answered)
-    confidence = round(win / max(1, answered), 3)
+    # The identity to crown is the one already holding most of her pooled frames.
+    weight: Counter = Counter()
+    for raw in pool:
+        weight[track_of_raw[raw]] += len(frames_of_raw[raw])
+    track_no = weight.most_common(1)[0][0]
+    confidence = round(pooled_votes / max(1, answered), 3)
     logger.info(
-        "VLM locate-teacher: track %d (%d/%d votes, conf %.2f)",
+        "VLM locate-teacher: track %d via fragments %s (%d/%d pooled votes, "
+        "conf %.2f; unpooled leader had %d)",
         track_no,
-        win,
+        sorted(pool),
+        pooled_votes,
         answered,
         confidence,
+        votes.most_common(1)[0][1],
     )
-    return TeacherVerdict(track_no, confidence, dict(votes), answered)
+    return TeacherVerdict(track_no, confidence, dict(votes), answered, sorted(pool))
 
 
 # A claim is judged only if the VLM gave at least this many usable answers (a
