@@ -127,9 +127,11 @@ GAP_FILL_MIN_DETS = 5
 # Only holes at least this long are worth spending VLM calls on; a sub-3s hole
 # is tracker flicker and barely visible on the overlay.
 GAP_FILL_MIN_MS = 3_000
-# Hard cap on holes verified per video, so a badly fragmented lesson cannot turn
-# into an unbounded number of API calls.
+# Floor on holes verified per video (a short clip), scaled up with lesson length
+# by the caller and never past the cap; the per-derive call budget in
+# vlm_teacher is what actually bounds the cost.
 GAP_FILL_MAX_HOLES = 6
+GAP_FILL_MAX_HOLES_CAP = 20
 # When several fragments are alive at a handoff and all clear the height and
 # proximity gates, the teacher is the one that MOVES: a fidgety seated student
 # spreads ~0.1, she spreads most of the frame. Candidate cost subtracts a

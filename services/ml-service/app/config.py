@@ -71,6 +71,17 @@ class Settings(BaseSettings):
     # runs on every video and wants coverage even when she's occluded in a frame.
     vlm_verify_teacher: bool = False
     vlm_verify_frames: int = 12
+    # ...but 12 samples across an hour is one every five minutes, which is too
+    # sparse to find a teacher who is often occluded, so the count grows with the
+    # lesson (about one every 2.5 minutes) up to this ceiling.
+    vlm_verify_frames_max: int = 26
+    # Hard ceiling on vision-model calls for ONE derive. Everything downstream of
+    # the teacher pick — verify, veto, trim, gap-fill — scales with how badly she
+    # fragments, which grows with length, and /rederive is synchronous behind a
+    # 255s transport limit. When the budget runs out the remaining calls report
+    # "no answer", which every caller already treats as keep-what-you-have, so the
+    # derive degrades to the geometric result instead of timing out.
+    vlm_max_calls: int = 140
     # REJECT the geometric teacher when the VLM answered at least this many frames
     # but NEVER once pointed at the geometric pick (0 point-in-bbox votes for it) and
     # found no clear teacher of its own. Distinguishes "the VLM says she isn't the

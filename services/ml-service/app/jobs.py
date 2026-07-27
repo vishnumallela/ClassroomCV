@@ -421,6 +421,12 @@ def derive_result(
     # The stitch below runs on whichever teacher survives (un-gated) so a
     # crouch/lean id-steal is still reclaimed.
     settings = get_settings()
+    # One vision-model budget for the whole derive. /rederive is synchronous
+    # behind a 255s transport limit and the verify/veto/trim/gap-fill work grows
+    # with how badly the teacher fragments, so the cap is what keeps a long,
+    # messy lesson from running past it. Running dry degrades to the geometric
+    # result rather than failing.
+    vlm_teacher.begin_derive(settings.vlm_max_calls)
     if settings.vlm_verify_teacher and video_path is not None:
         vlm = vlm_teacher.locate_teacher(video_path, dets_by_track, meta.duration_ms)
         if vlm.track is not None and vlm.track in dets_by_track:
@@ -599,7 +605,17 @@ def derive_result(
                 ]
                 if claimed and meta.duration_ms - claimed[-1] >= teacher_chain.GAP_FILL_MIN_MS:
                     holes.append((claimed[-1], meta.duration_ms))  # she may teach on past the chain
-                for start_ms, end_ms in holes[: teacher_chain.GAP_FILL_MAX_HOLES]:
+                # An hour-long lesson has many more holes than the five-minute
+                # clip this cap was set on, so it scales with the lesson; the
+                # per-derive call budget is what actually bounds the cost.
+                max_holes = min(
+                    teacher_chain.GAP_FILL_MAX_HOLES_CAP,
+                    max(
+                        teacher_chain.GAP_FILL_MAX_HOLES,
+                        round(meta.duration_ms / 60_000 / 3),
+                    ),
+                )
+                for start_ms, end_ms in holes[:max_holes]:
                     before = [
                         d for c in claims for d in c.dets if d.video_ts_ms <= start_ms
                     ]

@@ -234,6 +234,35 @@ def test_pool_fragments_tolerates_a_handoff_overlap():
     assert sorted(V.pool_fragments(votes, frames)) == [12, 13]
 
 
+def test_budget_stops_asking_once_spent(monkeypatch):
+    # A long, badly fragmented lesson must not run past the transport limit.
+    # Once the budget is gone the remaining frames report "fail", which every
+    # caller reads as no signal, so the derive degrades instead of timing out.
+    calls = {"n": 0}
+
+    def _count(*_a, **_kw):
+        calls["n"] += 1
+        return ("point", (0.5, 0.5))
+
+    monkeypatch.setattr(V, "_ask_answer", _count)
+    V.begin_derive(5)
+    first = V._ask_batch("k", "m", [(i, "b64") for i in range(4)])
+    second = V._ask_batch("k", "m", [(i, "b64") for i in range(10, 14)])
+    V.begin_derive(0)  # leave the module unbudgeted for other tests
+    assert calls["n"] == 5, "only the budgeted calls are made"
+    assert len(first) == 4 and len(second) == 4, "every frame still gets an entry"
+    unasked = [v for v in second.values() if v == ("fail", None)]
+    assert len(unasked) == 3, "the unasked frames read as no signal"
+
+
+def test_budget_of_zero_is_unlimited(monkeypatch):
+    monkeypatch.setattr(V, "_ask_answer", lambda *a, **kw: ("absent", None))
+    V.begin_derive(0)
+    out = V._ask_batch("k", "m", [(i, "b64") for i in range(9)])
+    assert len(out) == 9
+    assert all(v == ("absent", None) for v in out.values())
+
+
 def test_point_to_track_picks_containing_box():
     boxes = {1: (0.0, 0.0, 0.2, 0.2), 2: (0.4, 0.4, 0.3, 0.5)}
     assert V._point_to_track(0.5, 0.6, boxes) == 2  # only box 2 contains (0.5,0.6)

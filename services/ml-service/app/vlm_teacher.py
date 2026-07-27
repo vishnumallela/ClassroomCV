@@ -144,6 +144,35 @@ _HTTP_TIMEOUT = 45.0
 _VLM_CONCURRENCY = 4
 
 
+# Per-derive call budget. The ml-service runs one analysis at a time, so a
+# module-level counter is enough; begin_derive resets it at the top of each
+# derive. Exhaustion is not an error — unspent questions simply report "fail",
+# which every caller reads as no signal and keeps what it already had.
+_calls_used = 0
+_calls_budget = 0
+
+
+def begin_derive(budget: int) -> None:
+    """Start a fresh vision-model budget for one derive. 0 disables the cap."""
+    global _calls_used, _calls_budget
+    _calls_used, _calls_budget = 0, max(0, budget)
+
+
+def calls_used() -> int:
+    return _calls_used
+
+
+def _take(n: int) -> int:
+    """Reserve up to n calls, returning how many the budget allows."""
+    global _calls_used
+    if not _calls_budget:
+        _calls_used += n
+        return n
+    allowed = max(0, min(n, _calls_budget - _calls_used))
+    _calls_used += allowed
+    return allowed
+
+
 def _ask_batch(
     key: str, model: str, frames: list[tuple[int, str]]
 ) -> dict[int, tuple[str, Optional[tuple[float, float]]]]:
@@ -154,6 +183,19 @@ def _ask_batch(
     raises is recorded as "fail", which every caller treats as no signal.
     """
     out: dict[int, tuple[str, Optional[tuple[float, float]]]] = {}
+    if not frames:
+        return out
+    allowed = _take(len(frames))
+    if allowed < len(frames):
+        logger.info(
+            "VLM budget: %d of %d frames skipped (%d calls used)",
+            len(frames) - allowed,
+            len(frames),
+            _calls_used,
+        )
+        for tag, _b64 in frames[allowed:]:
+            out[tag] = ("fail", None)  # unasked reads as no signal
+        frames = frames[:allowed]
     if not frames:
         return out
     with httpx.Client(timeout=_HTTP_TIMEOUT) as client:
@@ -411,7 +453,14 @@ def locate_teacher(
     all_ts = sorted({d.video_ts_ms for dets in dets_by_track.values() for d in dets})
     if not all_ts:
         return TeacherVerdict(None, 0.0, {}, 0)
-    n = max(1, min(n_frames or s.vlm_verify_frames, len(all_ts)))
+    # Sample density follows the lesson: a fixed dozen frames is plenty for a
+    # five-minute clip but one every five minutes across an hour, too sparse to
+    # locate a teacher who is regularly occluded.
+    want = n_frames or min(
+        s.vlm_verify_frames_max,
+        max(s.vlm_verify_frames, round(duration_ms / 60_000 * 0.4)),
+    )
+    n = max(1, min(want, len(all_ts)))
     lo, hi = duration_ms * 0.1, duration_ms * 0.9
     targets = [lo + (hi - lo) * i / max(1, n - 1) for i in range(n)]
 

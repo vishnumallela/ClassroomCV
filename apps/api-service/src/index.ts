@@ -12,7 +12,12 @@ const app = createApp();
 const server = Bun.serve({
   hostname: env.API_SERVICE__HOST,
   port: env.API_SERVICE__PORT,
-  idleTimeout: 120,
+  // Bun's ceiling is 255s. /rederive is synchronous and its vision-model work
+  // grows with how badly the teacher fragments, so a long lesson needs the
+  // headroom; the ML side keeps itself inside this window with a per-derive
+  // call budget (Settings.vlm_max_calls). A fresh upload is unaffected either
+  // way — /analyze returns 202 and the API polls.
+  idleTimeout: 255,
   // Bun.serve caps request bodies at 128 MB by default, which rejects real
   // classroom recordings with a 413 long before the handler's own size check.
   // Lift it to the app-level upload limit so handleUpload owns the decision.
