@@ -28,8 +28,10 @@ import logging
 import math
 import os
 import tempfile
+import threading
 import urllib.parse
 import urllib.request
+from collections import OrderedDict
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Callable, Iterator, Optional
@@ -316,6 +318,32 @@ _MEDIA_URL_OPENER = urllib.request.build_opener(_AllowlistRedirectHandler)
 # override with MEDIA_MAX_DOWNLOAD_BYTES.
 _MEDIA_MAX_DOWNLOAD_BYTES = int(os.environ.get("MEDIA_MAX_DOWNLOAD_BYTES", 8 * 1024**3))
 _DOWNLOAD_CHUNK = 1024 * 1024
+# A ~900 MB video crossing an SSH tunnel stalls sooner or later — measured: the
+# read timed out after exactly 500 MiB, and with no resume that whole transfer
+# was discarded, which is why zone detection never produced a board on a long
+# lesson. Retry with a Range header from the byte already written.
+_DOWNLOAD_TIMEOUT = 60
+_DOWNLOAD_RETRIES = 5
+
+
+def _content_total(resp) -> Optional[int]:
+    """Total object size from Content-Range (a 206) or Content-Length (a 200).
+
+    Returns None when the response carries neither, in which case the caller
+    cannot detect a truncated stream and accepts what it got.
+    """
+    headers = getattr(resp, "headers", None)
+    if headers is None:
+        return None
+    cr = headers.get("Content-Range")
+    if cr and "/" in cr:
+        tail = cr.rsplit("/", 1)[-1].strip()
+        if tail.isdigit():
+            return int(tail)
+    cl = headers.get("Content-Length")
+    if cl and cl.isdigit():
+        return int(cl)
+    return None
 
 
 def _download_to_temp(url: str) -> str:
@@ -330,22 +358,53 @@ def _download_to_temp(url: str) -> str:
     data_dir = os.environ.get("DATA_DIR")
     tmp_dir = data_dir if data_dir and os.path.isdir(data_dir) else tempfile.gettempdir()
     fd, tmp = tempfile.mkstemp(prefix="mediacache_", suffix=".mp4", dir=tmp_dir)
+    os.close(fd)
+    written = 0
+    total: Optional[int] = None
     try:
-        with os.fdopen(fd, "wb") as out:
+        for attempt in range(_DOWNLOAD_RETRIES):
             # noqa: S310 (host allowlisted, redirects re-validated per hop)
-            with _MEDIA_URL_OPENER.open(url, timeout=30) as resp:
-                remaining = _MEDIA_MAX_DOWNLOAD_BYTES
-                while True:
-                    chunk = resp.read(_DOWNLOAD_CHUNK)
-                    if not chunk:
-                        break
-                    remaining -= len(chunk)
-                    if remaining < 0:
-                        raise ValueError(
-                            "media download exceeds "
-                            f"{_MEDIA_MAX_DOWNLOAD_BYTES} byte cap: {url!r}"
-                        )
-                    out.write(chunk)
+            req = urllib.request.Request(url)
+            if written:
+                req.add_header("Range", f"bytes={written}-")
+            try:
+                with _MEDIA_URL_OPENER.open(req, timeout=_DOWNLOAD_TIMEOUT) as resp:
+                    mode = "ab"
+                    if written and getattr(resp, "status", 200) != 206:
+                        # Server ignored the range: start over rather than
+                        # appending a second copy of the whole file.
+                        written, mode = 0, "wb"
+                    if total is None:
+                        total = _content_total(resp)
+                    with open(tmp, mode) as out:
+                        while True:
+                            chunk = resp.read(_DOWNLOAD_CHUNK)
+                            if not chunk:
+                                break
+                            written += len(chunk)
+                            if written > _MEDIA_MAX_DOWNLOAD_BYTES:
+                                raise ValueError(
+                                    "media download exceeds "
+                                    f"{_MEDIA_MAX_DOWNLOAD_BYTES} byte cap: {url!r}"
+                                )
+                            out.write(chunk)
+                if total is None or written >= total:
+                    return tmp
+                # Short read without an exception is still a truncated file.
+                raise TimeoutError(f"stream ended at {written} of {total} bytes")
+            except (TimeoutError, OSError, urllib.error.URLError) as exc:
+                if attempt == _DOWNLOAD_RETRIES - 1:
+                    raise
+                # A long media transfer over a tunnel stalls sooner or later;
+                # resuming from the byte offset keeps the work already done
+                # instead of restarting a 900 MB download from zero.
+                logger.warning(
+                    "media download stalled at %d/%s bytes (%s); resuming (attempt %d)",
+                    written,
+                    total if total is not None else "?",
+                    exc,
+                    attempt + 2,
+                )
     except Exception:
         try:
             os.unlink(tmp)
@@ -374,6 +433,95 @@ def resolve_video_source(video_path: str) -> tuple[str, bool]:
             )
         return _download_to_temp(video_path), True
     return _validate_video_path(video_path), False
+
+
+# --------------------------------------------------------------------------- #
+# Shared media cache
+# --------------------------------------------------------------------------- #
+# /detect-board, /detect-door and /analyze each used to resolve the video
+# independently, and on a remote worker that means downloading the whole file
+# three times. At 886 MB over an SSH tunnel each fetch takes 3-4 minutes, so the
+# zone endpoints lost a race against the API's request timeout and a long lesson
+# silently ended up with no board zone. One download, shared by every endpoint.
+_media_lock = threading.Lock()
+# key -> (local_path, is_temp). Keyed on the object's IDENTITY, not the URL: a
+# presigned URL carries a fresh signature per request, so the raw URL would miss
+# every time.
+_media_cache: "OrderedDict[str, tuple[str, bool]]" = OrderedDict()
+# Videos are large; hold few. Two lets a rederive of video A run while a fresh
+# analyze of video B is queued without thrashing the download.
+_MEDIA_CACHE_MAX = 2
+
+
+def _media_key(video_path: str) -> str:
+    """Stable identity for a source: the object path, minus any query string."""
+    if video_path.startswith(("http://", "https://")):
+        parts = urllib.parse.urlsplit(video_path)
+        return f"{parts.scheme}://{parts.netloc}{parts.path}"
+    return video_path
+
+
+def _evict_media_locked() -> None:
+    while len(_media_cache) > _MEDIA_CACHE_MAX:
+        _key, (path, is_temp) = _media_cache.popitem(last=False)
+        if is_temp:
+            try:
+                os.unlink(path)
+            except OSError:
+                pass
+
+
+# A GPU box that already holds the media should never fetch it. Point
+# MEDIA_STAGE_DIR at a directory laid out like the object store
+# (<stage>/<video_id>/original.mp4) and every endpoint reads from disk instead
+# of pulling the file across the network. On a tunnelled hybrid setup that is
+# the difference between a 4-minute transfer per request and none at all.
+# Read through Settings, NOT os.environ: the service is configured from a .env
+# that pydantic-settings loads into Settings only, so an os.environ lookup here
+# silently sees nothing and every request falls back to downloading.
+def _stage_dir() -> str:
+    return (get_settings().media_stage_dir or "").strip()
+
+
+def _staged_copy(video_path: str) -> Optional[str]:
+    """Locally staged file for this object, or None."""
+    stage = _stage_dir()
+    if not stage:
+        return None
+    parts = urllib.parse.urlsplit(_media_key(video_path)).path.strip("/").split("/")
+    if len(parts) < 2:
+        return None
+    candidate = os.path.join(stage, parts[-2], parts[-1])
+    return candidate if os.path.isfile(candidate) else None
+
+
+def resolve_video_cached(video_path: str) -> str:
+    """Local path for video_path, downloading at most once per video.
+
+    Callers must NOT unlink the result: the cache owns the temp file and evicts
+    it when a newer video takes its slot. A local path is passed straight
+    through (validated, never copied).
+
+    The download happens under the lock on purpose. Two requests for the same
+    video arriving together would otherwise each fetch their own copy, which is
+    exactly the waste this exists to remove; the endpoints are already
+    serialised by a single analysis worker.
+    """
+    staged = _staged_copy(video_path)
+    if staged is not None:
+        logger.info("media staged locally, no fetch: %s", staged)
+        return staged
+    key = _media_key(video_path)
+    with _media_lock:
+        hit = _media_cache.get(key)
+        if hit is not None and os.path.exists(hit[0]):
+            _media_cache.move_to_end(key)
+            logger.info("media cache hit: %s", key)
+            return hit[0]
+        local, is_temp = resolve_video_source(video_path)
+        _media_cache[key] = (local, is_temp)
+        _evict_media_locked()
+        return local
 
 
 def _is_standing(

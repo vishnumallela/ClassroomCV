@@ -1,6 +1,7 @@
 import * as z from "zod";
 import { getVideo } from "@api/db/queries";
 import { mlDetectBoard, mlDetectDoor } from "@api/lib/ml";
+import { mediaSource } from "@api/lib/media";
 import { base } from "@api/orpc/base";
 
 export const boardRouter = {
@@ -11,7 +12,7 @@ export const boardRouter = {
       if (!video) throw errors.NOT_FOUND();
       try {
         const detect = input.kind === "door" ? mlDetectDoor : mlDetectBoard;
-        const res = await detect(input.id, video.filePath);
+        const res = await detect(input.id, mediaSource(video.filePath));
         return {
           polygon: res.polygon,
           confidence: res.confidence,

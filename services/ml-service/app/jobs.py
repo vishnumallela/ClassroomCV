@@ -219,22 +219,17 @@ def run_pipeline(
 
     cb("detecting", 0.0)
     stage_start = time.perf_counter()
-    # Resolve an allowlisted object-store URL to a local temp (so a remote GPU
-    # worker can fetch the video itself); delete it as soon as detection has
-    # read every frame — merge/derive/write never touch the file.
-    local_path, is_temp = detector.resolve_video_source(video_path)
-    try:
-        meta, detections, hists, embeds = detector.detect_video(
-            local_path,
-            sample_fps=sample_fps,
-            progress_cb=lambda f: cb("detecting", f * 0.8),
-        )
-    finally:
-        if is_temp:
-            try:
-                os.unlink(local_path)
-            except OSError:
-                pass
+    # Resolve an allowlisted object-store URL to a local file so a remote GPU
+    # worker can fetch the video itself. The copy is NOT deleted here: the
+    # vision-model layers in derive read frames from the same video, and the
+    # zone endpoints want it too, so the shared cache keeps one copy and evicts
+    # it when another video needs the slot.
+    local_path = detector.resolve_video_cached(video_path)
+    meta, detections, hists, embeds = detector.detect_video(
+        local_path,
+        sample_fps=sample_fps,
+        progress_cb=lambda f: cb("detecting", f * 0.8),
+    )
     detect_s = time.perf_counter() - stage_start
 
     if not detections:

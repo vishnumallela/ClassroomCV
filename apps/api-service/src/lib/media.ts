@@ -1,3 +1,4 @@
+import { isS3, presignGet } from "@api/lib/storage";
 export interface ProbeResult {
   durationMs: number | null;
   fps: number | null;
@@ -86,4 +87,18 @@ export async function generateThumbnail(
     outPath,
   ]);
   return code === 0;
+}
+
+// The bytes source for ffprobe/ffmpeg/the ML worker. On s3 this is a presigned
+// URL (valid 6 h, long enough for a slow analysis) so nothing downloads the
+// whole video onto the API node: ffprobe reads only the header, ffmpeg only a
+// seeked frame, and the ML worker fetches its own local copy. On local it is
+// just the file path.
+//
+// Every caller that hands a path to the ML service must go through this. A
+// remote GPU worker cannot see the API node's filesystem, so passing filePath
+// straight through makes it reject the request with 400 -- which is how the
+// on-demand zone detector silently stopped working against a pod.
+export function mediaSource(filePath: string): string {
+  return isS3 ? (presignGet(filePath, 6 * 60 * 60) ?? filePath) : filePath;
 }

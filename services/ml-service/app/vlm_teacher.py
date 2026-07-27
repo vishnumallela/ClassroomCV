@@ -161,13 +161,12 @@ _media_cache: dict[str, tuple[str, bool]] = {}
 
 
 def release_media() -> None:
-    """Drop any temp media downloaded for this derive."""
-    for local, is_temp in _media_cache.values():
-        if is_temp:
-            try:
-                os.unlink(local)
-            except OSError:
-                pass
+    """No-op kept for call-site clarity.
+
+    The service-wide cache in detector owns the downloaded file now and evicts
+    it when another video needs the slot, so a derive must not delete it — the
+    zone endpoints and the next analyze reuse the same copy.
+    """
     _media_cache.clear()
 
 
@@ -175,7 +174,7 @@ def _resolve_cached(video_path: str) -> str:
     """Local path for video_path, downloading at most once per derive."""
     hit = _media_cache.get(video_path)
     if hit is None:
-        hit = detector.resolve_video_source(video_path)
+        hit = (detector.resolve_video_cached(video_path), False)
         _media_cache[video_path] = hit
     return hit[0]
 

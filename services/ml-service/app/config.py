@@ -44,6 +44,12 @@ class Settings(BaseSettings):
     # to let the service fetch a video directly from MinIO/S3 by presigned URL,
     # instead of the API node downloading it to a shared filesystem.
     media_url_allowlist: str = ""
+    # Directory holding videos already present on this host, laid out like the
+    # object store (<stage>/<video_id>/original.mp4). When a file is found there
+    # every endpoint reads it from disk instead of fetching the object, which is
+    # what makes a remote GPU worker usable over a tunnel: otherwise
+    # /detect-board, /detect-door and /analyze each pull the whole video.
+    media_stage_dir: str = ""
     tracker_cfg: str = str(
         Path(__file__).resolve().parent / "trackers" / "classroom_botsort.yaml"
     )

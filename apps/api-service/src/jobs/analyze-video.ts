@@ -12,19 +12,11 @@ import {
   type VideoRow,
 } from "@api/db/queries";
 import { mkdir } from "node:fs/promises";
-import { generateThumbnail, probeVideo } from "@api/lib/media";
+import { generateThumbnail, mediaSource, probeVideo } from "@api/lib/media";
 import { logger } from "@api/lib/logger";
 import { mlDetectBoard, mlDetectDoor, mlGetJob, mlGetJobResult, mlStartAnalysis } from "@api/lib/ml";
-import { isS3, presignGet, putLocalFile } from "@api/lib/storage";
+import { putLocalFile } from "@api/lib/storage";
 
-// The bytes source for ffprobe/ffmpeg/the ML worker. On s3 this is a presigned
-// URL (valid 6 h, long enough for a slow analysis) so nothing downloads the
-// whole video onto the API node: ffprobe reads only the header, ffmpeg only a
-// seeked frame, and the ML worker fetches its own local copy. On local it is
-// just the file path.
-function mediaSource(filePath: string): string {
-  return isS3 ? (presignGet(filePath, 6 * 60 * 60) ?? filePath) : filePath;
-}
 import type { AnalyzeJobData } from "@api/lib/queue";
 
 const POLL_INTERVAL_MS = 5_000;

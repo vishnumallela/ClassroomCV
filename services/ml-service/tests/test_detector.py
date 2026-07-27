@@ -332,3 +332,154 @@ def test_resolve_local_path_passthrough(monkeypatch):
     path, is_temp = D.resolve_video_source(asset)
     assert is_temp is False
     assert path == str(Path(asset).resolve())
+
+
+# --------------------------------------------------------------------------- #
+# Shared media cache
+# --------------------------------------------------------------------------- #
+
+
+def test_media_cache_downloads_once_across_calls(monkeypatch, tmp_path):
+    """/detect-board, /detect-door and /analyze must share one download. Each
+    used to fetch its own copy, which on a remote worker meant pulling the whole
+    video three times and timing the zone endpoints out."""
+    from app import detector as d
+
+    calls = []
+    f = tmp_path / "vid.mp4"
+    f.write_bytes(b"x")
+
+    def fake_resolve(path):
+        calls.append(path)
+        return (str(f), True)
+
+    monkeypatch.setattr(d, "resolve_video_source", fake_resolve)
+    d._media_cache.clear()
+    # the signature differs per request; the object identity does not
+    a = d.resolve_video_cached("http://minio:9000/bucket/v/original.mp4?sig=AAA")
+    b = d.resolve_video_cached("http://minio:9000/bucket/v/original.mp4?sig=BBB")
+    c = d.resolve_video_cached("http://minio:9000/bucket/v/original.mp4?sig=CCC")
+    assert a == b == c == str(f)
+    assert len(calls) == 1, f"expected one download, got {len(calls)}"
+    d._media_cache.clear()
+
+
+def test_media_cache_evicts_and_deletes_the_old_temp(monkeypatch, tmp_path):
+    from app import detector as d
+
+    made = []
+
+    def fake_resolve(path):
+        p = tmp_path / (path.rsplit("/", 2)[1] + ".mp4")
+        p.write_bytes(b"x")
+        made.append(p)
+        return (str(p), True)
+
+    monkeypatch.setattr(d, "resolve_video_source", fake_resolve)
+    monkeypatch.setattr(d, "_MEDIA_CACHE_MAX", 1)
+    d._media_cache.clear()
+    d.resolve_video_cached("http://h/b/one/original.mp4?s=1")
+    d.resolve_video_cached("http://h/b/two/original.mp4?s=1")
+    assert not made[0].exists(), "evicted temp should be deleted"
+    assert made[1].exists(), "current temp must survive"
+    d._media_cache.clear()
+
+
+def test_media_cache_passes_local_paths_through(monkeypatch, tmp_path):
+    """A local path is validated, never copied or cached as a temp."""
+    from app import detector as d
+
+    f = tmp_path / "local.mp4"
+    f.write_bytes(b"x")
+    monkeypatch.setattr(d, "resolve_video_source", lambda p: (p, False))
+    d._media_cache.clear()
+    assert d.resolve_video_cached(str(f)) == str(f)
+    d._media_cache.clear()
+
+
+def test_download_resumes_after_a_stall(monkeypatch, tmp_path):
+    """A long transfer over a tunnel stalls; measured, it died at 500 MiB and the
+    whole download was discarded. The retry must RESUME from the byte already
+    written rather than start again."""
+    from app import detector as d
+
+    body = b"0123456789" * 10  # 100 bytes
+    ranges = []
+
+    class Resp:
+        def __init__(self, start, cut):
+            self._buf = body[start : start + cut] if cut else body[start:]
+            self._i = 0
+            self.status = 206 if start else 200
+            self.headers = {
+                "Content-Length": str(len(self._buf)),
+                "Content-Range": f"bytes {start}-{len(body)-1}/{len(body)}",
+            }
+
+        def read(self, n):
+            if self._i >= len(self._buf):
+                if len(self._buf) < len(body) - 0 and self._i and self._truncated:
+                    raise TimeoutError("stalled")
+                return b""
+            out = self._buf[self._i : self._i + n]
+            self._i += len(out)
+            return out
+
+        _truncated = False
+
+        def __enter__(self):
+            return self
+
+        def __exit__(self, *a):
+            return False
+
+    calls = {"n": 0}
+
+    class Opener:
+        def open(self, req, timeout=None):
+            calls["n"] += 1
+            rng = req.get_header("Range")
+            start = int(rng.split("=")[1].split("-")[0]) if rng else 0
+            ranges.append(start)
+            # first attempt delivers only 40 bytes then ends short
+            return Resp(start, 40 if calls["n"] == 1 else None)
+
+    monkeypatch.setattr(d, "_MEDIA_URL_OPENER", Opener())
+    monkeypatch.setattr(d, "_DOWNLOAD_CHUNK", 16)
+    out = d._download_to_temp("http://h/b/v/original.mp4")
+    assert ranges == [0, 40], f"should resume from byte 40, got {ranges}"
+    assert open(out, "rb").read() == body, "resumed file must equal the original"
+
+
+def test_staged_media_is_used_without_downloading(monkeypatch, tmp_path):
+    """A GPU box that already holds the video must not fetch it. This is what
+    makes a tunnelled hybrid setup usable: no 886 MB transfer per request."""
+    from app import detector as d
+
+    stage = tmp_path / "stage"
+    (stage / "vid-123").mkdir(parents=True)
+    f = stage / "vid-123" / "original.mp4"
+    f.write_bytes(b"x")
+
+    def boom(*a, **k):
+        raise AssertionError("must not download when the media is staged")
+
+    monkeypatch.setattr(d, "_stage_dir", lambda: str(stage))
+    monkeypatch.setattr(d, "resolve_video_source", boom)
+    d._media_cache.clear()
+    got = d.resolve_video_cached("http://minio:9000/bucket/videos/vid-123/original.mp4?sig=A")
+    assert got == str(f)
+
+
+def test_unstaged_media_still_downloads(monkeypatch, tmp_path):
+    from app import detector as d
+
+    stage = tmp_path / "stage"
+    stage.mkdir()
+    f = tmp_path / "dl.mp4"
+    f.write_bytes(b"x")
+    monkeypatch.setattr(d, "_stage_dir", lambda: str(stage))
+    monkeypatch.setattr(d, "resolve_video_source", lambda p: (str(f), True))
+    d._media_cache.clear()
+    assert d.resolve_video_cached("http://h/bucket/videos/other/original.mp4?s=1") == str(f)
+    d._media_cache.clear()

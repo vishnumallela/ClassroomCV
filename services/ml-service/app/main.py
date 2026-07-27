@@ -86,17 +86,12 @@ def detect_board(req: DetectBoardRequest) -> DetectBoardResponse:
     /analyze) and maps its rejection to 400 per the feature contract.
     """
     try:
-        video_path, is_temp = detector.resolve_video_source(req.video_path)
+        # Shared cache: /detect-board, /detect-door and /analyze all want the
+        # same file, and on a remote worker each fetch is the whole video.
+        video_path = detector.resolve_video_cached(req.video_path)
     except ValueError as exc:
         raise HTTPException(status_code=400, detail=str(exc))
-    try:
-        result = board_detect.detect_board(req.video_id, video_path)
-    finally:
-        if is_temp:
-            try:
-                os.unlink(video_path)
-            except OSError:
-                pass
+    result = board_detect.detect_board(req.video_id, video_path)
     return DetectBoardResponse(**result)
 
 
@@ -108,17 +103,12 @@ def detect_door(req: DetectBoardRequest) -> DetectBoardResponse:
     door-shaped geometric scoring (tall, narrow, reaching toward the floor).
     """
     try:
-        video_path, is_temp = detector.resolve_video_source(req.video_path)
+        # Shared cache: /detect-board, /detect-door and /analyze all want the
+        # same file, and on a remote worker each fetch is the whole video.
+        video_path = detector.resolve_video_cached(req.video_path)
     except ValueError as exc:
         raise HTTPException(status_code=400, detail=str(exc))
-    try:
-        result = board_detect.detect_door(req.video_id, video_path)
-    finally:
-        if is_temp:
-            try:
-                os.unlink(video_path)
-            except OSError:
-                pass
+    result = board_detect.detect_door(req.video_id, video_path)
     return DetectBoardResponse(**result)
 
 
