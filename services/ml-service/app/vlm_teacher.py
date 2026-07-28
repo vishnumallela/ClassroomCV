@@ -186,6 +186,20 @@ def begin_derive(budget: int) -> None:
     _calls_used, _calls_budget = 0, max(0, budget)
 
 
+def raise_budget(budget: int) -> None:
+    """Lift the cap for a later stage without resetting what has been spent.
+
+    Verify/veto/trim run first and are per-claim, so on a heavily fragmented
+    lesson they can spend the whole allowance before gap-filling asks its first
+    question — measured: the three earliest holes filled, then 140 calls were
+    gone and a 447-second hole got 22 probes, all skipped. Holding those stages
+    to a share of the budget keeps the most valuable work fundable.
+    """
+    global _calls_budget
+    if budget > _calls_budget:
+        _calls_budget = budget
+
+
 def calls_used() -> int:
     return _calls_used
 
@@ -712,10 +726,13 @@ def _bbox_center(b: dict) -> tuple[float, float]:
 # How often to ask "where is she?" inside a long hole. Every step costs one call,
 # so this trades resolution for budget: 20s over a 7-minute hole is ~22 calls.
 LONG_HOLE_STEP_MS = 20_000
-# How much timeline a single answer is allowed to speak for. Kept below the step
-# so two neighbouring anchors cannot both claim the same stretch, and so a point
-# that drifted onto a neighbour costs seconds rather than the whole window.
-LONG_HOLE_CLAIM_MS = 16_000
+# How much timeline a single answer speaks for. Equal to the step so consecutive
+# anchors TILE the hole: at 16s against a 20s step, anchors at 10s and 30s
+# claimed 2-18s and 22-38s and left 18-22s permanently unlabelled — 4 seconds
+# lost out of every 20, which is what still showed the teacher as a student
+# moments after the head window had been filled. Double-claiming is already
+# impossible because the caller tracks which timestamps are taken.
+LONG_HOLE_CLAIM_MS = LONG_HOLE_STEP_MS
 
 
 def anchor_teacher_in_window(

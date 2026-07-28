@@ -88,6 +88,13 @@ class Settings(BaseSettings):
     # "no answer", which every caller already treats as keep-what-you-have, so the
     # derive degrades to the geometric result instead of timing out.
     vlm_max_calls: int = 140
+    # Upper bound however long the lesson is. 400 calls is roughly $0.24.
+    vlm_max_calls_cap: int = 400
+    # Share of the budget the per-claim stages (verify, veto, trim) may spend
+    # before gap-filling gets the rest. Without this they starve it: on a
+    # 37-minute lesson they consumed all 140 calls and the largest hole -- 447
+    # seconds -- was never probed.
+    vlm_early_stage_share: float = 0.5
     # REJECT the geometric teacher when the VLM answered at least this many frames
     # but NEVER once pointed at the geometric pick (0 point-in-bbox votes for it) and
     # found no clear teacher of its own. Distinguishes "the VLM says she isn't the

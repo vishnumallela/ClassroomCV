@@ -421,7 +421,15 @@ def derive_result(
     # with how badly the teacher fragments, so the cap is what keeps a long,
     # messy lesson from running past it. Running dry degrades to the geometric
     # result rather than failing.
-    vlm_teacher.begin_derive(settings.vlm_max_calls)
+    # Scale the allowance with the lesson: the verify/veto/trim stages are
+    # per-claim and a long video fragments into many more claims. Earlier stages
+    # get only a share of it (see raise_budget) so they cannot spend everything
+    # before gap-filling, which is where the coverage actually comes from.
+    vlm_budget = min(
+        settings.vlm_max_calls_cap,
+        max(settings.vlm_max_calls, round(meta.duration_ms / 60_000 * 8)),
+    )
+    vlm_teacher.begin_derive(round(vlm_budget * settings.vlm_early_stage_share))
     if settings.vlm_verify_teacher and video_path is not None:
         vlm = vlm_teacher.locate_teacher(video_path, dets_by_track, meta.duration_ms)
         if vlm.track is not None and vlm.track in dets_by_track:
@@ -600,6 +608,14 @@ def derive_result(
                 ]
                 if claimed and meta.duration_ms - claimed[-1] >= teacher_chain.GAP_FILL_MIN_MS:
                     holes.append((claimed[-1], meta.duration_ms))  # she may teach on past the chain
+                if claimed and claimed[0] >= teacher_chain.GAP_FILL_MIN_MS:
+                    # ...and she is usually teaching BEFORE the chain picks her
+                    # up. The chain seeds on her most teacher-like fragment and
+                    # its backward walk stops at MAX_CHAIN_GAP_MS, so on a long
+                    # lesson the first minutes stay unclaimed and she shows as a
+                    # student from the opening frame. Short clips never showed
+                    # this because the seed's backward walk reaches their start.
+                    holes.append((0, claimed[0]))
                 # An hour-long lesson has many more holes than the five-minute
                 # clip this cap was set on, so it scales with the lesson; the
                 # per-derive call budget is what actually bounds the cost.
@@ -610,7 +626,14 @@ def derive_result(
                         round(meta.duration_ms / 60_000 / 3),
                     ),
                 )
+                # Gap-fill is the highest-value use of the remaining calls, so
+                # lift the cap back to the full budget for it.
+                vlm_teacher.raise_budget(vlm_budget)
                 claimed_ts = {d.video_ts_ms for c in claims for d in c.dets}
+                # Biggest holes first: the cap and the call budget both bite, and
+                # a 7-minute hole is worth far more than a 4-second one. (In list
+                # order the head window, appended last, could be dropped entirely.)
+                holes.sort(key=lambda h: h[1] - h[0], reverse=True)
                 for start_ms, end_ms in holes[:max_holes]:
                     if end_ms - start_ms >= teacher_chain.LONG_HOLE_MS:
                         # A long hole mixes "she left the room" with "she is here
