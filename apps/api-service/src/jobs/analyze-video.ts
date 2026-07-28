@@ -153,14 +153,19 @@ async function startAnalysisStep(
   return mlStartAnalysis({
     videoId,
     videoPath: mediaSource(video.filePath),
-    // Detection holds every sampled frame's detections in memory until the
-    // post-loop embed, so peak RSS scales with fps x duration x people. A
-    // 37-minute 2560x1440 lesson at 5 fps peaked at 31 GB and was OOM-killed
-    // inside the container's cgroup; 2.5 fps halves that. The activity
-    // classifier was calibrated at ~5 fps, so writing micro-motion is measured
-    // over fewer samples here — revisit once the embed is streamed per-track
-    // rather than accumulated.
-    sampleFps: 2.5,
+    // Back to the rate the activity classifier was calibrated at. It needs
+    // WRITE_MIN_SAMPLES within a one-second window to call writing, which 2.5
+    // fps can barely supply, and a 37-minute lesson duly reported 8 seconds of
+    // board writing — a number nobody believes.
+    //
+    // 2.5 was a workaround for an OOM misattributed to sampling rate: the real
+    // cause was _upper_crop returning a numpy VIEW, so every crop under 224px
+    // pinned its whole decoded 1440p frame and peak RSS grew ~7 GB per 1000
+    // frames until the 28.87 GiB cgroup killed it. Fixed in 3375d6a; the same
+    // lesson then peaked at 5.6 GB. Detection still scales with fps x duration
+    // x people, so 5 fps roughly doubles it — comfortable against the cgroup,
+    // but worth watching memory.peak on the first long run at this rate.
+    sampleFps: 5,
     zones,
     idempotencyKey: `${videoId}:${attemptId ?? "initial"}`,
     runTokens,
