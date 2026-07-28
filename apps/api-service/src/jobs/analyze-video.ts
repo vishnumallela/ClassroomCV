@@ -16,6 +16,7 @@ import { generateThumbnail, mediaSource, probeVideo } from "@api/lib/media";
 import { logger } from "@api/lib/logger";
 import { mlDetectBoard, mlDetectDoor, mlGetJob, mlGetJobResult, mlStartAnalysis } from "@api/lib/ml";
 import { putLocalFile } from "@api/lib/storage";
+import { rederiveFromRaw } from "@api/analysis/rederive";
 
 import type { AnalyzeJobData } from "@api/lib/queue";
 
@@ -232,6 +233,30 @@ async function ingestStep(
   }
 
   await replaceDerived(videoId, result, { markDone: true });
+}
+
+/**
+ * Replay roles/events/analytics from stored detections, no YOLO re-run.
+ *
+ * Runs on the QUEUE rather than inline in the reanalyze HTTP handler. A
+ * 37-minute lesson needs minutes to derive, which no HTTP request survives --
+ * it died at Bun's 300s ceiling and surfaced to the user as "Re-derivation
+ * failed", indistinguishable from the derive genuinely failing. The video's
+ * status carries the progress instead, exactly as a full analysis does.
+ */
+export async function processRederiveJob(job: Job<AnalyzeJobData>): Promise<void> {
+  const { videoId } = job.data;
+  try {
+    await updateStatus(videoId, { status: "deriving", progress: 0.5, error: null });
+    await rederiveFromRaw(videoId);
+  } catch (err) {
+    await updateStatus(videoId, {
+      status: "failed",
+      progress: 0,
+      error: err instanceof Error ? err.message : String(err),
+    });
+    throw err;
+  }
 }
 
 export async function processAnalyzeJob(job: Job<AnalyzeJobData>): Promise<void> {

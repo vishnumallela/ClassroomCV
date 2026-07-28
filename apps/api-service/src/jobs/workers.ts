@@ -2,7 +2,7 @@ import { QueueEvents, Worker } from "bullmq";
 import { JOB_NAMES, QUEUE_NAMES } from "@api/lib/constants";
 import { logger } from "@api/lib/logger";
 import { createBullConnection } from "@api/lib/redis";
-import { processAnalyzeJob } from "@api/jobs/analyze-video";
+import { processAnalyzeJob, processRederiveJob } from "@api/jobs/analyze-video";
 import type { AnalyzeJobData } from "@api/lib/queue";
 
 let worker: Worker<AnalyzeJobData> | undefined;
@@ -14,7 +14,13 @@ export function startWorkers(): void {
   worker = new Worker<AnalyzeJobData>(
     QUEUE_NAMES.VIDEO_ANALYSIS,
     async (job) => {
-      if (job.name === JOB_NAMES.ANALYZE) return processAnalyzeJob(job);
+      if (job.name === JOB_NAMES.ANALYZE) {
+        // Same queue, same concurrency-1 guarantee: a rederive must not run
+        // alongside an analysis of another video, since both drive the single
+        // ML worker.
+        if (job.data.mode === "rederive") return processRederiveJob(job);
+        return processAnalyzeJob(job);
+      }
       throw new Error(`No processor registered for job "${job.name}"`);
     },
     { connection: createBullConnection(), concurrency: 1 },

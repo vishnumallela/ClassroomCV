@@ -5,7 +5,7 @@ Routes per SPEC.md "ML service API":
 - POST /analyze            -> 202 {job_id}, runs in the single worker thread
 - GET  /jobs/{job_id}      -> status/progress/stage/error
 - GET  /jobs/{job_id}/result -> AnalysisResult (404 until done)
-- POST /rederive           -> synchronous re-derive (roles+events) from stored
+- POST /rederive           -> re-derive (roles+events) from stored detection_events
                               detection_events, WITHOUT re-running YOLO
 - POST /detect-board       -> board zone proposal (YOLO-World / SAM 2 chain);
                               400 on bad/missing video_path
@@ -13,6 +13,7 @@ Routes per SPEC.md "ML service API":
 
 from __future__ import annotations
 
+import asyncio
 import os
 
 from fastapi import FastAPI, HTTPException
@@ -153,13 +154,19 @@ async def rederive(req: RederiveRequest) -> dict:
         except Exception:
             track_embeds = {}
         identities = jobs.remerge_from_raw(detections, track_hists, track_embeds)
-    result = jobs.derive_result(
+    # OFF THE EVENT LOOP. derive_result is minutes of synchronous CPU work on a
+    # long lesson; awaiting it inline froze the whole service, /health included,
+    # so the process looked crashed while it was merely busy -- twice diagnosed
+    # as a crash before the blocked-not-dead distinction was spotted. The DB
+    # reads above are genuinely async and stay here.
+    result = await asyncio.to_thread(
+        jobs.derive_result,
         meta,
         detections,
         identities,
         [z.model_dump() for z in req.zones],
-        track_embeds=track_embeds,
-        video_path=info.get("file_path"),
+        track_embeds,
+        info.get("file_path"),
     )
     if detections:
         # Persist the rebuilt identity numbers (including teacher-fragment

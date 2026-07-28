@@ -8,7 +8,7 @@ import {
   wipeDerived,
 } from "@api/db/queries";
 import { rederiveFromRaw } from "@api/analysis/rederive";
-import { enqueueAnalysis } from "@api/lib/queue";
+import { enqueueAnalysis, enqueueRederive } from "@api/lib/queue";
 import { base } from "@api/orpc/base";
 import { toDetailDto } from "@api/router/dto";
 
@@ -21,11 +21,12 @@ export const analysisRouter = {
 
     const settled = video.status === "done" || video.status === "failed";
     if (settled && (await countDetectionEvents(input.id)) > 0) {
-      try {
-        await rederiveFromRaw(input.id);
-      } catch {
-        throw errors.DEPENDENCY_UNAVAILABLE({ message: "Re-derivation failed." });
-      }
+      // Queued, not awaited. Deriving a 37-minute lesson takes minutes, which
+      // outlives the HTTP request: it used to die at 300s and report
+      // "Re-derivation failed" while the derive was still running happily.
+      // The client watches video.status, the same way it does for an analysis.
+      await updateStatus(input.id, { status: "deriving", progress: 0.1, error: null });
+      await enqueueRederive(input.id);
       return { ok: true as const, mode: "rederived" as const };
     }
 
