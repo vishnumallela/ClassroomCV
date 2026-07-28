@@ -100,6 +100,12 @@ async function readErrorBody(res: Response): Promise<string> {
   }
 }
 
+// Every call here is a fast enqueue-or-probe, so the default socket timeout is
+// never in play. It emphatically WAS when a re-derive ran inline: Bun kills a
+// connection that has been quiet for 300s and an AbortSignal cannot extend
+// that, so the request died at five minutes, four times over, while the ML
+// service completed the derive each time and had its answer thrown away. The
+// fix was to stop making long requests (mlStartRederive), not to wait longer.
 async function post<T>(path: string, body: unknown): Promise<T> {
   const res = await fetch(`${BASE}${path}`, {
     method: "POST",
@@ -114,6 +120,14 @@ async function get<T>(path: string): Promise<T> {
   const res = await fetch(`${BASE}${path}`);
   if (!res.ok) throw new Error(`ML ${path} failed: ${res.status} ${await readErrorBody(res)}`);
   return (await res.json()) as T;
+}
+
+export async function mlStartRederive(videoId: string, zones: MlZone[]): Promise<string> {
+  const res = await post<{ job_id: string }>("/rederive/start", {
+    video_id: videoId,
+    zones,
+  });
+  return res.job_id;
 }
 
 export interface StartAnalysisInput {

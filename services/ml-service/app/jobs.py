@@ -138,6 +138,24 @@ def submit(
     return job
 
 
+def submit_rederive(video_id: str, zones: list[dict]) -> Job:
+    """Queue a re-derive and return immediately with a job to poll.
+
+    Same shape as submit(): the caller polls /jobs/{id}. A re-derive of a long
+    lesson takes minutes, and holding an HTTP request open for that does not
+    work -- the client's socket idles out (Bun kills a quiet connection at
+    300s, which an AbortSignal cannot extend), the caller retries, and the work
+    is redone from scratch while each completed derive is thrown away. Sharing
+    the analysis worker also keeps the one-job-at-a-time guarantee.
+    """
+    job = Job(id=str(uuid.uuid4()), video_id=video_id)
+    with _lock:
+        _jobs[job.id] = job
+    _queue.put((job, {"kind": "rederive", "zones": zones}))
+    _ensure_worker()
+    return job
+
+
 def get_job(job_id: str) -> Optional[Job]:
     with _lock:
         return _jobs.get(job_id)
@@ -153,6 +171,14 @@ def _worker_loop() -> None:  # pragma: no cover - exercised via smoke test
             _job.progress = round(min(1.0, max(_job.progress, frac)), 4)
 
         try:
+            if params.get("kind") == "rederive":
+                job.stage = "deriving"
+                job.progress = 0.5
+                result = asyncio.run(rederive_video(job.video_id, params["zones"]))
+                job.result = result
+                job.progress = 1.0
+                job.status = "done"
+                continue
             result = run_pipeline(
                 job.video_id,
                 params["video_path"],
@@ -193,6 +219,52 @@ def _worker_loop() -> None:  # pragma: no cover - exercised via smoke test
             job.status = "failed"
         finally:
             _queue.task_done()
+
+
+async def rederive_video(video_id: str, zones: list[dict]) -> dict:
+    """Rebuild identities/roles/events from stored detections. No YOLO re-run.
+
+    Shared by the /rederive endpoint and the queued rederive job, so both paths
+    derive identically and only differ in how the caller waits.
+    """
+    detections = await db.fetch_detections(video_id)
+    info = await db.fetch_video_info(video_id) or {}
+    max_ts = max((d.video_ts_ms for d in detections), default=0)
+    meta = VideoMeta(
+        duration_ms=int(info.get("duration_ms") or max_ts),
+        fps=float(info.get("fps") or 0.0),
+        width=int(info.get("width") or 0),
+        height=int(info.get("height") or 0),
+    )
+    identities: list[dict] = []
+    track_hists: dict[int, list[float]] = {}
+    track_embeds: dict[int, list[float]] = {}
+    if detections:
+        try:
+            track_hists = await db.fetch_track_hists(video_id)
+        except Exception:
+            track_hists = {}
+        try:
+            track_embeds = await db.fetch_track_embeds(video_id)
+        except Exception:
+            track_embeds = {}
+        identities = remerge_from_raw(detections, track_hists, track_embeds)
+    # Off the event loop when called from the async endpoint; harmless in the
+    # worker thread. derive_result is minutes of CPU on a long lesson.
+    result = await asyncio.to_thread(
+        derive_result,
+        meta,
+        detections,
+        identities,
+        zones,
+        track_embeds,
+        info.get("file_path"),
+    )
+    if detections:
+        await db.replace_detections(
+            video_id, detections, track_hists=track_hists, track_embeds=track_embeds
+        )
+    return result
 
 
 # --------------------------------------------------------------------------- #

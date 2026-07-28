@@ -19,7 +19,13 @@ export const analysisRouter = {
     const video = await getVideo(input.id);
     if (!video) throw errors.NOT_FOUND();
 
-    const settled = video.status === "done" || video.status === "failed";
+    // "deriving" counts as eligible too. Detections already exist by then, so a
+    // re-derive is always the right move -- and if a previous derive was
+    // interrupted the video is STUCK in this state, where treating it as
+    // unsettled silently escalates to a full YOLO re-run and wipes the derived
+    // tables. That is a very expensive answer to "try that again".
+    const settled =
+      video.status === "done" || video.status === "failed" || video.status === "deriving";
     if (settled && (await countDetectionEvents(input.id)) > 0) {
       // Queued, not awaited. Deriving a 37-minute lesson takes minutes, which
       // outlives the HTTP request: it used to die at 300s and report

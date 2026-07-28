@@ -113,78 +113,30 @@ def detect_door(req: DetectBoardRequest) -> DetectBoardResponse:
     return DetectBoardResponse(**result)
 
 
+@app.post("/rederive/start", status_code=202, response_model=AnalyzeAccepted)
+def rederive_start(req: RederiveRequest) -> AnalyzeAccepted:
+    """Queue a re-derive; poll /jobs/{id} exactly as for /analyze.
+
+    The synchronous /rederive below holds the connection for the whole derive,
+    which a long lesson outlives -- the caller's socket idles out and it retries
+    while the completed work is discarded. Prefer this for anything long.
+    """
+    job = jobs.submit_rederive(req.video_id, [z.model_dump() for z in req.zones])
+    return AnalyzeAccepted(job_id=job.id)
+
+
 @app.post("/rederive", response_model=AnalysisResult)
 async def rederive(req: RederiveRequest) -> dict:
     """Re-derive identities + roles + events from stored detection_events.
 
-    Identities are REBUILT from meta.raw_track_id (remerge_from_raw): the
-    stored track_no may come from an older merge (e.g. histogram-driven
-    chimeras), so /rederive is the cheap way to apply merge/role fixes
-    without a 30-40 min YOLO re-run. The refreshed track_no assignment is
-    written back to detection_events through the same transactional replace
-    machinery /analyze uses, keeping stored rows consistent with the
-    returned tracks/events/analytics.
+    SYNCHRONOUS: fine for short clips, but a long lesson takes minutes and the
+    caller's connection will not survive it -- use /rederive/start for those.
     """
     try:
-        detections = await db.fetch_detections(req.video_id)
+        return await jobs.rederive_video(
+            req.video_id, [z.model_dump() for z in req.zones]
+        )
+    except db.VideoDeletedError:
+        raise HTTPException(status_code=409, detail="video was deleted during rederive")
     except Exception as exc:
-        raise HTTPException(status_code=503, detail=f"database unavailable: {exc}")
-    # Zero stored detections is a legitimate outcome of a successful analysis
-    # (e.g. a short clip with no detectable people): derive an empty-but-valid
-    # result instead of erroring, so zone edits on such videos keep working.
-
-    info = await db.fetch_video_info(req.video_id) or {}
-    max_ts = max((d.video_ts_ms for d in detections), default=0)
-    meta = VideoMeta(
-        duration_ms=int(info.get("duration_ms") or max_ts),
-        fps=float(info.get("fps") or 0.0),
-        width=int(info.get("width") or 0),
-        height=int(info.get("height") or 0),
-    )
-    identities: list[dict] = []
-    track_hists: dict[int, list[float]] = {}
-    track_embeds: dict[int, list[float]] = {}
-    if detections:
-        try:
-            track_hists = await db.fetch_track_hists(req.video_id)
-        except Exception:
-            track_hists = {}
-        try:
-            track_embeds = await db.fetch_track_embeds(req.video_id)
-        except Exception:
-            track_embeds = {}
-        identities = jobs.remerge_from_raw(detections, track_hists, track_embeds)
-    # OFF THE EVENT LOOP. derive_result is minutes of synchronous CPU work on a
-    # long lesson; awaiting it inline froze the whole service, /health included,
-    # so the process looked crashed while it was merely busy -- twice diagnosed
-    # as a crash before the blocked-not-dead distinction was spotted. The DB
-    # reads above are genuinely async and stay here.
-    result = await asyncio.to_thread(
-        jobs.derive_result,
-        meta,
-        detections,
-        identities,
-        [z.model_dump() for z in req.zones],
-        track_embeds,
-        info.get("file_path"),
-    )
-    if detections:
-        # Persist the rebuilt identity numbers (including teacher-fragment
-        # absorption applied by derive_result) so detection_events.track_no
-        # matches the tracks/analytics we return.
-        try:
-            await db.replace_detections(
-                req.video_id,
-                detections,
-                track_hists=track_hists,
-                track_embeds=track_embeds,
-            )
-        except db.VideoDeletedError:
-            raise HTTPException(
-                status_code=409, detail="video was deleted during rederive"
-            )
-        except Exception as exc:
-            raise HTTPException(
-                status_code=503, detail=f"database unavailable: {exc}"
-            )
-    return result
+        raise HTTPException(status_code=503, detail=f"rederive failed: {exc}")
