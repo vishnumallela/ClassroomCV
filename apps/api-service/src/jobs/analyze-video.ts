@@ -153,19 +153,19 @@ async function startAnalysisStep(
   return mlStartAnalysis({
     videoId,
     videoPath: mediaSource(video.filePath),
-    // Back to the rate the activity classifier was calibrated at. It needs
-    // WRITE_MIN_SAMPLES within a one-second window to call writing, which 2.5
-    // fps can barely supply, and a 37-minute lesson duly reported 8 seconds of
-    // board writing — a number nobody believes.
+    // 2.5, not 5. Raising it was measured making the whole analysis WORSE on a
+    // 37-minute lesson: every identity came back "unknown" (the role margin
+    // fell 0.117 -> 0.022 against a 0.08 gate, and assign_roles is
+    // all-or-nothing), and the teacher's label sat on a seated child, because
+    // the merge welded her to him. Whether the sampling rate or the image size
+    // (raised at the same time, to 1536) is responsible was never isolated --
+    // so both go back to the configuration that is known to produce a correct
+    // result, and any future change to either moves ONE at a time.
     //
-    // 2.5 was a workaround for an OOM misattributed to sampling rate: the real
-    // cause was _upper_crop returning a numpy VIEW, so every crop under 224px
-    // pinned its whole decoded 1440p frame and peak RSS grew ~7 GB per 1000
-    // frames until the 28.87 GiB cgroup killed it. Fixed in 3375d6a; the same
-    // lesson then peaked at 5.6 GB. Detection still scales with fps x duration
-    // x people, so 5 fps roughly doubles it — comfortable against the cgroup,
-    // but worth watching memory.peak on the first long run at this rate.
-    sampleFps: 5,
+    // The cost is the activity classifier, which wants ~5 fps to see writing
+    // micro-motion. On this lesson that is not costing anything real: the
+    // teacher presents rather than writes, confirmed by watching it.
+    sampleFps: 2.5,
     zones,
     idempotencyKey: `${videoId}:${attemptId ?? "initial"}`,
     runTokens,
