@@ -246,3 +246,132 @@ def test_evicts_a_wrongly_merged_seated_student_fragment():
         dbt[1].append(_d(ts, 30, 1, 0.9, h=0.2, standing=False))  # static short kid
     _claims, evictions = tc.stitch_teacher(1, dbt)
     assert any(f.raw_id == 30 for f, _lo, _hi in evictions)
+
+
+# --------------------------------------------------------------------------- #
+# Reclaiming an eviction
+# --------------------------------------------------------------------------- #
+#
+# Every teacher-identity range the chain does not claim is evicted to a fresh
+# student track, and no later stage can undo it -- the repair stages skip
+# detections already carrying her number, which these still do when they run.
+# So a wrongly-evicted range is where her "out of the room" time comes from.
+
+
+def _vec(*seed):
+    """A unit vector; nearby seeds give a high cosine, distant ones a low one."""
+    import numpy as np
+
+    v = np.zeros(8, dtype=np.float64)
+    for i, s in enumerate(seed):
+        v[i] = s
+    return v / float(np.linalg.norm(v))
+
+
+def _teacher_claims(raw_ids):
+    """Whole-fragment claims, the only kind the appearance reference is built from."""
+    out = []
+    for raw in raw_ids:
+        dets = [_d(ts, raw, 1, 0.2 + 0.5 * ts / 20_000) for ts in range(0, 20_001, 500)]
+        out.append(tc.Claim(tc.Fragment(raw, 1, dets), 0, len(dets)))
+    return out
+
+
+def _model():
+    return tc.fit_height_model(
+        [_d(ts, 10, 1, 0.3) for ts in range(0, 20_001, 500)]
+    )
+
+
+def test_reclaims_her_own_body_from_eviction():
+    # She walks through the hole, teacher-sized, looking like herself, at
+    # timestamps nobody else holds. Refusing this eviction is what keeps her
+    # from being renamed "Student N" while plainly on camera.
+    claims = _teacher_claims([10, 11, 12])
+    embeds = {10: _vec(1, 0.05), 11: _vec(1, 0.04), 12: _vec(1, 0.06), 20: _vec(1, 0.05)}
+    hers = [_d(ts, 20, 1, 0.2 + 0.6 * (ts - 30_000) / 20_000) for ts in range(30_000, 50_001, 500)]
+    keep = tc.reclaimable_evictions(
+        [(tc.Fragment(20, 1, hers), 0, len(hers))], claims, embeds, _model(), set()
+    )
+    assert {ts for _raw, ts in keep} == {d.video_ts_ms for d in hers}
+
+
+def test_refuses_a_stranger_who_walks_the_same_hole():
+    # Same geometry, different person. Appearance is the only thing separating
+    # them, and it must be enough -- this is the chimera the user sees at once.
+    claims = _teacher_claims([10, 11, 12])
+    embeds = {10: _vec(1, 0.05), 11: _vec(1, 0.04), 12: _vec(1, 0.06), 20: _vec(0.2, 1)}
+    other = [_d(ts, 20, 1, 0.2 + 0.6 * (ts - 30_000) / 20_000) for ts in range(30_000, 50_001, 500)]
+    keep = tc.reclaimable_evictions(
+        [(tc.Fragment(20, 1, other), 0, len(other))], claims, embeds, _model(), set()
+    )
+    assert keep == set()
+
+
+def test_only_the_best_match_wins_contested_time():
+    # Two adult-sized fragments cross the same window. At most one is her, so
+    # the weaker match may not ride in behind the stronger one.
+    claims = _teacher_claims([10, 11, 12])
+    embeds = {
+        10: _vec(1, 0.05), 11: _vec(1, 0.04), 12: _vec(1, 0.06),
+        20: _vec(1, 0.05),   # her
+        21: _vec(1, 0.30),   # close enough to pass the floor alone
+    }
+    span = range(30_000, 50_001, 500)
+    hers = [_d(ts, 20, 1, 0.2 + 0.6 * (ts - 30_000) / 20_000) for ts in span]
+    twin = [_d(ts, 21, 1, 0.8 - 0.5 * (ts - 30_000) / 20_000) for ts in span]
+    keep = tc.reclaimable_evictions(
+        [(tc.Fragment(20, 1, hers), 0, len(hers)), (tc.Fragment(21, 1, twin), 0, len(twin))],
+        claims, embeds, _model(), set(),
+    )
+    assert {raw for raw, _ts in keep} == {20}
+
+
+def test_refuses_a_tail_the_stored_embed_cannot_speak_for():
+    # A fragment's CLIP vector is sampled from its opening seconds, so on a tail
+    # eviction it describes the part that was CLAIMED, not the part in question.
+    # With no valid appearance evidence the reclaim fails closed.
+    claims = _teacher_claims([10, 11, 12])
+    embeds = {10: _vec(1, 0.05), 11: _vec(1, 0.04), 12: _vec(1, 0.06), 20: _vec(1, 0.05)}
+    frag = [_d(ts, 20, 1, 0.2 + 0.6 * ts / 60_000) for ts in range(0, 60_001, 500)]
+    tail = len(frag) - 20
+    keep = tc.reclaimable_evictions(
+        [(tc.Fragment(20, 1, frag), tail, len(frag))], claims, embeds, _model(), set()
+    )
+    assert keep == set()
+
+
+def test_subtracts_time_she_already_holds_instead_of_refusing_the_range():
+    # An overlap costs the overlap, not the whole range: a 20s guess from the
+    # anchor must not void a longer appearance-verified reclaim.
+    claims = _teacher_claims([10, 11, 12])
+    embeds = {10: _vec(1, 0.05), 11: _vec(1, 0.04), 12: _vec(1, 0.06), 20: _vec(1, 0.05)}
+    hers = [_d(ts, 20, 1, 0.2 + 0.6 * (ts - 30_000) / 20_000) for ts in range(30_000, 50_001, 500)]
+    held = {d.video_ts_ms for d in hers[:8]}
+    keep = tc.reclaimable_evictions(
+        [(tc.Fragment(20, 1, hers), 0, len(hers))], claims, embeds, _model(), held
+    )
+    assert {ts for _raw, ts in keep} == {d.video_ts_ms for d in hers[8:]}
+
+
+def test_reclaims_nothing_without_enough_reference_fragments():
+    # Too few whole-fragment claims to learn what she looks like -> no reference,
+    # so the gate stays shut rather than guessing.
+    claims = _teacher_claims([10])
+    embeds = {10: _vec(1, 0.05), 20: _vec(1, 0.05)}
+    hers = [_d(ts, 20, 1, 0.2 + 0.6 * (ts - 30_000) / 20_000) for ts in range(30_000, 50_001, 500)]
+    keep = tc.reclaimable_evictions(
+        [(tc.Fragment(20, 1, hers), 0, len(hers))], claims, embeds, _model(), set()
+    )
+    assert keep == set()
+
+
+def test_refuses_a_seated_student_sized_range():
+    # A short static box is a child at a desk however well it scores.
+    claims = _teacher_claims([10, 11, 12])
+    embeds = {10: _vec(1, 0.05), 11: _vec(1, 0.04), 12: _vec(1, 0.06), 20: _vec(1, 0.05)}
+    kid = [_d(ts, 20, 1, 0.9, h=0.18, standing=False) for ts in range(30_000, 50_001, 500)]
+    keep = tc.reclaimable_evictions(
+        [(tc.Fragment(20, 1, kid), 0, len(kid))], claims, embeds, _model(), set()
+    )
+    assert keep == set()

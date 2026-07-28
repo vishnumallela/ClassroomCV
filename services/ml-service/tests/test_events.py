@@ -323,9 +323,29 @@ def test_no_bridge_when_vanish_is_at_the_door():
 
 
 def test_no_bridge_when_gap_too_long():
+    # Past the same-spot window nothing bridges, however still she reappears.
     dets = [_det(ts, 1, x=0.5) for ts in range(0, 10_001, 500)]
-    dets += [_det(ts, 1, x=0.5) for ts in range(30_000, 40_001, 500)]
-    intervals = [[0, 10_000], [30_000, 40_000]]  # 20s gap > bridge window
+    dets += [_det(ts, 1, x=0.5) for ts in range(40_000, 50_001, 500)]
+    intervals = [[0, 10_000], [40_000, 50_000]]  # 30s gap > same-spot window
+    assert bridge_offscreen_gaps(intervals, dets, [DOOR]) == [[0, 10_000], [40_000, 50_000]]
+
+
+def test_bridge_long_gap_when_she_returns_to_the_same_spot():
+    # The back bench the camera cannot cover: she is gone 20s -- too long for
+    # the length-only bridge -- but reappears where she vanished. A door exit
+    # would have had to move her, so this is occlusion, not "out of the room".
+    dets = [_det(ts, 1, x=0.5) for ts in range(0, 10_001, 500)]
+    dets += [_det(ts, 1, x=0.52) for ts in range(30_000, 40_001, 500)]
+    intervals = [[0, 10_000], [30_000, 40_000]]
+    assert bridge_offscreen_gaps(intervals, dets, [DOOR]) == [[0, 40_000]]
+
+
+def test_no_bridge_when_she_returns_somewhere_else():
+    # Same 20s gap, but she comes back across the room: she went somewhere, so
+    # the absence is real and must stay split.
+    dets = [_det(ts, 1, x=0.5) for ts in range(0, 10_001, 500)]
+    dets += [_det(ts, 1, x=0.95) for ts in range(30_000, 40_001, 500)]
+    intervals = [[0, 10_000], [30_000, 40_000]]
     assert bridge_offscreen_gaps(intervals, dets, [DOOR]) == [[0, 10_000], [30_000, 40_000]]
 
 

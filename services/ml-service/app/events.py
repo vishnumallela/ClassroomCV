@@ -33,6 +33,15 @@ BUCKET_MS = 5_000
 # corner desk, out of view), not a door exit: presence is bridged so a walk
 # past the door followed by an off-camera moment is not mislabelled a crossing.
 OFFSCREEN_BRIDGE_MS = 12_000
+# ...and when she reappears WHERE SHE VANISHED, the gap may be longer still.
+# Leaving through a door necessarily displaces her: she must walk to it, and
+# she cannot come back through it to the spot she left. So a return to within
+# SAME_SPOT_MAX_MOVE of the vanishing point, with neither edge at a door, is a
+# blind spot rather than an exit — the near-camera back bench in particular,
+# where the lens simply cannot see her. Measured on real footage the two cases
+# separate cleanly: occlusions displaced her 0.03-0.14, crossings 0.46-0.56.
+SAME_SPOT_BRIDGE_MS = 25_000
+SAME_SPOT_MAX_MOVE = 0.25
 BOARD_EXPAND = 0.12  # 12% of frame (normalized units) on every side
 BOARD_ON_MS = 2_000
 BOARD_OFF_MS = 3_000
@@ -100,6 +109,14 @@ def near_zone(det: Detection, polygon: list[list[float]], expand: float = 0.12) 
 # 2s still covers door-frame occlusion dropping the track a beat early.
 DOOR_WINDOW_MS = 2_000
 DOOR_EXPAND = 0.15
+# The crossing test wants a GENEROUS door (tracking loses people before they
+# reach it), but bridging asks the opposite question — "was she nowhere near
+# the door?" — and the same margin answers it wrongly. expand_bbox adds this to
+# each side in normalized units, so on a real classroom 0.15 turned a door
+# covering 5.2% of the frame into 30.5% of it, putting 41% of the teacher's
+# detections "at the door" and vetoing every bridge. Two questions, two
+# margins: this one just has to exclude standing in the doorway.
+BRIDGE_DOOR_EXPAND = 0.04
 
 
 def door_entry_exit(
@@ -152,17 +169,25 @@ def bridge_offscreen_gaps(
     teacher_dets: list[Detection],
     door_polygons: list[list[list[float]]],
     bridge_ms: int = OFFSCREEN_BRIDGE_MS,
-    expand: float = DOOR_EXPAND,
+    expand: float = BRIDGE_DOOR_EXPAND,
+    same_spot_ms: int = SAME_SPOT_BRIDGE_MS,
+    same_spot_move: float = SAME_SPOT_MAX_MOVE,
 ) -> list[list[int]]:
-    """Merge presence intervals split by a short away-from-door gap.
+    """Merge presence intervals split by an away-from-door gap.
 
     The teacher constantly walks to pupils' desks, and a near-camera corner
     desk sits in the lens blind spot: she vanishes for a few seconds and
     reappears at the same corner without ever touching the door. Left split,
     that gap becomes a spurious exit/enter pair (worse, a walk PAST the door on
-    the way there lands inside the door window). A gap is bridged only when it
-    is short AND the detections bounding it are both clear of every door; a gap
-    whose vanish or reappearance is door-adjacent is a real crossing and kept.
+    the way there lands inside the door window). A gap is bridged only when the
+    detections bounding it are both clear of every door; a gap whose vanish or
+    reappearance is door-adjacent is a real crossing and kept.
+
+    Length alone is a weak test, because a blind spot can hide her for far
+    longer than a dropout. WHERE she comes back is the stronger one: a door
+    exit has to displace her, so reappearing at the spot she vanished from
+    means she never left. Gaps up to same_spot_ms are bridged on that evidence,
+    shorter ones on length alone.
     """
     if not door_polygons or len(intervals) < 2 or not teacher_dets:
         return intervals
@@ -174,13 +199,30 @@ def bridge_offscreen_gaps(
             near_zone(dets[i], p, expand) for p in door_polygons
         )
 
+    def center(i: int) -> Optional[tuple[float, float]]:
+        if not 0 <= i < len(dets):
+            return None
+        b = dets[i].bbox
+        return b["x"] + b["w"] / 2.0, b["y"] + b["h"] / 2.0
+
     merged = [list(intervals[0])]
     for start, end in intervals[1:]:
         prev_end = merged[-1][1]
         gap = start - prev_end
-        vanished_at_door = at_door(bisect_right(ts, prev_end) - 1)
-        appeared_at_door = at_door(bisect_left(ts, start))
-        if 0 < gap <= bridge_ms and not vanished_at_door and not appeared_at_door:
+        i_before = bisect_right(ts, prev_end) - 1
+        i_after = bisect_left(ts, start)
+        if gap <= 0 or at_door(i_before) or at_door(i_after):
+            merged.append([start, end])
+            continue
+        bridge = gap <= bridge_ms
+        if not bridge and gap <= same_spot_ms:
+            a, b = center(i_before), center(i_after)
+            bridge = (
+                a is not None
+                and b is not None
+                and math.hypot(a[0] - b[0], a[1] - b[1]) <= same_spot_move
+            )
+        if bridge:
             merged[-1][1] = end
         else:
             merged.append([start, end])

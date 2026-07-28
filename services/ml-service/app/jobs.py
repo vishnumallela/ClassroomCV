@@ -676,6 +676,25 @@ def derive_result(
                             )
                             break
 
+            # RECLAIM BEFORE EVICTING. Every teacher-identity range the chain
+            # did not claim goes to a fresh student track, and nothing later can
+            # undo that: both repair stages skip detections already carrying her
+            # number, and these still do when those stages run. So the vision
+            # model looks straight at her, finds no eligible box, claims
+            # nothing, and only afterwards is she renamed. Measured on a 37-min
+            # lesson: 531 detections of her own body, sitting inside the two
+            # largest stretches the dashboard painted "out of the room".
+            # Refusing an eviction is strictly additive — the detections already
+            # carry her number, so keeping one takes nothing from anyone else.
+            teacher_ts = {d.video_ts_ms for c in claims for d in c.dets}
+            teacher_ts |= {d.video_ts_ms for cand in filled for d in cand}
+            reclaimed = teacher_chain.reclaimable_evictions(
+                evictions,
+                claims,
+                embeds_by_raw,
+                teacher_chain.fit_height_model([d for c in claims for d in c.dets]),
+                teacher_ts,
+            )
             next_no = max(dets_by_track, default=0) + 1
             for dets_out in dropped:
                 for d in dets_out:
@@ -683,7 +702,14 @@ def derive_result(
                 roles_map[next_no] = ("student", None)
                 next_no += 1
             for frag, lo, hi in evictions:
-                for d in frag.dets[lo:hi]:
+                out = [
+                    d
+                    for d in frag.dets[lo:hi]
+                    if (frag.raw_id, d.video_ts_ms) not in reclaimed
+                ]
+                if not out:
+                    continue  # wholly reclaimed: already carries teacher_no
+                for d in out:
                     d.track_no = next_no
                 roles_map[next_no] = ("student", None)
                 next_no += 1
@@ -711,11 +737,13 @@ def derive_result(
                 no: role for no, role in roles_map.items() if no in dets_by_track
             }
             logger.info(
-                "teacher chain: %d claim(s) %s, %d evicted range(s) from track %d",
+                "teacher chain: %d claim(s) %s, %d evicted range(s) from track %d, "
+                "%d det(s) reclaimed from eviction",
                 len(claims),
                 [(c.fragment.raw_id, c.fragment.dets[c.from_idx].video_ts_ms) for c in claims],
                 len(evictions),
                 teacher_no,
+                len(reclaimed),
             )
             features = roles.compute_features(
                 dets_by_track,

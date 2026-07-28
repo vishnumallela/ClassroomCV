@@ -148,6 +148,32 @@ MOBILITY_REWARD = 0.35
 # reach cos 0.93), so they only ever veto, mirroring merge.EMBED_VETO_COS.
 EMBED_VETO_COS = 0.35
 
+# --- reclaiming an eviction ------------------------------------------------
+# The chain evicts every teacher-identity range it did not claim to a FRESH
+# student track, and nothing downstream can undo it: both repair stages skip
+# detections already carrying the teacher's number, and at the moment they run
+# these still do. So the vision model looks straight at her, finds no eligible
+# box, claims nothing, and only afterwards is she renamed "Student N" — which
+# is what paints her "out of the room" while she is plainly on camera.
+#
+# An eviction may therefore be REFUSED, but only on evidence strong enough that
+# a wrongly-evicted student is not handed the teacher's label. ADMISSION NEEDS
+# ALL of: teacher-sized, moving, no timestamp she already holds (nobody is two
+# boxes at once), and an appearance match above a floor calibrated on THIS
+# lesson. Overlapping candidates then compete, best match first, because at any
+# instant at most one of them can be her.
+RECLAIM_MIN_REF_FRAGMENTS = 3  # fewer than this -> no reference, reclaim nothing
+# Her own fully-claimed fragments, scored leave-one-out, define "looks like
+# her"; the clamp keeps one freak fragment from opening the gate or sealing it.
+RECLAIM_FLOOR_MIN = 0.88
+RECLAIM_FLOOR_MAX = 0.95
+# A fragment's stored CLIP vector is sampled from its FIRST ~10s of crops
+# (detector caps the sample), so it describes only the fragment's opening. A
+# range starting later than this is exactly the case the vector cannot speak
+# for -- notably a TAIL eviction, whose embed describes the claimed head -- and
+# with no other appearance evidence the reclaim fails CLOSED.
+RECLAIM_EMBED_VALID_MS = 10_000
+
 
 def _center(d: Detection) -> tuple[float, float]:
     return d.bbox["x"] + d.bbox["w"] / 2.0, d.bbox["y"] + d.bbox["h"] / 2.0
@@ -439,6 +465,109 @@ def _embed_ok(
     if emb is None:
         return True
     return float(np.dot(teacher_embed, emb)) >= EMBED_VETO_COS
+
+
+def teacher_reference_embed(
+    claims: list[Claim],
+    embeds_by_raw: Optional[dict[int, np.ndarray]],
+) -> tuple[Optional[np.ndarray], float]:
+    """Her appearance, and how close a stranger may come, learned per lesson.
+
+    Built only from fragments the chain claimed WHOLE: a partial claim means
+    the tracker id was shared with someone else, so its stored vector is a
+    blend and would poison the reference.
+
+    The floor is leave-one-out: score each of her own fragments against the
+    median of the others and take the worst. That is the loosest she ever
+    looks to herself, so anything below it is not her. A fixed threshold cannot
+    do this job -- absolute cosine drifts with lighting and camera, and on this
+    footage strangers reach 0.93 -- but the SPREAD of one person around their
+    own median is stable within a lesson.
+    """
+    if not embeds_by_raw:
+        return None, 0.0
+    whole = {
+        c.fragment.raw_id
+        for c in claims
+        if c.from_idx == 0 and c.to_idx in (None, len(c.fragment.dets))
+    }
+    vecs = {r: embeds_by_raw[r] for r in whole if embeds_by_raw.get(r) is not None}
+    if len(vecs) < RECLAIM_MIN_REF_FRAGMENTS:
+        return None, 0.0
+
+    def _median_unit(arrs: list[np.ndarray]) -> Optional[np.ndarray]:
+        m = np.median(np.stack(arrs), axis=0)
+        n = float(np.linalg.norm(m))
+        return m / n if n > 0 else None
+
+    ref = _median_unit(list(vecs.values()))
+    if ref is None:
+        return None, 0.0
+    floor = 1.0
+    for raw_id, emb in vecs.items():
+        others = [v for r, v in vecs.items() if r != raw_id]
+        rest = _median_unit(others)
+        if rest is None:
+            continue
+        floor = min(floor, float(np.dot(rest, emb)))
+    return ref, min(RECLAIM_FLOOR_MAX, max(RECLAIM_FLOOR_MIN, floor))
+
+
+def reclaimable_evictions(
+    evictions: list[tuple[Fragment, int, int]],
+    claims: list[Claim],
+    embeds_by_raw: Optional[dict[int, np.ndarray]],
+    model: HeightModel,
+    teacher_ts: set[int],
+) -> set[tuple[int, int]]:
+    """(raw_id, ts) pairs among the evictions that are demonstrably still her.
+
+    Returns what should NOT be evicted. Refusing an eviction is strictly
+    additive -- the detections already carry her track number at this point, so
+    keeping one never takes a detection away from anyone.
+
+    Timestamps she already holds are SUBTRACTED rather than disqualifying the
+    whole range: a 20s guess from the anchor overlapping one end of a 60s
+    verified range should cost that overlap, not the range.
+    """
+    ref, floor = teacher_reference_embed(claims, embeds_by_raw)
+    if ref is None or not embeds_by_raw:
+        return set()
+
+    cands: list[tuple[float, int, set[int]]] = []
+    for frag, lo, hi in evictions:
+        sub = [d for d in frag.dets[lo:hi] if d.video_ts_ms not in teacher_ts]
+        if len(sub) < MIN_CLAIM_DETS:
+            continue
+        # She walks and she is adult-sized; a seated child fails both.
+        if float(np.mean([model.ratio(d) for d in sub])) < START_RATIO:
+            continue
+        if _seated_static(Fragment(frag.raw_id, frag.host_track_no, sub), 0):
+            continue
+        # The stored vector only speaks for the fragment's opening seconds.
+        if frag.dets[lo].video_ts_ms - frag.first_ms > RECLAIM_EMBED_VALID_MS:
+            continue
+        emb = embeds_by_raw.get(frag.raw_id)
+        if emb is None:
+            continue
+        cos = float(np.dot(ref, emb))
+        if cos < floor:
+            continue
+        cands.append((cos, frag.raw_id, {d.video_ts_ms for d in sub}))
+
+    # At any instant only one of these can be her, so overlapping candidates
+    # compete and the best match wins the contested time outright. This is what
+    # stops a second adult-sized fragment in the same window riding in behind a
+    # genuine reclaim.
+    keep: set[tuple[int, int]] = set()
+    taken: set[int] = set(teacher_ts)
+    for cos, raw_id, tss in sorted(cands, key=lambda c: -c[0]):
+        free = tss - taken
+        if len(free) < MIN_CLAIM_DETS:
+            continue
+        keep |= {(raw_id, ts) for ts in free}
+        taken |= free
+    return keep
 
 
 def build_fragments(dets_by_track: dict[int, list[Detection]]) -> list[Fragment]:
