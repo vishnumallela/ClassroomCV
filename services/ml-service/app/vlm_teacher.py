@@ -892,7 +892,14 @@ def anchor_teacher_in_window(
         }
         idx = _point_to_track(pt[0], pt[1], boxes)
         if idx is None:
-            continue  # she is visible but nothing was detected there
+            # She is visible and the model found her, but no box is under the
+            # point. Measured on a 37-minute lesson: 16 of 50 probes, 310.8s of
+            # timeline. Every time, the nearest boxes were seated children
+            # (height ratio 0.23-0.57 against her 0.80+) -- she is simply not
+            # DETECTED in those frames, so there is nothing here to claim and
+            # loosening the point test would only ever label a child. The lever
+            # is detector recall (imgsz, sampling rate), not this mapping.
+            continue
         seed = here[idx]
         frag = by_raw.get(seed.raw_track_id, [])
         at = next(
@@ -907,12 +914,12 @@ def anchor_teacher_in_window(
             # No model, or a seed too doubtful to grow from. Fall back to the
             # old fixed window: its edges are arbitrary, but it is what shipped,
             # so this can only ever place boundaries better, never claim less.
+            # Scoped to the fragment, not the merged track: a merged track can
+            # hold two fragments alive at once, and claiming by track put two
+            # boxes on her at the same instant (probe 130.0s claimed raw290 and
+            # raw278 for 130.4s). One body per answer.
             lo, hi = ts - LONG_HOLE_CLAIM_MS // 2, ts + LONG_HOLE_CLAIM_MS // 2
-            span = [
-                d
-                for d in dets_by_track.get(seed.track_no, [])
-                if lo <= d.video_ts_ms <= hi
-            ]
+            span = [d for d in frag if lo <= d.video_ts_ms <= hi]
         got = [
             d
             for d in span
