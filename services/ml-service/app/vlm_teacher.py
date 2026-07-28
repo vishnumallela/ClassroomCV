@@ -726,13 +726,89 @@ def _bbox_center(b: dict) -> tuple[float, float]:
 # How often to ask "where is she?" inside a long hole. Every step costs one call,
 # so this trades resolution for budget: 20s over a 7-minute hole is ~22 calls.
 LONG_HOLE_STEP_MS = 20_000
-# How much timeline a single answer speaks for. Equal to the step so consecutive
-# anchors TILE the hole: at 16s against a 20s step, anchors at 10s and 30s
-# claimed 2-18s and 22-38s and left 18-22s permanently unlabelled — 4 seconds
-# lost out of every 20, which is what still showed the teacher as a student
-# moments after the head window had been filled. Double-claiming is already
-# impossible because the caller tracks which timestamps are taken.
+# How much timeline a single answer speaks for when we cannot do better (no
+# height model). A clock is the wrong unit — its edges fall wherever 10 seconds
+# happens to land, which is mid-stride through a body, and the label changes
+# there for no physical reason. See _anchor_segment for the unit actually used.
 LONG_HOLE_CLAIM_MS = LONG_HOLE_STEP_MS
+
+# --- what one answer speaks for -------------------------------------------
+# An answer identifies a BODY at an instant, so it should speak for as much of
+# that body's continuous trajectory as remains recognisable — bounded by the
+# raw tracker fragment, since that is the only place continuity is even
+# defined. It must NOT speak for the whole fragment: BoT-SORT's box migrates,
+# ballooning over 1-3 frames off a seated child onto the teacher as she walks
+# past, so a fragment can hold two people (raw1967 is a child for 1718
+# detections and her for 51). Whole-fragment claiming was measured at ~5700
+# student detections handed to the teacher.
+#
+# The stop rules are calibrated, not guessed. Seeding at all 299 teacher-side
+# detections of the six known migrating fragments and asking how many runs
+# reach the other person:
+#   sample-gap alone .................. 271-276 of 299 cross (up to 935 dets)
+#   + height ratio .....................  38 of 299, worst 1 detection
+#   + height band ......................   0 of 299
+# The gap rule alone is therefore useless as a safety property; the height
+# gates are load-bearing. A one-frame occlusion must not cut a run, so a few
+# failing samples are bridged, but a SUSTAINED failure ends it.
+# That zero-crossing result was measured seeding on detections that are
+# SOLIDLY hers (ratio >= 0.80), and it only holds for those. Seeding anywhere
+# teacher-ish was measured adding 86 student detections, because a seed part
+# way up a migration ramp grows in the wrong direction. So the seed is judged
+# strictly and the growth leniently, and a seed that fails simply falls back to
+# the old fixed window — never worse than before it, better where it is sure.
+ANCHOR_MAX_GAP_MS = 2_000  # a longer silence is not one continuous trajectory
+ANCHOR_SEED_RATIO = 0.80  # a seed must be unambiguously teacher-sized
+ANCHOR_MIN_RATIO = 0.60  # ...but the run may follow her down to here
+ANCHOR_H_BAND = 0.15  # |h - running median| a body may vary within a run
+ANCHOR_MISS_TOLERANCE = 2  # consecutive failing samples bridged, not crossed
+
+
+def _anchor_segment(
+    frag: list[Detection],
+    seed_idx: int,
+    model,
+    lo_ms: int,
+    hi_ms: int,
+) -> list[Detection]:
+    """One body's continuous run around frag[seed_idx], inside its own fragment.
+
+    `frag` is a single raw tracker id's detections, ts-sorted; `model` answers
+    .ratio(det) = observed height / height expected of the teacher at that
+    depth. Returns [] when the seed itself is not teacher-sized, which is the
+    correct refusal: at one real anchor point the model pointed into a corner
+    child's box, and claiming a clock-window around it would have labelled him.
+    """
+    if model is None or not frag:
+        return []
+    if model.ratio(frag[seed_idx]) < ANCHOR_SEED_RATIO:
+        return []
+    keep = [seed_idx]
+    heights = [frag[seed_idx].bbox["h"]]
+    for step in (-1, 1):
+        pending: list[int] = []
+        i = seed_idx + step
+        while 0 <= i < len(frag):
+            d = frag[i]
+            if not lo_ms <= d.video_ts_ms <= hi_ms:
+                break
+            if abs(d.video_ts_ms - frag[i - step].video_ts_ms) > ANCHOR_MAX_GAP_MS:
+                break
+            median = sorted(heights)[len(heights) // 2]
+            if (
+                model.ratio(d) >= ANCHOR_MIN_RATIO
+                and abs(d.bbox["h"] - median) <= ANCHOR_H_BAND
+            ):
+                keep.extend(pending)  # bridge the occlusion we walked over
+                keep.append(i)
+                heights.append(d.bbox["h"])
+                pending = []
+            else:
+                pending.append(i)
+                if len(pending) > ANCHOR_MISS_TOLERANCE:
+                    break  # sustained: this is where the body stops being hers
+            i += step
+    return [frag[i] for i in sorted(keep)]
 
 
 def anchor_teacher_in_window(
@@ -743,6 +819,7 @@ def anchor_teacher_in_window(
     end_ms: int,
     claimed_ts: Optional[set[int]] = None,
     step_ms: int = LONG_HOLE_STEP_MS,
+    height_model=None,
 ) -> list[Detection]:
     """Find the teacher inside a long hole and return the detections to claim.
 
@@ -773,6 +850,15 @@ def anchor_teacher_in_window(
     if not by_ts:
         return []
     stored = sorted(by_ts)
+    # Continuity is a property of the RAW tracker fragment, not of the merged
+    # identity: a merged track can hold several fragments, so claiming "this
+    # track, for 20 seconds" can pull in more than one person at once.
+    by_raw: dict[int, list[Detection]] = {}
+    for dets in dets_by_track.values():
+        for d in dets:
+            by_raw.setdefault(d.raw_track_id, []).append(d)
+    for lst in by_raw.values():
+        lst.sort(key=lambda d: d.video_ts_ms)
 
     local_path = _resolve_cached(video_path)
     shots: list[tuple[int, str]] = []
@@ -799,21 +885,38 @@ def anchor_teacher_in_window(
             continue
         if status != "point":
             continue
+        here = by_ts.get(ts, [])
         boxes = {
-            d.track_no: (d.bbox["x"], d.bbox["y"], d.bbox["w"], d.bbox["h"])
-            for d in by_ts.get(ts, [])
-            if d.track_no is not None
+            i: (d.bbox["x"], d.bbox["y"], d.bbox["w"], d.bbox["h"])
+            for i, d in enumerate(here)
         }
-        hit = _point_to_track(pt[0], pt[1], boxes)
-        if hit is None:
+        idx = _point_to_track(pt[0], pt[1], boxes)
+        if idx is None:
             continue  # she is visible but nothing was detected there
-        lo, hi = ts - LONG_HOLE_CLAIM_MS // 2, ts + LONG_HOLE_CLAIM_MS // 2
+        seed = here[idx]
+        frag = by_raw.get(seed.raw_track_id, [])
+        at = next(
+            (i for i, d in enumerate(frag) if d.video_ts_ms == seed.video_ts_ms), None
+        )
+        span = (
+            _anchor_segment(frag, at, height_model, start_ms, end_ms)
+            if at is not None
+            else []
+        )
+        if not span:
+            # No model, or a seed too doubtful to grow from. Fall back to the
+            # old fixed window: its edges are arbitrary, but it is what shipped,
+            # so this can only ever place boundaries better, never claim less.
+            lo, hi = ts - LONG_HOLE_CLAIM_MS // 2, ts + LONG_HOLE_CLAIM_MS // 2
+            span = [
+                d
+                for d in dets_by_track.get(seed.track_no, [])
+                if lo <= d.video_ts_ms <= hi
+            ]
         got = [
             d
-            for d in dets_by_track.get(hit, [])
-            if lo <= d.video_ts_ms <= hi
-            and start_ms <= d.video_ts_ms <= end_ms
-            and d.video_ts_ms not in taken
+            for d in span
+            if start_ms <= d.video_ts_ms <= end_ms and d.video_ts_ms not in taken
         ]
         if got:
             anchored += 1

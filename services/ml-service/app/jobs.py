@@ -634,6 +634,16 @@ def derive_result(
                 # a 7-minute hole is worth far more than a 4-second one. (In list
                 # order the head window, appended last, could be dropped entirely.)
                 holes.sort(key=lambda h: h[1] - h[0], reverse=True)
+                # What "teacher-sized" means at each depth in this room, fit on
+                # the timeline the chain is confident about. Anchoring needs it
+                # to tell where a body stops being hers: without it a claim can
+                # only speak for a fixed slice of clock, whose edges fall
+                # mid-stride and rename her for no physical reason.
+                anchor_model = (
+                    teacher_chain.fit_height_model([d for c in claims for d in c.dets])
+                    if claims
+                    else None
+                )
                 for start_ms, end_ms in holes[:max_holes]:
                     if end_ms - start_ms >= teacher_chain.LONG_HOLE_MS:
                         # A long hole mixes "she left the room" with "she is here
@@ -646,6 +656,7 @@ def derive_result(
                             start_ms,
                             end_ms,
                             claimed_ts,
+                            height_model=anchor_model,
                         )
                         if got:
                             filled.append(got)

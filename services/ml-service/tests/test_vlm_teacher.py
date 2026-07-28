@@ -650,3 +650,89 @@ def test_long_hole_never_reclaims_an_already_claimed_frame(monkeypatch):
         assert got == [], "frames already claimed must not be taken twice"
     finally:
         get_settings.cache_clear()
+
+
+# --------------------------------------------------------------------------- #
+# What one answer speaks for (_anchor_segment)
+# --------------------------------------------------------------------------- #
+#
+# An answer identifies a body at an instant. Claiming a fixed slice of CLOCK
+# around it puts the label boundary wherever ten seconds happens to land --
+# mid-stride through a body, which is why the teacher's label flipped to
+# "Student N" and back with nothing physical happening at the boundary.
+# Claiming the whole raw fragment is the opposite error: the tracker's box
+# migrates off a seated child onto her as she walks past, so a fragment can
+# hold two people.
+
+
+class _FlatModel:
+    """Teacher-sized means h ~= 0.40 here, at any depth."""
+
+    def ratio(self, d):
+        return d.bbox["h"] / 0.40
+
+
+def _frag(specs):
+    """[(ts, h)] -> one raw fragment's ts-sorted detections."""
+    return [_det(ts, 7, 0.5, 0.5, h=h) for ts, h in specs]
+
+
+def test_segment_claims_the_whole_continuous_body():
+    frag = _frag([(t, 0.40) for t in range(0, 20_001, 400)])
+    got = V._anchor_segment(frag, len(frag) // 2, _FlatModel(), 0, 20_000)
+    assert len(got) == len(frag)
+
+
+def test_segment_stops_at_a_tracker_box_migration():
+    # The real shape: the box sits on a seated child, balloons over three
+    # frames, and lands on the teacher. Seeded on HER side it must not walk
+    # back down the ramp onto him -- this is the ~5700-detection error.
+    child = [(t, 0.25) for t in range(0, 10_001, 400)]
+    ramp = [(10_400, 0.30), (10_800, 0.35)]
+    teacher = [(t, 0.42) for t in range(11_200, 20_001, 400)]
+    frag = _frag(child + ramp + teacher)
+    seed = len(child) + len(ramp) + 5
+    got = V._anchor_segment(frag, seed, _FlatModel(), 0, 20_000)
+    assert got, "should claim her side"
+    assert min(d.video_ts_ms for d in got) >= 10_400
+    assert all(d.bbox["h"] >= 0.30 for d in got), "walked down onto the child"
+
+
+def test_segment_refuses_a_seed_that_is_not_teacher_sized():
+    # One real anchor pointed into a corner child's box; a clock window around
+    # it would have labelled him teacher for twenty seconds.
+    frag = _frag([(t, 0.15) for t in range(0, 20_001, 400)])
+    assert V._anchor_segment(frag, 10, _FlatModel(), 0, 20_000) == []
+
+
+def test_segment_bridges_a_brief_occlusion():
+    # A sample or two of a collapsed box is someone passing in front of her,
+    # not the end of her trajectory: bridge it, and keep going.
+    specs = [(t, 0.40) for t in range(0, 20_001, 400)]
+    specs[25] = (specs[25][0], 0.15)
+    frag = _frag(specs)
+    got = V._anchor_segment(frag, 10, _FlatModel(), 0, 20_000)
+    assert len(got) == len(frag), "a one-frame dip must not cut the run"
+
+
+def test_segment_stops_at_a_sustained_collapse():
+    specs = [(t, 0.40) for t in range(0, 10_001, 400)]
+    specs += [(t, 0.15) for t in range(10_400, 20_001, 400)]
+    frag = _frag(specs)
+    got = V._anchor_segment(frag, 5, _FlatModel(), 0, 20_000)
+    assert max(d.video_ts_ms for d in got) < 12_000
+
+
+def test_segment_stops_at_a_break_in_tracking():
+    # Either side of a long silence is not one continuous trajectory.
+    frag = _frag([(t, 0.40) for t in range(0, 5_001, 400)]
+                 + [(t, 0.40) for t in range(20_000, 25_001, 400)])
+    got = V._anchor_segment(frag, 3, _FlatModel(), 0, 25_000)
+    assert max(d.video_ts_ms for d in got) <= 5_000
+
+
+def test_segment_stays_inside_the_hole():
+    frag = _frag([(t, 0.40) for t in range(0, 40_001, 400)])
+    got = V._anchor_segment(frag, 50, _FlatModel(), 10_000, 30_000)
+    assert min(d.video_ts_ms for d in got) >= 10_000
+    assert max(d.video_ts_ms for d in got) <= 30_000
