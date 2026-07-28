@@ -27,6 +27,7 @@ from __future__ import annotations
 import logging
 import math
 import os
+import re
 import tempfile
 import threading
 import urllib.parse
@@ -225,13 +226,52 @@ def _reset_tracker(model) -> None:
         logger.warning("failed to reset tracker state", exc_info=True)
 
 
-def _track_frame(model, frame: np.ndarray, device: str):
+# How long the tracker keeps a lost person re-findable, IN SECONDS.
+#
+# BoT-SORT counts this in FRAMES IT SEES (`max_frames_lost = track_buffer`),
+# and it only ever sees our SAMPLED frames — so a fixed track_buffer silently
+# means a different wall-clock tolerance at every sampling rate. The shipped 30
+# was 12s at 2.5 fps and became 6s when the rate was raised to 5, halving how
+# long she survives being walked in front of.
+#
+# That one number cascaded through the whole pipeline on a 37-minute lesson:
+# raw fragments 805 -> 1547, the teacher's own median fragment 26.4s -> 8.8s,
+# her body scattered across 14 identities instead of 1, the role-margin
+# collapsing 0.117 -> 0.022 against a 0.08 gate (so EVERY identity came back
+# "unknown"), and the merge welding her to a seated child in the corner.
+# Sampling rate must not change what the tracker believes about people.
+TRACK_LOST_SECONDS = 12.0
+
+
+def _tracker_cfg_for(sample_fps: float) -> str:
+    """Path to a tracker config whose track_buffer holds TRACK_LOST_SECONDS."""
+    base = Path(get_settings().tracker_cfg)
+    buffer_frames = max(1, round(TRACK_LOST_SECONDS * sample_fps))
+    text = re.sub(
+        r"^track_buffer:.*$",
+        f"track_buffer: {buffer_frames}",
+        base.read_text(),
+        flags=re.MULTILINE,
+    )
+    out = Path(tempfile.gettempdir()) / f"classroom_botsort_fps{sample_fps:g}.yaml"
+    if not out.exists() or out.read_text() != text:
+        out.write_text(text)
+    logger.info(
+        "tracker: track_buffer=%d frames = %.1fs at %.2f fps",
+        buffer_frames,
+        TRACK_LOST_SECONDS,
+        sample_fps,
+    )
+    return str(out)
+
+
+def _track_frame(model, frame: np.ndarray, device: str, tracker_cfg: str):
     global _fallback_cpu
     effective = "cpu" if _fallback_cpu else device
     settings = get_settings()
     kwargs = dict(
         persist=True,
-        tracker=settings.tracker_cfg,
+        tracker=tracker_cfg,
         classes=[0],
         imgsz=settings.imgsz,
         conf=settings.det_conf,
@@ -1002,6 +1042,9 @@ def detect_video(
     model = _get_model()
     _reset_tracker(model)
     device = get_device()
+    # Occlusion tolerance is expressed in seconds and converted here, so the
+    # sampling rate cannot change who the tracker thinks people are.
+    tracker_cfg = _tracker_cfg_for(sample_fps)
 
     info = FrameSourceInfo()
     frames = iter_frames(video_path, sample_fps, info=info)
@@ -1009,7 +1052,7 @@ def detect_video(
     try:
         for ts_ms, frame in frames:
             last_ts_ms = ts_ms
-            results = _track_frame(model, frame, device)
+            results = _track_frame(model, frame, device, tracker_cfg)
             _extract_frame(
                 results, frame, ts_ms, detections, hists, last_hist_ms, crops, last_crop_ms
             )
