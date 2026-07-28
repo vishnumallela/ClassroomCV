@@ -132,6 +132,12 @@ GAP_FILL_MIN_MS = 3_000
 # vlm_teacher is what actually bounds the cost.
 GAP_FILL_MAX_HOLES = 6
 GAP_FILL_MAX_HOLES_CAP = 20
+# Holes at least this long are filled by walking them in sub-windows rather than
+# by asking one candidate track to explain the whole span. Measured on a
+# 37-minute lesson: 4 holes longer than the chain's own 30s horizon held 10.9 of
+# the 12.5 minutes she spent unlabelled, and inside them she was variously out
+# of the room and tracked under three different student ids.
+LONG_HOLE_MS = 20_000
 # When several fragments are alive at a handoff and all clear the height and
 # proximity gates, the teacher is the one that MOVES: a fidgety seated student
 # spreads ~0.1, she spreads most of the frame. Candidate cost subtracts a

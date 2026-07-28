@@ -610,7 +610,24 @@ def derive_result(
                         round(meta.duration_ms / 60_000 / 3),
                     ),
                 )
+                claimed_ts = {d.video_ts_ms for c in claims for d in c.dets}
                 for start_ms, end_ms in holes[:max_holes]:
+                    if end_ms - start_ms >= teacher_chain.LONG_HOLE_MS:
+                        # A long hole mixes "she left the room" with "she is here
+                        # under a different id", sometimes several ids, so no
+                        # single candidate explains it. Ask per sub-window.
+                        got = vlm_teacher.anchor_teacher_in_window(
+                            video_path,
+                            dets_by_track,
+                            teacher_no,
+                            start_ms,
+                            end_ms,
+                            claimed_ts,
+                        )
+                        if got:
+                            filled.append(got)
+                            claimed_ts.update(d.video_ts_ms for d in got)
+                        continue
                     before = [
                         d for c in claims for d in c.dets if d.video_ts_ms <= start_ms
                     ]

@@ -575,3 +575,78 @@ def test_backfill_empty_without_key(monkeypatch):
         assert V.backfill_teacher_entry("v.mp4", _backfill_tracks(), 39) == []
     finally:
         get_settings.cache_clear()
+
+
+# --------------------------------------------------------------------------- #
+# anchor_teacher_in_window: long holes filled per sub-window
+# --------------------------------------------------------------------------- #
+
+
+def _hole_tracks():
+    """Inside one long hole she is student track 2 early, student track 3 late;
+    track 9 is an unrelated pupil elsewhere in the room the whole time."""
+    dbt = {
+        1: [_det(ts, 1, 0.5, 0.6) for ts in range(0, 20_000, 400)],  # teacher, before
+        2: [_det(ts, 2, 0.30, 0.50, 0.10, 0.30) for ts in range(20_000, 60_000, 400)],
+        3: [_det(ts, 3, 0.70, 0.50, 0.10, 0.30) for ts in range(60_000, 100_000, 400)],
+        9: [_det(ts, 9, 0.95, 0.90, 0.06, 0.10) for ts in range(0, 100_000, 400)],
+    }
+    return dbt
+
+
+def test_long_hole_follows_her_across_several_ids(monkeypatch):
+    # The case the candidate-based fill cannot do: one hole, two different
+    # student ids. Points land on track 2 early and track 3 late.
+    monkeypatch.setenv("GEMINI_API_KEY", "fake-key")
+    from app.config import get_settings
+
+    get_settings.cache_clear()
+    try:
+        _wire_offline_answers(
+            monkeypatch,
+            [("point", (0.35, 0.65))] * 2 + [("point", (0.75, 0.65))] * 3,
+        )
+        got = V.anchor_teacher_in_window(
+            "v.mp4", _hole_tracks(), teacher_no=1,
+            start_ms=20_000, end_ms=100_000, step_ms=20_000,
+        )
+        claimed = {d.track_no for d in got}
+        assert claimed == {2, 3}, f"should follow her across both ids, got {claimed}"
+    finally:
+        get_settings.cache_clear()
+
+
+def test_long_hole_claims_nothing_while_she_is_out_of_the_room(monkeypatch):
+    # She genuinely leaves for part of a long lesson; those stretches must stay
+    # unlabelled rather than be filled with whoever is nearest.
+    monkeypatch.setenv("GEMINI_API_KEY", "fake-key")
+    from app.config import get_settings
+
+    get_settings.cache_clear()
+    try:
+        _wire_offline_answers(monkeypatch, [("absent", None)] * 5)
+        got = V.anchor_teacher_in_window(
+            "v.mp4", _hole_tracks(), teacher_no=1,
+            start_ms=20_000, end_ms=100_000, step_ms=20_000,
+        )
+        assert got == [], "an absent teacher must claim nothing"
+    finally:
+        get_settings.cache_clear()
+
+
+def test_long_hole_never_reclaims_an_already_claimed_frame(monkeypatch):
+    monkeypatch.setenv("GEMINI_API_KEY", "fake-key")
+    from app.config import get_settings
+
+    get_settings.cache_clear()
+    try:
+        dbt = _hole_tracks()
+        taken = {d.video_ts_ms for d in dbt[2]}
+        _wire_offline_answers(monkeypatch, [("point", (0.35, 0.65))] * 5)
+        got = V.anchor_teacher_in_window(
+            "v.mp4", dbt, teacher_no=1, start_ms=20_000, end_ms=60_000,
+            claimed_ts=taken, step_ms=20_000,
+        )
+        assert got == [], "frames already claimed must not be taken twice"
+    finally:
+        get_settings.cache_clear()

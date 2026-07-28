@@ -708,6 +708,113 @@ def _bbox_center(b: dict) -> tuple[float, float]:
     return (b["x"] + b["w"] / 2.0, b["y"] + b["h"] / 2.0)
 
 
+# --- long-hole anchoring ------------------------------------------------------
+# How often to ask "where is she?" inside a long hole. Every step costs one call,
+# so this trades resolution for budget: 20s over a 7-minute hole is ~22 calls.
+LONG_HOLE_STEP_MS = 20_000
+# How much timeline a single answer is allowed to speak for. Kept below the step
+# so two neighbouring anchors cannot both claim the same stretch, and so a point
+# that drifted onto a neighbour costs seconds rather than the whole window.
+LONG_HOLE_CLAIM_MS = 16_000
+
+
+def anchor_teacher_in_window(
+    video_path: str,
+    dets_by_track: dict[int, list[Detection]],
+    teacher_no: int,
+    start_ms: int,
+    end_ms: int,
+    claimed_ts: Optional[set[int]] = None,
+    step_ms: int = LONG_HOLE_STEP_MS,
+) -> list[Detection]:
+    """Find the teacher inside a long hole and return the detections to claim.
+
+    A long hole is not one situation. Measured on a 37-minute lesson: inside a
+    single 447-second gap she was out of the room at one point and tracked under
+    three DIFFERENT student ids at others. Asking whether one candidate track
+    explains the whole window — what gap_fill_candidates does — cannot succeed
+    there, and the whole gap stays unlabelled.
+
+    So ask per sub-window instead: step through the hole, ask the model where she
+    is, and take her from whichever track holds her at that moment. Each answer
+    speaks only for LONG_HOLE_CLAIM_MS around itself. An explicit "no teacher"
+    claims nothing, which is the right answer — she really does leave the room,
+    and those stretches SHOULD stay unlabelled.
+    """
+    s = get_settings()
+    if not s.gemini_api_key or not video_path or end_ms <= start_ms:
+        return []
+    taken = set(claimed_ts or ())
+
+    by_ts: dict[int, list[Detection]] = {}
+    for no, dets in dets_by_track.items():
+        if no == teacher_no:
+            continue
+        for d in dets:
+            if start_ms <= d.video_ts_ms <= end_ms:
+                by_ts.setdefault(d.video_ts_ms, []).append(d)
+    if not by_ts:
+        return []
+    stored = sorted(by_ts)
+
+    local_path = _resolve_cached(video_path)
+    shots: list[tuple[int, str]] = []
+    cap = cv2.VideoCapture(local_path)
+    try:
+        t = start_ms + step_ms // 2
+        while t < end_ms:
+            ts = min(stored, key=lambda m: abs(m - t))
+            if abs(ts - t) <= step_ms // 2 and ts not in dict(shots):
+                cap.set(cv2.CAP_PROP_POS_MSEC, float(ts))
+                ok, frame = cap.read()
+                if ok:
+                    shots.append((ts, _b64_jpeg(frame)))
+            t += step_ms
+    finally:
+        cap.release()
+
+    answers = _ask_batch(s.gemini_api_key, s.vlm_model, shots)
+    out: list[Detection] = []
+    absent = anchored = 0
+    for ts, (status, pt) in sorted(answers.items()):
+        if status == "absent":
+            absent += 1
+            continue
+        if status != "point":
+            continue
+        boxes = {
+            d.track_no: (d.bbox["x"], d.bbox["y"], d.bbox["w"], d.bbox["h"])
+            for d in by_ts.get(ts, [])
+            if d.track_no is not None
+        }
+        hit = _point_to_track(pt[0], pt[1], boxes)
+        if hit is None:
+            continue  # she is visible but nothing was detected there
+        lo, hi = ts - LONG_HOLE_CLAIM_MS // 2, ts + LONG_HOLE_CLAIM_MS // 2
+        got = [
+            d
+            for d in dets_by_track.get(hit, [])
+            if lo <= d.video_ts_ms <= hi
+            and start_ms <= d.video_ts_ms <= end_ms
+            and d.video_ts_ms not in taken
+        ]
+        if got:
+            anchored += 1
+            taken.update(d.video_ts_ms for d in got)
+            out.extend(got)
+    if shots:
+        logger.info(
+            "VLM long-hole %.1f-%.1fs: %d probes -> %d anchors, %d absent, %d dets claimed",
+            start_ms / 1000,
+            end_ms / 1000,
+            len(shots),
+            anchored,
+            absent,
+            len(out),
+        )
+    return out
+
+
 def backfill_teacher_entry(
     video_path: str,
     dets_by_track: dict[int, list[Detection]],
