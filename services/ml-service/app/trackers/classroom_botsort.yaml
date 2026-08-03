@@ -9,6 +9,19 @@
 # - model auto is required syntactically (BOTSORT.__init__ reads args.model
 #   unconditionally) but inert while with_reid is false.
 #
+# Occlusion posture (the classroom failure mode is FRAGMENTATION, not ID
+# switches: the teacher walks behind rows of students, is half-visible for
+# seconds at a time, and her track dies and is reborn under a new id):
+# - track_low_thresh 0.1 keeps the ByteTrack second pass alive: an occluded,
+#   half-visible person scores low but the box is spatially honest, and the
+#   second association is what carries her through the crowd.
+# - track_buffer 60: how many SAMPLED frames a lost track survives before
+#   deletion. At the 5 fps sampling cap that is ~12 s of occlusion bridged
+#   (30 = ~6 s, measured too short for a teacher crossing behind a front row).
+#   This is the single fragmentation knob, changed alone on purpose — the
+#   dead-end run below moved it together with association thresholds, and the
+#   damage came from those, not the buffer.
+#
 # Measured dead ends, kept out deliberately (see docs/ml-improvement-plan.md):
 # - with_reid true + model auto: pose-head features ID-switched the walking
 #   teacher into temporally overlapping identities; teacher classification
@@ -21,7 +34,7 @@ tracker_type: botsort
 track_high_thresh: 0.25
 track_low_thresh: 0.1
 new_track_thresh: 0.25
-track_buffer: 30
+track_buffer: 60
 match_thresh: 0.8
 fuse_score: true
 gmc_method: none
