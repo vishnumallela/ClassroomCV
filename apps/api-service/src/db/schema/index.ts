@@ -29,6 +29,16 @@ export type DataQuality = {
   notes: string[];
 };
 
+// Application settings the admin edits in the UI (Settings page): RunPod GPU
+// wiring, ML service URL override. Key-value so adding a setting never needs
+// a migration. Values are plain text; secrets are masked at the API layer and
+// this table must never be exposed raw.
+export const appSettings = pgTable("app_settings", {
+  key: text("key").primaryKey(),
+  value: text("value").notNull(),
+  updatedAt: timestamp("updated_at", { withTimezone: true }).notNull().defaultNow(),
+});
+
 // A classroom is the unit users organize by: one physical room / camera, its
 // zone configuration, and every lesson recorded in it.
 export const classrooms = pgTable("classrooms", {

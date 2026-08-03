@@ -64,6 +64,13 @@
       "when": 1785752915058,
       "tag": "0008_burly_firebrand",
       "breakpoints": true
+    },
+    {
+      "idx": 9,
+      "version": "7",
+      "when": 1785753346506,
+      "tag": "0009_bizarre_rocket_racer",
+      "breakpoints": true
     }
   ]
 }

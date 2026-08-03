@@ -1,6 +1,6 @@
 import type { QueryClient } from "@tanstack/react-query";
 import { Link, Outlet, createRootRouteWithContext } from "@tanstack/react-router";
-import { BookOpen, School } from "lucide-react";
+import { BookOpen, School, Settings2 } from "lucide-react";
 import { ThemeToggle } from "@/components/theme-toggle";
 
 export interface RouterContext {
@@ -13,6 +13,7 @@ export const Route = createRootRouteWithContext<RouterContext>()({
 
 const NAV = [
   { to: "/" as const, label: "Classrooms", icon: School, exact: true },
+  { to: "/settings" as const, label: "Settings", icon: Settings2, exact: false },
   { to: "/architecture" as const, label: "How it works", icon: BookOpen, exact: false },
 ];
 

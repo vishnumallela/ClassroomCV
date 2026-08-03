@@ -1,6 +1,6 @@
 import { env } from "@api/lib/env";
 
-const BASE = env.API_SERVICE__ML_SERVICE_URL;
+import { mlServiceUrl } from "@api/lib/app-settings";
 
 export interface MlZone {
   kind: string;
@@ -91,7 +91,9 @@ async function readErrorBody(res: Response): Promise<string> {
 }
 
 async function post<T>(path: string, body: unknown): Promise<T> {
-  const res = await fetch(`${BASE}${path}`, {
+  // Base URL resolves per call (Settings-page override wins over env), so
+  // re-pointing at a fresh RunPod pod takes effect without a redeploy.
+  const res = await fetch(`${await mlServiceUrl()}${path}`, {
     method: "POST",
     headers: { "content-type": "application/json" },
     body: JSON.stringify(body),
@@ -101,7 +103,7 @@ async function post<T>(path: string, body: unknown): Promise<T> {
 }
 
 async function get<T>(path: string): Promise<T> {
-  const res = await fetch(`${BASE}${path}`);
+  const res = await fetch(`${await mlServiceUrl()}${path}`);
   if (!res.ok) throw new Error(`ML ${path} failed: ${res.status} ${await readErrorBody(res)}`);
   return (await res.json()) as T;
 }
