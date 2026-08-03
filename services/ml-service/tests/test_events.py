@@ -1,4 +1,4 @@
-"""Unit tests for presence/enter-exit derivation, board hysteresis, occupancy."""
+"""Unit tests for the KPI heuristics (via app.events) and full derivation."""
 
 from app.events import (
     board_condition,
@@ -7,9 +7,8 @@ from app.events import (
     board_intervals_from_samples,
     derive,
     entry_exit_from_intervals,
-    occupancy_buckets,
     presence_intervals,
-    spatial_heatmap,
+    teacher_heatmap,
 )
 from app.models import Detection
 
@@ -159,30 +158,6 @@ def test_board_condition_geometry():
 
 
 # --------------------------------------------------------------------------- #
-# Occupancy bucketing
-# --------------------------------------------------------------------------- #
-
-
-def test_occupancy_buckets_counts_and_teacher_flag():
-    dets_by_track = {
-        1: [_det(t, 1) for t in (0, 1_000, 6_000)],  # teacher
-        2: [_det(t, 2) for t in range(0, 20_000, 1_000)],  # student, whole video
-        3: [_det(t, 3) for t in (5_000, 6_000)],  # student, bucket 1 only
-    }
-    roles = {1: ("teacher", 0.9), 2: ("student", 0.6), 3: ("student", 0.6)}
-    buckets = occupancy_buckets(dets_by_track, roles, duration_ms=20_000)
-    assert [b["ts_ms"] for b in buckets] == [0, 5_000, 10_000, 15_000]
-    assert [b["students"] for b in buckets] == [1, 2, 1, 1]
-    assert [b["teacher"] for b in buckets] == [True, True, False, False]
-
-
-def test_occupancy_covers_full_duration_with_empty_buckets():
-    buckets = occupancy_buckets({}, {}, duration_ms=15_000)
-    assert [b["ts_ms"] for b in buckets] == [0, 5_000, 10_000]
-    assert all(b["students"] == 0 and b["teacher"] is False for b in buckets)
-
-
-# --------------------------------------------------------------------------- #
 # Full derivation incl. degraded no-teacher case
 # --------------------------------------------------------------------------- #
 
@@ -194,9 +169,6 @@ _ANALYTICS_KEYS = {
     "presence_intervals",
     "board_intervals",
     "entry_exit",
-    "occupancy",
-    "avg_students",
-    "max_students",
     "heatmap",
     "data_quality",
 }
@@ -222,7 +194,7 @@ def test_derive_full_teacher_at_board():
     assert analytics["entries"] == 1 and analytics["exits"] == 1
     assert analytics["board_intervals"] == [[0, 30_000]]
     assert analytics["teacher_board_ms"] == 30_000
-    assert analytics["max_students"] == 1
+    assert sum(analytics["heatmap"]["teacher"]) == len(teacher)
     kinds = [(e["kind"], e["video_ts_ms"]) for e in events]
     assert ("enter", 0) in kinds and ("exit", 30_000) in kinds
     assert ("board_enter", 0) in kinds and ("board_leave", 30_000) in kinds
@@ -252,8 +224,8 @@ def test_derive_no_teacher_degrades_gracefully():
     assert analytics["presence_intervals"] == []
     assert analytics["board_intervals"] == []
     assert analytics["entry_exit"] == []
-    # occupancy still useful: unknowns are counted as students
-    assert analytics["max_students"] == 2
+    # no teacher -> an empty (all-zero) teacher heatmap, never an error
+    assert sum(analytics["heatmap"]["teacher"]) == 0
 
 
 def test_derive_no_board_zone_means_null_board_ms():
@@ -324,31 +296,24 @@ def test_no_bridge_when_gap_too_long():
 
 
 # --------------------------------------------------------------------------- #
-# Spatial heatmap
+# Teacher heatmap
 # --------------------------------------------------------------------------- #
 
 
-def test_spatial_heatmap_splits_teacher_and_students_by_cell():
+def test_teacher_heatmap_accumulates_dwell_by_cell():
     # bbox x/y is the top-left corner, so a w=0.1,h=0.3 box at (0.5,0.5) centers
-    # at (0.55, 0.65) -> col 5, row 6; the corner student clamps to (9, 9).
-    dbt = {
-        1: [_det(ts, 1, x=0.5, y=0.5) for ts in range(0, 5_001, 500)],
-        2: [_det(ts, 2, x=0.95, y=0.95) for ts in range(0, 5_001, 500)],
-    }
-    roles = {1: ("teacher", 0.9), 2: ("student", 0.5)}
-    hm = spatial_heatmap(dbt, roles, grid_w=10, grid_h=10)
+    # at (0.55, 0.65) -> col 5, row 6.
+    dets = [_det(ts, 1, x=0.5, y=0.5) for ts in range(0, 5_001, 500)]
+    hm = teacher_heatmap(dets, grid_w=10, grid_h=10)
     assert hm["grid_w"] == 10 and hm["grid_h"] == 10
-    assert len(hm["teacher"]) == 100 and len(hm["students"]) == 100
+    assert len(hm["teacher"]) == 100
     assert hm["teacher"][6 * 10 + 5] == 11 and sum(hm["teacher"]) == 11
-    assert hm["students"][9 * 10 + 9] == 11 and sum(hm["students"]) == 11
-    # channels are disjoint: no teacher mass in the student cell.
-    assert hm["teacher"][9 * 10 + 9] == 0
 
 
-def test_spatial_heatmap_unknown_counts_as_students():
-    dbt = {3: [_det(0, 3, x=0.1, y=0.1)]}
-    hm = spatial_heatmap(dbt, {3: ("unknown", None)}, grid_w=4, grid_h=4)
-    assert sum(hm["students"]) == 1 and sum(hm["teacher"]) == 0
+def test_teacher_heatmap_clamps_edge_centers_into_grid():
+    # A corner box whose center computes past the last cell clamps to (9, 9).
+    hm = teacher_heatmap([_det(0, 1, x=0.95, y=0.95)], grid_w=10, grid_h=10)
+    assert hm["teacher"][9 * 10 + 9] == 1 and sum(hm["teacher"]) == 1
 
 
 # --------------------------------------------------------------------------- #

@@ -1,13 +1,12 @@
 import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
 import { Link, createFileRoute, useNavigate } from "@tanstack/react-router";
-import { Suspense, lazy, useRef, useState } from "react";
+import { useRef, useState } from "react";
 import { BoardSessions } from "@/components/board-sessions";
 import { CirculationCard } from "@/components/circulation-card";
 import { DataQualityCard } from "@/components/data-quality-card";
 import { EventsTable } from "@/components/events-table";
 import { HeatmapCard } from "@/components/heatmap-card";
 import { KpiCards } from "@/components/kpi-cards";
-import { LessonBreakdown } from "@/components/lesson-breakdown";
 import { StatusBadge } from "@/components/status-badge";
 import { TimelineStrip } from "@/components/timeline-strip";
 import { Button } from "@/components/ui/button";
@@ -17,11 +16,6 @@ import { VideoPlayer } from "@/components/video-player";
 import { ZoneEditor } from "@/components/zone-editor";
 import { msToClock } from "@/lib/format";
 import { API_URL, orpc, orpcClient } from "@/lib/orpc";
-
-// recharts is heavy, so the occupancy chart loads on demand after the page mounts.
-const OccupancyChart = lazy(() =>
-  import("@/components/occupancy-chart").then((m) => ({ default: m.OccupancyChart })),
-);
 
 export const Route = createFileRoute("/videos/$id")({ component: VideoDetail });
 
@@ -156,7 +150,6 @@ function VideoDetail() {
             }
           />
           <DataQualityCard analytics={analytics} />
-          <LessonBreakdown analytics={analytics} durationMs={video.durationMs} />
           <TimelineStrip
             durationMs={video.durationMs}
             presenceIntervals={analytics.presenceIntervals}
@@ -165,9 +158,6 @@ function VideoDetail() {
             currentMs={currentMs}
             onSeek={seek}
           />
-          <Suspense fallback={<Skeleton className="h-64 w-full rounded-xl" />}>
-            <OccupancyChart analytics={analytics} durationMs={video.durationMs} onSeek={seek} />
-          </Suspense>
           <CirculationCard analytics={analytics} />
           <HeatmapCard
             analytics={analytics}

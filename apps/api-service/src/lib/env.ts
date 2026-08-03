@@ -22,12 +22,10 @@ export const env = createEnv({
       .int()
       .positive()
       .default(4 * 1024 * 1024 * 1024),
-    // Frames per second the ML service samples for inference. Classroom
-    // activity is slow (seated students, a walking teacher), so 2 fps captures
-    // occupancy/presence/board dynamics at ~2.5x less GPU time than 5 fps —
-    // this is the single biggest per-video cost lever. The ML service caps the
-    // value at 5.
-    API_SERVICE__SAMPLE_FPS: z.coerce.number().positive().max(5).default(2),
+    // Frames per second the ML service samples for inference (capped at 5 by
+    // the ML service). The biggest per-video GPU cost lever: dropping to 2
+    // is ~2.5x cheaper if turnaround ever matters more than fidelity.
+    API_SERVICE__SAMPLE_FPS: z.coerce.number().positive().max(5).default(5),
     API_SERVICE__CORS_ORIGINS: z
       .string()
       .default("http://localhost:3001")

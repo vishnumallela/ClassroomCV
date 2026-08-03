@@ -68,6 +68,22 @@ class Settings(BaseSettings):
         Path(__file__).resolve().parent / "trackers" / "classroom_botsort.yaml"
     )
 
+    # Teacher identification: bounded vision-model vote (app/teacher_id.py).
+    # Getting "who is the teacher" right decides every KPI, so the geometric
+    # ranker gets a second opinion of AT MOST vlm_frames Gemini calls per
+    # analysis (~$0.002/lesson) — never per-claim, never unbounded. Empty
+    # GEMINI_API_KEY disables it entirely (zero calls, geometric-only).
+    # vlm_model pins the "-latest" alias: dated 2.5-flash versions 404 on new
+    # API keys while still listed in the catalog.
+    gemini_api_key: str = ""
+    vlm_model: str = "gemini-flash-latest"
+    vlm_frames: int = 6  # hard per-analysis call cap
+    vlm_min_votes: int = 2  # pooled votes needed to crown/override
+    # REJECT the geometric pick only on positive evidence: the model answered
+    # at least this many frames and never once pointed at it. A network
+    # failure (0 answered) must keep the geometric pick.
+    vlm_reject_min_answered: int = 4
+
 
 @lru_cache
 def get_settings() -> Settings:

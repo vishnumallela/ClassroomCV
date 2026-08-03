@@ -40,11 +40,8 @@ export interface DataQuality {
   coverage: number;
   occupied_buckets: number;
   span_buckets: number;
-  concurrent_peak: number;
-  concurrent_typical: number;
   confidence: {
     overall: QualityTier;
-    occupancy: QualityTier;
     identity: QualityTier;
     coverage: QualityTier;
     teacher: QualityTier;
@@ -60,10 +57,7 @@ export interface AnalysisResultAnalytics {
   presence_intervals: [number, number][];
   board_intervals: [number, number][];
   entry_exit: { kind: string; ts_ms: number }[];
-  occupancy: { ts_ms: number; students: number; teacher: boolean }[];
-  avg_students: number | null;
-  max_students: number | null;
-  heatmap: { grid_w: number; grid_h: number; teacher: number[]; students: number[] };
+  heatmap: { grid_w: number; grid_h: number; teacher: number[] };
   data_quality?: DataQuality | null;
 }
 

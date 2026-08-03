@@ -16,7 +16,7 @@ const STYLE_LABEL: Record<string, { title: string; blurb: string }> = {
   },
   supervisor: {
     title: "Circulating supervisor",
-    blurb: "Moved widely through the room and reached the back rows.",
+    blurb: "Moved widely through the room among the desks.",
   },
   balanced: {
     title: "Balanced circulation",
@@ -48,14 +48,9 @@ export function CirculationCard({ analytics }: { analytics: Analytics }) {
       hint: "How evenly the teacher's time was distributed across the room (0% = one spot, 100% = even). A validated mobility measure (Moodoo).",
     },
     {
-      label: "Time among desks",
-      value: pct(c.amongStudentsShare),
-      hint: "Share of teaching time spent where students sit.",
-    },
-    {
-      label: "Reached back rows",
-      value: c.reachedBackRows ? "Yes" : "No",
-      hint: "Did the teacher enter the row band farthest from the front.",
+      label: "Anchor spot",
+      value: pct(c.focusShare),
+      hint: "Share of teaching time spent in the single most-used position.",
     },
   ];
 
@@ -68,7 +63,7 @@ export function CirculationCard({ analytics }: { analytics: Analytics }) {
       <p className="mt-1 font-display text-lg tracking-tight">{style.title}</p>
       <p className="text-sm text-muted-foreground">{style.blurb}</p>
 
-      <div className="mt-4 grid grid-cols-2 gap-3 sm:grid-cols-4">
+      <div className="mt-4 grid grid-cols-3 gap-3">
         {tiles.map((t) => (
           <div key={t.label} title={t.hint}>
             <div className="font-display text-2xl font-semibold tabular-nums">{t.value}</div>

@@ -41,12 +41,9 @@ export function toDetailDto(d: Detail) {
           teacherBoardMs: d.analytics.teacherBoardMs,
           entries: d.analytics.entries,
           exits: d.analytics.exits,
-          avgStudents: d.analytics.avgStudents,
-          maxStudents: d.analytics.maxStudents,
           presenceIntervals: d.analytics.presenceIntervals,
           boardIntervals: d.analytics.boardIntervals,
           entryExit: d.analytics.entryExit,
-          occupancy: d.analytics.occupancy,
           heatmap: d.analytics.heatmap,
           dataQuality: d.analytics.dataQuality ?? null,
         }

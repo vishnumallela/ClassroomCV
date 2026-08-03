@@ -74,24 +74,24 @@ function ClassroomMetrics() {
       sub: "of footage",
     },
     {
+      label: "Time at board",
+      value: m.boardTrackedMs > 0 ? percentOf(m.teacherBoardMs, m.boardTrackedMs) : "n/a",
+      sub: m.boardTrackedMs > 0 ? "of board-tracked time" : "no board zone yet",
+    },
+    {
+      label: "Teacher entries",
+      value: String(m.totalEntries),
+      sub: "into the room, total",
+    },
+    {
+      label: "Teacher exits",
+      value: String(m.totalExits),
+      sub: "out of the room, total",
+    },
+    {
       label: "Teacher presence",
       value: percentOf(m.teacherPresentMs, m.totalDurationMs),
       sub: "of analyzed time",
-    },
-    {
-      label: "Avg attendance",
-      value: m.avgStudents !== null ? m.avgStudents.toFixed(1) : "n/a",
-      sub: "students, duration-weighted",
-    },
-    {
-      label: "Peak attendance",
-      value: m.maxStudents !== null ? String(m.maxStudents) : "n/a",
-      sub: "at once, any lesson",
-    },
-    {
-      label: "Door traffic",
-      value: `${m.totalEntries} · ${m.totalExits}`,
-      sub: "entries · exits",
     },
   ];
 

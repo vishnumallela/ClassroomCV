@@ -33,9 +33,8 @@ const DIMENSIONS: { key: keyof DataQuality["confidence"]; label: string; help: s
   {
     key: "identity",
     label: "Tracking",
-    help: "How cleanly people were followed without fragmenting.",
+    help: "How cleanly the teacher was followed without fragmenting.",
   },
-  { key: "occupancy", label: "Head counts", help: "How reliable the student counts are." },
   { key: "teacher", label: "Teacher ID", help: "How confidently the teacher was identified." },
 ];
 
@@ -54,7 +53,7 @@ export function DataQualityCard({ analytics }: { analytics: Analytics }) {
         <TierPill tier={overall} size="lg" />
       </div>
 
-      <div className="mt-4 grid grid-cols-2 gap-3 lg:grid-cols-4">
+      <div className="mt-4 grid grid-cols-3 gap-3">
         {DIMENSIONS.map((d) => (
           <div
             key={d.key}
@@ -69,13 +68,7 @@ export function DataQualityCard({ analytics }: { analytics: Analytics }) {
         ))}
       </div>
 
-      {/* Re-identification-independent cross-check on the crowd count. */}
       <div className="mt-4 flex flex-wrap items-center gap-x-6 gap-y-2 rounded-lg bg-muted/50 px-4 py-3 text-sm">
-        <CrossCheck
-          label="Seen at once"
-          value={dq.concurrent_peak}
-          hint="Most people visible in a single frame (can't double-count anyone)."
-        />
         <CrossCheck
           label="Distinct identities"
           value={dq.identities}
@@ -106,8 +99,8 @@ export function DataQualityCard({ analytics }: { analytics: Analytics }) {
 
       <p className="mt-4 flex items-start gap-1.5 border-t border-border pt-3 text-[0.7rem] leading-relaxed text-muted-foreground">
         <Info className="mt-px size-3 shrink-0" />
-        Aggregate estimates from video sampled at 5 frames per second. Head counts are a proxy, not
-        an attendance register. No faces are recognized and no student is named.
+        Aggregate estimates from video sampled at 5 frames per second. No faces are recognized and
+        no student is named; only the teacher's movement is analyzed.
       </p>
     </Card>
   );

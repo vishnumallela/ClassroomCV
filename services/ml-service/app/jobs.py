@@ -30,7 +30,7 @@ from typing import Callable, Optional
 
 import numpy as np
 
-from app import db, detector, events as events_mod, merge, roles, teacher_chain
+from app import db, detector, events as events_mod, merge, roles, teacher_chain, teacher_id
 from app.geometry import rdp_indices
 from app.models import AnalysisResult, Detection, VideoMeta
 
@@ -219,8 +219,9 @@ def run_pipeline(
     cb("detecting", 0.0)
     stage_start = time.perf_counter()
     # Resolve an allowlisted object-store URL to a local temp (so a remote GPU
-    # worker can fetch the video itself); delete it as soon as detection has
-    # read every frame — merge/derive/write never touch the file.
+    # worker can fetch the video itself). The file is kept until AFTER derive:
+    # the teacher-id vote decodes a handful of frames there. Deleted in the
+    # outer finally either way.
     local_path, is_temp = detector.resolve_video_source(video_path)
     try:
         meta, detections, hists, embeds = detector.detect_video(
@@ -228,51 +229,52 @@ def run_pipeline(
             sample_fps=sample_fps,
             progress_cb=lambda f: cb("detecting", f * 0.8),
         )
+        detect_s = time.perf_counter() - stage_start
+
+        if not detections:
+            probed_ms = meta.duration_ms
+            if probed_ms <= 0 and write_db:
+                # 0 decoded frames leaves duration unknown; fall back to the
+                # dashboard's ffprobe duration (best-effort, absent in tests).
+                info = asyncio.run(db.fetch_video_info(video_id)) or {}
+                probed_ms = int(info.get("duration_ms") or 0)
+            if probed_ms > EMPTY_RESULT_GUARD_MS:
+                raise RuntimeError(
+                    f"analysis produced zero detections for a "
+                    f"{probed_ms / 1000.0:.1f}s video — treating the empty result "
+                    f"as a failure instead of silently zeroing all analytics"
+                )
+
+        cb("merging", 0.8)
+        stage_start = time.perf_counter()
+        raw_tracks = merge.build_raw_tracks(
+            detections, hists, {rid: [e] for rid, e in embeds.items()}
+        )
+        mapping, identities = merge.merge_tracks(raw_tracks)
+        for d in detections:
+            d.track_no = mapping.get(d.raw_track_id)
+        detections = [d for d in detections if d.track_no is not None]
+        merge_s = time.perf_counter() - stage_start
+        cb("merging", 0.9)
+
+        cb("deriving", 0.9)
+        stage_start = time.perf_counter()
+        result = derive_result(
+            meta,
+            detections,
+            identities,
+            zones,
+            track_embeds={rid: list(e) for rid, e in embeds.items()},
+            video_path=local_path,
+        )
+        derive_s = time.perf_counter() - stage_start
+        cb("deriving", 0.95)
     finally:
         if is_temp:
             try:
                 os.unlink(local_path)
             except OSError:
                 pass
-    detect_s = time.perf_counter() - stage_start
-
-    if not detections:
-        probed_ms = meta.duration_ms
-        if probed_ms <= 0 and write_db:
-            # 0 decoded frames leaves duration unknown; fall back to the
-            # dashboard's ffprobe duration (best-effort, absent in tests).
-            info = asyncio.run(db.fetch_video_info(video_id)) or {}
-            probed_ms = int(info.get("duration_ms") or 0)
-        if probed_ms > EMPTY_RESULT_GUARD_MS:
-            raise RuntimeError(
-                f"analysis produced zero detections for a "
-                f"{probed_ms / 1000.0:.1f}s video — treating the empty result "
-                f"as a failure instead of silently zeroing all analytics"
-            )
-
-    cb("merging", 0.8)
-    stage_start = time.perf_counter()
-    raw_tracks = merge.build_raw_tracks(
-        detections, hists, {rid: [e] for rid, e in embeds.items()}
-    )
-    mapping, identities = merge.merge_tracks(raw_tracks)
-    for d in detections:
-        d.track_no = mapping.get(d.raw_track_id)
-    detections = [d for d in detections if d.track_no is not None]
-    merge_s = time.perf_counter() - stage_start
-    cb("merging", 0.9)
-
-    cb("deriving", 0.9)
-    stage_start = time.perf_counter()
-    result = derive_result(
-        meta,
-        detections,
-        identities,
-        zones,
-        track_embeds={rid: list(e) for rid, e in embeds.items()},
-    )
-    derive_s = time.perf_counter() - stage_start
-    cb("deriving", 0.95)
 
     if write_db:
         try:
@@ -372,8 +374,15 @@ def derive_result(
     identities: list[dict],
     zones: list[dict],
     track_embeds: Optional[dict[int, list[float]]] = None,
+    video_path: Optional[str] = None,
 ) -> dict:
     """roles + events + analytics from merged detections. Shared by analyze & rederive.
+
+    Teacher selection is two-stage: the geometric ranker proposes, then a
+    HARD-BUDGETED vision vote (teacher_id.verify_teacher, at most vlm_frames
+    Gemini calls, zero when no key) confirms, overrides, or rejects. The vote
+    needs frames, so it runs only when video_path is a readable local file —
+    /analyze passes it; /rederive (no video on hand) keeps the geometric pick.
 
     After the teacher is chosen, her timeline is rebuilt by
     teacher_chain.stitch_teacher: detection ranges stolen by student raw ids
@@ -406,6 +415,12 @@ def derive_result(
     teacher_no = next(
         (t for t, (role, _) in roles_map.items() if role == "teacher"), None
     )
+    if video_path is not None:
+        try:
+            vote = teacher_id.verify_teacher(video_path, dets_by_track, meta.duration_ms)
+            teacher_no = teacher_id.apply_vote(vote, teacher_no, roles_map)
+        except Exception:  # the vote is advisory; never sink a derive
+            logger.warning("teacher-id vote failed; keeping geometric pick", exc_info=True)
     if teacher_no is not None:
         embeds_by_raw = None
         if track_embeds:

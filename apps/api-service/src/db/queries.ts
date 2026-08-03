@@ -160,13 +160,13 @@ export interface ClassroomMetrics {
   analyzedCount: number;
   totalDurationMs: number;
   teacherPresentMs: number;
-  avgStudents: number | null;
-  maxStudents: number | null;
+  teacherBoardMs: number;
+  boardTrackedMs: number; // duration of lessons that HAVE a board zone (the honest denominator)
   totalEntries: number;
   totalExits: number;
 }
 
-/** Aggregate analytics across a classroom's analyzed lessons (status done). */
+/** Aggregate the three teacher KPIs across a classroom's analyzed lessons. */
 export async function getClassroomMetrics(classroomId: string): Promise<ClassroomMetrics> {
   const [row] = await db
     .select({
@@ -174,13 +174,10 @@ export async function getClassroomMetrics(classroomId: string): Promise<Classroo
       analyzedCount: sql<number>`count(${videoAnalytics.videoId})::int`,
       totalDurationMs: sql<number>`coalesce(sum(${videos.durationMs}) filter (where ${videoAnalytics.videoId} is not null), 0)::bigint`,
       teacherPresentMs: sql<number>`coalesce(sum(${videoAnalytics.teacherPresentMs}), 0)::bigint`,
-      // Duration-weighted mean, so a 5-minute clip cannot skew a term average.
-      avgStudents: sql<number | null>`
-        case when coalesce(sum(${videos.durationMs}) filter (where ${videoAnalytics.avgStudents} is not null), 0) > 0
-        then sum(${videoAnalytics.avgStudents} * ${videos.durationMs}) filter (where ${videoAnalytics.avgStudents} is not null)
-             / sum(${videos.durationMs}) filter (where ${videoAnalytics.avgStudents} is not null)
-        else null end`,
-      maxStudents: sql<number | null>`max(${videoAnalytics.maxStudents})`,
+      teacherBoardMs: sql<number>`coalesce(sum(${videoAnalytics.teacherBoardMs}), 0)::bigint`,
+      // Board share divides by time where a board zone existed, not all time —
+      // a lesson without a board zone must not dilute the percentage.
+      boardTrackedMs: sql<number>`coalesce(sum(${videos.durationMs}) filter (where ${videoAnalytics.teacherBoardMs} is not null), 0)::bigint`,
       totalEntries: sql<number>`coalesce(sum(${videoAnalytics.entries}), 0)::int`,
       totalExits: sql<number>`coalesce(sum(${videoAnalytics.exits}), 0)::int`,
     })
@@ -192,10 +189,8 @@ export async function getClassroomMetrics(classroomId: string): Promise<Classroo
     analyzedCount: row?.analyzedCount ?? 0,
     totalDurationMs: Number(row?.totalDurationMs ?? 0),
     teacherPresentMs: Number(row?.teacherPresentMs ?? 0),
-    avgStudents: row?.avgStudents === null || row?.avgStudents === undefined
-      ? null
-      : Math.round(Number(row.avgStudents) * 10) / 10,
-    maxStudents: row?.maxStudents ?? null,
+    teacherBoardMs: Number(row?.teacherBoardMs ?? 0),
+    boardTrackedMs: Number(row?.boardTrackedMs ?? 0),
     totalEntries: row?.totalEntries ?? 0,
     totalExits: row?.totalExits ?? 0,
   };
@@ -418,13 +413,10 @@ export async function replaceDerived(
       teacherBoardMs: a.teacher_board_ms,
       entries: a.entries ?? 0,
       exits: a.exits ?? 0,
-      avgStudents: a.avg_students,
-      maxStudents: a.max_students,
       presenceIntervals: a.presence_intervals ?? [],
       boardIntervals: a.board_intervals ?? [],
       entryExit: a.entry_exit ?? [],
-      occupancy: a.occupancy ?? [],
-      heatmap: a.heatmap ?? { grid_w: 0, grid_h: 0, teacher: [], students: [] },
+      heatmap: a.heatmap ?? { grid_w: 0, grid_h: 0, teacher: [] },
       dataQuality: a.data_quality ?? null,
       computedAt: new Date(),
     });

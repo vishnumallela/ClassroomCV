@@ -134,11 +134,9 @@ def test_full_pipeline_shape_and_semantics(monkeypatch):
     assert a.entries == 1 and a.exits == 0
     assert [e.model_dump() for e in a.entry_exit] == [{"kind": "enter", "ts_ms": 0}]
 
-    # occupancy: 12 buckets of 5000ms, one student mid-video
-    assert len(a.occupancy) == 12
-    assert a.max_students == 1
-    assert 0.0 < a.avg_students <= 1.0
-    assert a.occupancy[1].students == 1 and a.occupancy[1].teacher is True
+    # teacher heatmap: every teacher detection lands one dwell sample
+    assert sum(a.heatmap.teacher) > 0
+    assert len(a.heatmap.teacher) == a.heatmap.grid_w * a.heatmap.grid_h
 
     # permanent overlay tier: the walking teacher keeps interior polyline
     # points, the static student collapses to endpoints; keyframes >= 2s apart
@@ -181,8 +179,7 @@ def test_pipeline_short_empty_video_yields_valid_empty_result(monkeypatch):
     parsed = AnalysisResult.model_validate(result)
     assert parsed.tracks == [] and parsed.events == []
     assert parsed.analytics.teacher_present_ms == 0
-    assert parsed.analytics.max_students == 0
-    assert len(parsed.analytics.occupancy) == 1  # 4s -> one 5000ms bucket
+    assert sum(parsed.analytics.heatmap.teacher) == 0  # nobody detected
 
 
 def test_pipeline_empty_over_5s_video_is_failure(monkeypatch):

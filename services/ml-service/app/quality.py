@@ -1,34 +1,29 @@
 """Per-run data-quality assessment: how much can you trust these analytics?
 
 Every dashboard number is an estimate over sampled, occluded CCTV. A school
-leader reading "average 27 students" deserves to know whether that figure came
-from a clean, well-covered lesson or from a half-occluded camera whose tracker
-fragmented every child into three identities. This module turns the pipeline's
-own internal signals into an honest, additive confidence report. It NEVER
-changes a derived number — it only annotates them.
+leader reading "42 minutes at the board" deserves to know whether that figure
+came from a clean, well-covered lesson or from a half-occluded camera whose
+tracker fragmented the teacher into a dozen identities. This module turns the
+pipeline's own internal signals into an honest, additive confidence report.
+It NEVER changes a derived number — it only annotates them.
 
-Three independent signals drive the report:
+Three signals drive the report, each one a direct trust input for the three
+teacher KPIs (entry/exit, board time, heatmap):
 
 1. Coverage: over the lesson's active span (first to last detection), what
    fraction of time buckets actually contained a detected person. Low coverage
    means the camera went dark, the frame was occluded, or the model dropped
-   out — every presence/occupancy number is then a floor, not a measurement.
+   out — presence-derived numbers are then a floor, not a measurement.
 
 2. Fragmentation: raw tracker ids per final identity. The tracker mints a new
    id every time a person is occluded or leaves frame; the merge stage reunites
    them. A ratio near 1 means clean tracking; a high ratio means the merge did
-   heavy lifting and identity-derived counts (max/avg students) carry more
-   estimation error.
+   heavy lifting and the teacher's timeline (entries/exits, board sessions,
+   heatmap path) carries more stitching error.
 
-3. Concurrent crowd count: the number of non-teacher boxes visible in a single
-   frame can never double-count one person (one body is one box per frame),
-   so its peak/typical values are a re-identification-INDEPENDENT cross-check
-   on the identity-based occupancy. When the two agree, occupancy is solid;
-   when they diverge, the report says so.
-
-The teacher-identification margin (roles.assign_roles' role_confidence) is
-folded in as a fourth tier so the "who is the teacher" decision carries its own
-trust level.
+3. Teacher identification: the margin behind the "who is the teacher" decision
+   (roles.assign_roles' role_confidence, raised by the teacher_id vote when it
+   confirms). Every KPI hangs off this one label.
 """
 
 from __future__ import annotations
@@ -53,44 +48,7 @@ COVERAGE_LOW = 0.7
 TEACHER_CONF_HIGH = 0.65
 TEACHER_CONF_MED = 0.55
 
-# How far the identity-based crowd count may sit below the fragmentation-immune
-# concurrent peak before occupancy is downgraded: a large shortfall means whole
-# students were missed by the identity count (over-merging or dropout).
-OCCUPANCY_AGREEMENT_TOL = 3
-
 Tier = str  # "high" | "medium" | "low"
-
-
-def _percentile(sorted_vals: list[int], q: float) -> float:
-    """Linear-interpolated percentile over a pre-sorted list (q in [0, 1])."""
-    if not sorted_vals:
-        return 0.0
-    if len(sorted_vals) == 1:
-        return float(sorted_vals[0])
-    pos = q * (len(sorted_vals) - 1)
-    lo = int(pos)
-    hi = min(lo + 1, len(sorted_vals) - 1)
-    frac = pos - lo
-    return sorted_vals[lo] * (1.0 - frac) + sorted_vals[hi] * frac
-
-
-def _concurrent_counts(
-    dets_by_track: dict[int, list[Detection]],
-    roles_map: dict[int, tuple[str, Optional[float]]],
-) -> list[int]:
-    """Non-teacher box count per distinct frame timestamp (identity-free).
-
-    One physical person contributes exactly one box per frame, so per-frame
-    counts cannot double-count a fragmented identity the way distinct-track_no
-    counting can. Returned unsorted, one entry per occupied frame.
-    """
-    per_frame: dict[int, int] = {}
-    for track_no, dets in dets_by_track.items():
-        if roles_map.get(track_no, ("unknown", None))[0] == "teacher":
-            continue
-        for d in dets:
-            per_frame[d.video_ts_ms] = per_frame.get(d.video_ts_ms, 0) + 1
-    return list(per_frame.values())
 
 
 def _coverage(dets_by_track: dict[int, list[Detection]], bucket_ms: int) -> tuple[float, int, int]:
@@ -123,7 +81,6 @@ def assess(
     roles_map: dict[int, tuple[str, Optional[float]]],
     duration_ms: int,
     teacher_confidence: Optional[float] = None,
-    identity_max_students: int = 0,
     bucket_ms: int = BUCKET_MS,
 ) -> dict:
     """Additive data-quality report for one analysed video.
@@ -142,10 +99,6 @@ def assess(
 
     coverage, occupied_buckets, span_buckets = _coverage(dets_by_track, bucket_ms)
 
-    concurrent = sorted(_concurrent_counts(dets_by_track, roles_map))
-    concurrent_peak = int(round(_percentile(concurrent, 0.95))) if concurrent else 0
-    concurrent_typical = int(round(_percentile(concurrent, 0.5))) if concurrent else 0
-
     notes: list[str] = []
 
     # --- identity-tracking confidence (fragmentation) ---------------------- #
@@ -155,13 +108,13 @@ def assess(
         identity_tier = "medium"
         notes.append(
             f"Tracker fragmented people into ~{fragmentation:.1f} ids each; "
-            "identity counts are re-id estimates."
+            "the teacher's timeline is a re-id estimate."
         )
     else:
         identity_tier = "low"
         notes.append(
             f"Heavy fragmentation (~{fragmentation:.1f} ids per person): treat "
-            "per-identity counts as approximate."
+            "the teacher's entry/exit and board sessions as approximate."
         )
 
     # --- coverage contribution --------------------------------------------- #
@@ -179,21 +132,6 @@ def assess(
             f"Low coverage ({coverage * 100:.0f}% of the active span): frequent "
             "dropout or occlusion, so time-based numbers are a floor."
         )
-
-    # --- occupancy confidence: coverage AND identity/concurrent agreement -- #
-    shortfall = concurrent_peak - identity_max_students
-    if concurrent_peak > 0 and shortfall > OCCUPANCY_AGREEMENT_TOL:
-        notes.append(
-            f"Up to {concurrent_peak} people were visible at once but only "
-            f"{identity_max_students} distinct identities formed; the crowd was "
-            "likely larger than the identity count."
-        )
-        agreement_tier: Tier = "low"
-    elif concurrent_peak > 0 and shortfall > 1:
-        agreement_tier = "medium"
-    else:
-        agreement_tier = "high"
-    occupancy_tier = _worst(coverage_tier, agreement_tier, identity_tier)
 
     # --- teacher-identification confidence --------------------------------- #
     if teacher_confidence is None:
@@ -213,7 +151,7 @@ def assess(
             "labelling is tentative."
         )
 
-    overall = _worst(occupancy_tier, identity_tier, teacher_tier, coverage_tier)
+    overall = _worst(identity_tier, teacher_tier, coverage_tier)
 
     return {
         "detections": detections,
@@ -224,11 +162,8 @@ def assess(
         "coverage": round(coverage, 3),
         "occupied_buckets": occupied_buckets,
         "span_buckets": span_buckets,
-        "concurrent_peak": concurrent_peak,
-        "concurrent_typical": concurrent_typical,
         "confidence": {
             "overall": overall,
-            "occupancy": occupancy_tier,
             "identity": identity_tier,
             "coverage": coverage_tier,
             "teacher": teacher_tier,

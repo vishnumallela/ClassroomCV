@@ -3,12 +3,12 @@ import { bigint, integer, jsonb, pgTable, real, text, timestamp, uuid } from "dr
 export type Bbox = { x: number; y: number; w: number; h: number };
 export type Polygon = [number, number][];
 export type ZoneMeta = { auto?: boolean; confidence?: number; method?: string };
-export type OccupancyPoint = { ts_ms: number; students: number; teacher: boolean };
 export type EntryExitItem = { kind: string; ts_ms: number };
 export type Interval = [number, number];
-// Spatial dwell histograms (row-major grid_h x grid_w per-cell sample counts).
-export type Heatmap = { grid_w: number; grid_h: number; teacher: number[]; students: number[] };
-const EMPTY_HEATMAP: Heatmap = { grid_w: 0, grid_h: 0, teacher: [], students: [] };
+// Teacher dwell histogram (row-major grid_h x grid_w per-cell sample counts).
+// Teacher-only since the 2026-08 KPI slimming (entry/exit, board time, heatmap).
+export type Heatmap = { grid_w: number; grid_h: number; teacher: number[] };
+const EMPTY_HEATMAP: Heatmap = { grid_w: 0, grid_h: 0, teacher: [] };
 export type QualityTier = "high" | "medium" | "low";
 // Additive per-run trust report from the ML service (services/ml-service/app/quality.py).
 export type DataQuality = {
@@ -20,11 +20,8 @@ export type DataQuality = {
   coverage: number;
   occupied_buckets: number;
   span_buckets: number;
-  concurrent_peak: number;
-  concurrent_typical: number;
   confidence: {
     overall: QualityTier;
-    occupancy: QualityTier;
     identity: QualityTier;
     coverage: QualityTier;
     teacher: QualityTier;
@@ -136,12 +133,9 @@ export const videoAnalytics = pgTable("video_analytics", {
   teacherBoardMs: bigint("teacher_board_ms", { mode: "number" }),
   entries: integer("entries").notNull().default(0),
   exits: integer("exits").notNull().default(0),
-  avgStudents: real("avg_students"),
-  maxStudents: integer("max_students"),
   presenceIntervals: jsonb("presence_intervals").$type<Interval[]>().notNull().default([]),
   boardIntervals: jsonb("board_intervals").$type<Interval[]>().notNull().default([]),
   entryExit: jsonb("entry_exit").$type<EntryExitItem[]>().notNull().default([]),
-  occupancy: jsonb("occupancy").$type<OccupancyPoint[]>().notNull().default([]),
   heatmap: jsonb("heatmap").$type<Heatmap>().notNull().default(EMPTY_HEATMAP),
   // Additive trust report; null for rows computed before the quality pass.
   dataQuality: jsonb("data_quality").$type<DataQuality | null>(),
