@@ -16,7 +16,9 @@ import { toDetailDto } from "@api/router/dto";
 const IdInput = z.object({ id: z.string() });
 
 export const videosRouter = {
-  list: base.handler(() => listVideos()),
+  list: base
+    .input(z.object({ classroomId: z.string().optional() }).optional())
+    .handler(({ input }) => listVideos(input?.classroomId)),
 
   get: base.input(IdInput).handler(async ({ input, errors }) => {
     const detail = await getVideoDetail(input.id);

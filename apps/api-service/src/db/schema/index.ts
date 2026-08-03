@@ -32,8 +32,38 @@ export type DataQuality = {
   notes: string[];
 };
 
+// A classroom is the unit users organize by: one physical room / camera, its
+// zone configuration, and every lesson recorded in it.
+export const classrooms = pgTable("classrooms", {
+  id: uuid("id").primaryKey().defaultRandom(),
+  name: text("name").notNull(),
+  location: text("location"),
+  description: text("description"),
+  createdAt: timestamp("created_at", { withTimezone: true }).notNull().defaultNow(),
+});
+
+// Zone template for a classroom's fixed camera: seeded into every new upload's
+// per-video zones, so board/door only have to be drawn once per room. Per-video
+// zones stay authoritative for analysis (a bumped camera can still be fixed on
+// one video without rewriting the room).
+export const classroomZones = pgTable("classroom_zones", {
+  id: uuid("id").primaryKey().defaultRandom(),
+  classroomId: uuid("classroom_id")
+    .notNull()
+    .references(() => classrooms.id, { onDelete: "cascade" }),
+  kind: text("kind").notNull(),
+  polygon: jsonb("polygon").$type<Polygon>().notNull(),
+  meta: jsonb("meta").$type<ZoneMeta | null>(),
+  createdAt: timestamp("created_at", { withTimezone: true }).defaultNow(),
+});
+
 export const videos = pgTable("videos", {
   id: uuid("id").primaryKey().defaultRandom(),
+  // Restrict (not cascade): deleting a classroom must not silently orphan
+  // object-store bytes; the API blocks deletion while videos exist.
+  classroomId: uuid("classroom_id").references(() => classrooms.id, {
+    onDelete: "restrict",
+  }),
   title: text("title").notNull(),
   originalFilename: text("original_filename").notNull(),
   filePath: text("file_path").notNull(),

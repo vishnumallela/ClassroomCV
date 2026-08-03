@@ -1,7 +1,15 @@
 import { rm } from "node:fs/promises";
 import { basename, extname, join } from "node:path";
 import type { Context, Hono } from "hono";
-import { createVideo, deleteVideoRows, getVideo, setWorkflowRunId } from "@api/db/queries";
+import {
+  createVideo,
+  deleteVideoRows,
+  getClassroom,
+  getClassroomZones,
+  getVideo,
+  insertZone,
+  setWorkflowRunId,
+} from "@api/db/queries";
 import { env } from "@api/lib/env";
 import { logger } from "@api/lib/logger";
 import { enqueueAnalysis } from "@api/lib/queue";
@@ -30,11 +38,36 @@ async function handleUpload(c: Context): Promise<Response> {
   const rawName = basename(c.req.query("filename") ?? "video.mp4") || "video.mp4";
   const ext = sanitizeExtension(rawName);
   const title = rawName.replace(/\.[^.]+$/, "").trim() || rawName;
+
+  // Every lesson belongs to a classroom: that is where its zone template and
+  // aggregate metrics live.
+  const classroomId = c.req.query("classroomId") ?? "";
+  const classroom = await getClassroom(classroomId);
+  if (!classroom) {
+    return c.json({ error: "Unknown classroom. Register the classroom first." }, 400);
+  }
+
   const id = crypto.randomUUID();
   const dir = join(env.API_SERVICE__DATA_DIR, "videos", id);
   const filePath = join(dir, `original${ext}`);
 
-  await createVideo({ id, title, originalFilename: rawName, filePath });
+  await createVideo({ id, title, originalFilename: rawName, filePath, classroomId });
+
+  // Seed the classroom's zone template into this video. The analysis worker
+  // skips board/door auto-detection for kinds that already exist, so a
+  // configured classroom never pays the detection step, and every lesson in a
+  // room shares the same polygons unless edited per video.
+  try {
+    for (const zone of await getClassroomZones(classroomId)) {
+      await insertZone(id, {
+        kind: zone.kind,
+        polygon: zone.polygon,
+        meta: { auto: false, method: "classroom-template" },
+      });
+    }
+  } catch (err) {
+    logger.warn({ err, id, classroomId }, "seeding classroom zones failed; auto-detect will run");
+  }
 
   const cleanup = async (): Promise<void> => {
     await rm(dir, { recursive: true, force: true }).catch(() => undefined);

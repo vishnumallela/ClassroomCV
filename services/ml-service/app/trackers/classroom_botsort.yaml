@@ -16,8 +16,10 @@
 #   half-visible person scores low but the box is spatially honest, and the
 #   second association is what carries her through the crowd.
 # - track_buffer 60: how many SAMPLED frames a lost track survives before
-#   deletion. At the 5 fps sampling cap that is ~12 s of occlusion bridged
-#   (30 = ~6 s, measured too short for a teacher crossing behind a front row).
+#   deletion. ~12 s of occlusion bridged at 5 fps sampling, ~30 s at the
+#   production 2 fps default (fine in a mostly-static room: a seated pupil's
+#   Kalman prediction stays put, and a drifted one fails the match gate anyway;
+#   30 frames = ~6 s was measured too short for a teacher crossing a front row).
 #   This is the single fragmentation knob, changed alone on purpose — the
 #   dead-end run below moved it together with association thresholds, and the
 #   damage came from those, not the buffer.

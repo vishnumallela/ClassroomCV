@@ -127,7 +127,7 @@ export async function mlStartAnalysis(input: StartAnalysisInput): Promise<string
   const res = await post<{ job_id?: string }>("/analyze", {
     video_id: input.videoId,
     video_path: input.videoPath,
-    sample_fps: input.sampleFps ?? 5,
+    sample_fps: input.sampleFps ?? env.API_SERVICE__SAMPLE_FPS,
     zones: input.zones,
     idempotency_key: input.idempotencyKey,
     run_tokens: input.runTokens,
