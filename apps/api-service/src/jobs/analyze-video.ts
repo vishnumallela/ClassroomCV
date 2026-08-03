@@ -21,8 +21,10 @@ import { isS3, presignGet, putLocalFile } from "@api/lib/storage";
 // URL (valid 6 h, long enough for a slow analysis) so nothing downloads the
 // whole video onto the API node: ffprobe reads only the header, ffmpeg only a
 // seeked frame, and the ML worker fetches its own local copy. On local it is
-// just the file path.
-function mediaSource(filePath: string): string {
+// just the file path. Exported: every ML call site (incl. the interactive
+// zone-detect route) must use this, or a remote GPU pod receives a local path
+// it cannot read.
+export function mediaSource(filePath: string): string {
   return isS3 ? (presignGet(filePath, 6 * 60 * 60) ?? filePath) : filePath;
 }
 import type { AnalyzeJobData } from "@api/lib/queue";

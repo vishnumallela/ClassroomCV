@@ -1,5 +1,5 @@
 import * as z from "zod";
-import { getVideo, replaceZones } from "@api/db/queries";
+import { countDetectionEvents, getVideo, replaceZones } from "@api/db/queries";
 import { applyRederive } from "@api/analysis/rederive";
 import { base } from "@api/orpc/base";
 
@@ -19,11 +19,18 @@ export const zonesRouter = {
       throw errors.CONFLICT({ message: "Cannot edit zones during analysis." });
     }
     await replaceZones(input.id, input.zones);
+    // Raw detections age out (2-day hot-tier retention). Rederiving from an
+    // empty hot tier would replace the analytics and the PERMANENT overlay
+    // keyframes with zeros. Keep the saved zones (they apply on the next full
+    // analysis) but skip the destructive rederive.
+    if ((await countDetectionEvents(input.id)) === 0) {
+      return { ok: true as const, rederived: false as const };
+    }
     try {
       await applyRederive(input.id, input.zones, { markDone: false });
     } catch {
       throw errors.DEPENDENCY_UNAVAILABLE({ message: "Zones saved, but re-derivation failed." });
     }
-    return { ok: true as const };
+    return { ok: true as const, rederived: true as const };
   }),
 };

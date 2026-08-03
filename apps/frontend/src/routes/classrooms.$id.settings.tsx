@@ -58,8 +58,12 @@ function ClassroomSettings() {
       await queryClient.invalidateQueries();
       void navigate({ to: "/" });
     },
-    onError: () =>
-      setDeleteError("This classroom still holds lessons. Delete them first."),
+    // Surface the API's actual message (e.g. the lessons-still-exist CONFLICT);
+    // anything else — network, 500 — must not masquerade as that diagnosis.
+    onError: (err) =>
+      setDeleteError(
+        err instanceof Error && err.message ? err.message : "Delete failed. Try again.",
+      ),
   });
 
   if (isLoading || !data) {
@@ -163,7 +167,9 @@ function ClassroomSettings() {
           <p className="text-sm text-muted-foreground">
             {reference
               ? "No zones configured yet. New lessons will fall back to automatic board/door detection."
-              : "Upload one lesson first — zones are drawn on a real frame from this room's camera."}
+              : data.videos.length > 0
+                ? "A lesson is still processing — zones can be drawn on its first frame once it's ready."
+                : "Upload one lesson first — zones are drawn on a real frame from this room's camera."}
           </p>
         )}
       </Card>
@@ -203,7 +209,9 @@ function ClassroomSettings() {
           videoId={reference.id}
           title="Configure classroom zones"
           frameSrc={reference.thumbnailUrl ? `${API_URL}${reference.thumbnailUrl}` : null}
-          aspect={16 / 9}
+          aspect={
+            reference.width && reference.height ? reference.width / reference.height : 16 / 9
+          }
           initialZones={data.zones.map((z) => ({ kind: z.kind, polygon: z.polygon }))}
           onSave={async (zones: ZonePayload[]) => {
             await orpcClient.classrooms.setZones({ id, zones });

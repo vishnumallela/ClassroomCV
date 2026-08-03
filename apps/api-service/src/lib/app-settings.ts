@@ -17,9 +17,14 @@ export type SettingKey = (typeof SETTING_KEYS)[number];
 
 const CACHE_TTL_MS = 10_000;
 let cache: { at: number; values: Partial<Record<SettingKey, string>> } | null = null;
+// Bumped on every write. A read that started BEFORE a write must not
+// repopulate the cache with its (possibly stale) rows after the write's
+// invalidation — the generation check makes that in-flight result uncacheable.
+let generation = 0;
 
 export async function getAppSettings(): Promise<Partial<Record<SettingKey, string>>> {
   if (cache && Date.now() - cache.at < CACHE_TTL_MS) return cache.values;
+  const startedAt = generation;
   const rows = await db.select().from(appSettings);
   const values: Partial<Record<SettingKey, string>> = {};
   for (const row of rows) {
@@ -27,7 +32,7 @@ export async function getAppSettings(): Promise<Partial<Record<SettingKey, strin
       values[row.key as SettingKey] = row.value;
     }
   }
-  cache = { at: Date.now(), values };
+  if (startedAt === generation) cache = { at: Date.now(), values };
   return values;
 }
 
@@ -44,6 +49,7 @@ export async function setAppSetting(key: SettingKey, value: string | null): Prom
       });
   }
   cache = null;
+  generation++;
 }
 
 /** ML service base URL: the Settings-page value wins over the env default, so

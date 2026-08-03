@@ -37,6 +37,13 @@ class Settings(BaseSettings):
     # yolo26l-pose (batched) over x (see docs).
     model_name: str = "auto"
     device: str = "auto"
+    # Directory for auto-resolved weights AND their exported TensorRT engines.
+    # On RunPod point it at the volume (WEIGHTS_DIR=/workspace/weights): pod
+    # stop/start recreates the container layer, so a CWD-relative cache would
+    # re-download the weight and re-run the multi-minute engine export on
+    # billed GPU time at every start. Empty = current directory (dev).
+    # An explicit MODEL_NAME path is always used verbatim.
+    weights_dir: str = ""
     # Refuse to run when the resolved device is not this one (e.g. "cuda").
     # Empty disables the guard (dev boxes float between mps/cpu freely). A GPU
     # pod that silently degrades to CPU bills ~20x the wall-clock for the same

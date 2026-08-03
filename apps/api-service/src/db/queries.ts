@@ -253,6 +253,8 @@ export interface VideoListItem {
   status: string;
   progress: number;
   durationMs: number | null;
+  width: number | null;
+  height: number | null;
   uploadedAt: string;
   thumbnailUrl: string | null;
   error: string | null;
@@ -271,6 +273,8 @@ export async function listVideos(classroomId?: string): Promise<VideoListItem[]>
       status: videos.status,
       progress: videos.progress,
       durationMs: videos.durationMs,
+      width: videos.width,
+      height: videos.height,
       uploadedAt: videos.uploadedAt,
       thumbnailPath: videos.thumbnailPath,
       error: videos.error,
@@ -292,6 +296,8 @@ export async function listVideos(classroomId?: string): Promise<VideoListItem[]>
       status: r.status,
       progress: r.progress,
       durationMs: r.durationMs,
+      width: r.width,
+      height: r.height,
       uploadedAt: r.uploadedAt.toISOString(),
       thumbnailUrl: r.thumbnailPath ? `/videos/${r.id}/thumbnail` : null,
       error: r.error,

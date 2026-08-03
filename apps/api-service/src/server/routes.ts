@@ -51,7 +51,16 @@ async function handleUpload(c: Context): Promise<Response> {
   const dir = join(env.API_SERVICE__DATA_DIR, "videos", id);
   const filePath = join(dir, `original${ext}`);
 
-  await createVideo({ id, title, originalFilename: rawName, filePath, classroomId });
+  try {
+    await createVideo({ id, title, originalFilename: rawName, filePath, classroomId });
+  } catch (err) {
+    // The classroom can be deleted between the existence check and this
+    // insert; the FK (23503) catches it — answer 400, not a raw 500.
+    if ((err as { code?: string })?.code === "23503") {
+      return c.json({ error: "Unknown classroom. Register the classroom first." }, 400);
+    }
+    throw err;
+  }
 
   // Seed the classroom's zone template into this video. The analysis worker
   // skips board/door auto-detection for kinds that already exist, so a

@@ -45,6 +45,16 @@ export const analysisRouter = {
     if (video.status !== "done" && video.status !== "failed") {
       throw errors.CONFLICT({ message: "Cannot rederive during analysis." });
     }
+    // Raw detections age out (2-day hot-tier retention). Rederiving from an
+    // empty hot tier would REPLACE the stored analytics and the permanent
+    // overlay keyframes with zeros — irrecoverably, short of a full YOLO
+    // re-run. Refuse instead of destroying.
+    if ((await countDetectionEvents(input.id)) === 0) {
+      throw errors.CONFLICT({
+        message:
+          "Raw detections for this lesson have aged out; use Re-analyze to run the full pipeline again.",
+      });
+    }
     try {
       await rederiveFromRaw(input.id);
     } catch {

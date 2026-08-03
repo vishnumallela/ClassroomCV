@@ -20,7 +20,16 @@ export function NewClassroomDialog({ onClose }: { onClose: () => void }) {
   const [saving, setSaving] = useState(false);
   const [error, setError] = useState<string | null>(null);
 
-  useEffect(() => nameRef.current?.focus(), []);
+  useEffect(() => {
+    nameRef.current?.focus();
+    // Window-level so Escape works wherever focus has wandered (clicking the
+    // dialog's text moves focus to <body>, where a div-level handler is deaf).
+    const onKey = (e: KeyboardEvent) => {
+      if (e.key === "Escape") onClose();
+    };
+    window.addEventListener("keydown", onKey);
+    return () => window.removeEventListener("keydown", onKey);
+  }, [onClose]);
 
   const submit = async () => {
     if (!name.trim() || saving) return;
@@ -46,9 +55,6 @@ export function NewClassroomDialog({ onClose }: { onClose: () => void }) {
       role="dialog"
       aria-modal="true"
       aria-label="Register classroom"
-      onKeyDown={(e) => {
-        if (e.key === "Escape") onClose();
-      }}
     >
       <button
         type="button"

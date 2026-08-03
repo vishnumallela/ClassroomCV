@@ -87,7 +87,11 @@ export function UploadZone({ classroomId }: { classroomId: string }) {
         type="file"
         accept="video/*"
         className="hidden"
-        onChange={(e) => onFiles(e.target.files)}
+        onChange={(e) => {
+          onFiles(e.target.files);
+          // Reset so re-picking the SAME file after a failure fires change again.
+          e.target.value = "";
+        }}
       />
     </Card>
   );

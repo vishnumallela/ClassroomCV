@@ -68,11 +68,13 @@ export const classroomsRouter = {
       const { id, ...patch } = input;
       const classroom = await getClassroom(id);
       if (!classroom) throw errors.NOT_FOUND();
-      await updateClassroom(id, {
+      const set = {
         ...(patch.name !== undefined ? { name: patch.name } : {}),
         ...(patch.location !== undefined ? { location: patch.location } : {}),
         ...(patch.description !== undefined ? { description: patch.description } : {}),
-      });
+      };
+      // Drizzle's .set({}) throws; an id-only request is a valid no-op.
+      if (Object.keys(set).length > 0) await updateClassroom(id, set);
       return { ok: true as const };
     }),
 
@@ -85,7 +87,19 @@ export const classroomsRouter = {
         message: `Classroom still holds ${videoCount} lesson${videoCount === 1 ? "" : "s"}. Delete them first.`,
       });
     }
-    await deleteClassroomRow(input.id);
+    try {
+      await deleteClassroomRow(input.id);
+    } catch (err) {
+      // An upload can insert a video between the count and the delete; the
+      // restrict FK (23503) protects the data — surface the same CONFLICT
+      // instead of a raw 500.
+      if ((err as { code?: string })?.code === "23503") {
+        throw errors.CONFLICT({
+          message: "Classroom still holds lessons. Delete them first.",
+        });
+      }
+      throw err;
+    }
     return { ok: true as const };
   }),
 

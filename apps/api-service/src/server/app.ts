@@ -1,5 +1,6 @@
 import { RPCHandler } from "@orpc/server/fetch";
 import { Hono } from "hono";
+import { basicAuth } from "hono/basic-auth";
 import { cors } from "hono/cors";
 import { env } from "@api/lib/env";
 import { appRouter } from "@api/router";
@@ -22,6 +23,16 @@ export function createApp(): Hono {
   );
 
   app.get("/health", (c) => c.json({ ok: true }));
+  // The queue dashboard can retry/discard jobs — never expose it unauthenticated.
+  // Credentials come from API_SERVICE__QUEUE_DASHBOARD_USER/PASSWORD (change the
+  // defaults in production).
+  app.use(
+    "/admin/queues/*",
+    basicAuth({
+      username: env.API_SERVICE__QUEUE_DASHBOARD_USER,
+      password: env.API_SERVICE__QUEUE_DASHBOARD_PASSWORD,
+    }),
+  );
   app.route("/admin/queues", createDashboard("/admin/queues"));
   registerBinaryRoutes(app);
 

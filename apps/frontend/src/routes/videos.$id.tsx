@@ -44,12 +44,15 @@ function VideoDetail() {
     mutationFn: () => orpcClient.videos.delete({ id }),
     onSuccess: async () => {
       const classroomId = data?.classroom?.id;
-      await queryClient.invalidateQueries();
+      // Navigate FIRST: a global invalidate would refetch this (now deleted)
+      // video's query and flash "Could not load this recording." before the
+      // redirect lands.
       if (classroomId) {
-        navigate({ to: "/classrooms/$id/videos", params: { id: classroomId } });
+        await navigate({ to: "/classrooms/$id/videos", params: { id: classroomId } });
       } else {
-        navigate({ to: "/" });
+        await navigate({ to: "/" });
       }
+      void queryClient.invalidateQueries();
     },
   });
 
@@ -67,6 +70,10 @@ function VideoDetail() {
 
   const { video, analytics, events, classroom } = data;
   const done = video.status === "done";
+  // Zones and re-analyze are legal on failed lessons too (the API supports
+  // both) — that is exactly how a lesson that failed while the GPU was off
+  // gets re-run once it is back.
+  const settled = done || video.status === "failed";
   const seek = (ms: number) => {
     if (videoRef.current) videoRef.current.currentTime = ms / 1000;
   };
@@ -95,13 +102,18 @@ function VideoDetail() {
           </div>
         </div>
         <div className="flex items-center gap-2">
-          <Button variant="outline" size="sm" disabled={!done} onClick={() => setEditorOpen(true)}>
+          <Button
+            variant="outline"
+            size="sm"
+            disabled={!settled}
+            onClick={() => setEditorOpen(true)}
+          >
             Edit zones
           </Button>
           <Button
             variant="outline"
             size="sm"
-            disabled={reanalyze.isPending || !done}
+            disabled={reanalyze.isPending || !settled}
             onClick={() => reanalyze.mutate()}
           >
             {reanalyze.isPending ? "Re-analyzing" : "Re-analyze"}

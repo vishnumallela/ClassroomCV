@@ -20,8 +20,9 @@ export const Route = createFileRoute("/classrooms/$id/metrics")({ component: Cla
 
 /**
  * The classroom across all its lessons: aggregate tiles on top, one row per
- * lesson underneath. Per-lesson depth (timeline, heatmap, occupancy) stays on
- * the lesson page — this view answers "how is this room doing overall?".
+ * lesson underneath. Per-lesson depth (timeline, board sessions, heatmap)
+ * stays on the lesson page — this view answers "how is this room doing
+ * overall?".
  */
 function ClassroomMetrics() {
   const { id } = Route.useParams();
@@ -181,8 +182,8 @@ function ClassroomMetrics() {
       {lessons.length > 0 && (
         <p className="text-xs text-muted-foreground">
           Aggregates cover the {m.analyzedCount} analyzed lesson
-          {m.analyzedCount === 1 ? "" : "s"}; attendance is duration-weighted so short clips don't
-          skew the average.
+          {m.analyzedCount === 1 ? "" : "s"}; board share divides by board-tracked time only, so
+          lessons without a board zone never dilute it.
         </p>
       )}
     </div>

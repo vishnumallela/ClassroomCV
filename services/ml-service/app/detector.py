@@ -209,15 +209,22 @@ def _assert_required_device(resolved: str) -> None:
 
 def resolve_model_name() -> str:
     """The YOLO weight to load: Settings.model_name, or the best device default
-    when it is 'auto'/empty. On cuda an already-exported TensorRT engine next
-    to the default weight is preferred (built by TENSORRT_EXPORT or
-    scripts/export_tensorrt.py); an explicit MODEL_NAME is always honoured
-    verbatim."""
-    configured = (get_settings().model_name or "").strip()
+    when it is 'auto'/empty. Auto-resolved weights live under WEIGHTS_DIR when
+    set (the RunPod volume — the container layer is recreated on every pod
+    start, so a CWD cache would re-download and re-export each time). On cuda
+    an already-exported TensorRT engine next to the weight is preferred (built
+    by TENSORRT_EXPORT or scripts/export_tensorrt.py); an explicit MODEL_NAME
+    is always honoured verbatim."""
+    settings = get_settings()
+    configured = (settings.model_name or "").strip()
     if configured and configured.lower() != "auto":
         return configured
     base = get_device().split(":", 1)[0]  # 'cuda:0' -> 'cuda'
     name = _DEVICE_MODEL_DEFAULT.get(base, "yolo26m-pose.pt")
+    weights_dir = (settings.weights_dir or "").strip()
+    if weights_dir:
+        os.makedirs(weights_dir, exist_ok=True)
+        name = str(Path(weights_dir) / name)
     if base == "cuda":
         engine = Path(name).with_suffix(".engine")
         if engine.is_file():

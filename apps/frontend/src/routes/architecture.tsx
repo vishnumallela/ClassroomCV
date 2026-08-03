@@ -14,7 +14,7 @@ const SUMMARY: [string, string][] = [
   ["Input", "classroom video (H.264/H.265, any length), + optional board/door zones"],
   [
     "Output",
-    "teacher presence / board / entry-exit intervals, 5 s occupancy series, 32x18 dwell heatmap, per-lesson analytics, data-quality report",
+    "the three teacher KPIs — entry/exit, board time, 32x18 dwell heatmap — plus presence/board intervals and a data-quality report",
   ],
   [
     "Sampling",
@@ -73,7 +73,7 @@ const PIPELINE: { n: string; stage: string; module: string; io: string }[] = [
     n: "8",
     stage: "Event derivation",
     module: "events.derive",
-    io: "roles + zones -> presence / board / entry-exit / occupancy / heatmap",
+    io: "roles + zones -> presence / board / entry-exit / teacher heatmap",
   },
   {
     n: "9",
@@ -219,8 +219,7 @@ const EVENTS: [string, string][] = [
     "board",
     "hysteresis state machine: 2 s sustained ON to open, 3 s OFF to close; a >= 5 s sampling gap hard-closes; tolerates single-frame flicker (budget 600 ms)",
   ],
-  ["occupancy", "distinct non-teacher track_no per 5 s bucket -> avg_students, max_students"],
-  ["heatmap", "32x18 grid of bbox-centre dwell counts, teacher vs student"],
+  ["heatmap", "32x18 grid of the teacher's bbox-centre dwell counts (teacher-only since the KPI slimming)"],
 ];
 
 const QUALITY: [string, string][] = [
@@ -230,12 +229,12 @@ const QUALITY: [string, string][] = [
   ],
   ["fragmentation", "raw_tracks / identities; tiers <=2 (clean) / <=4 (fair) / else low"],
   [
-    "concurrent count",
-    "p95 of non-teacher boxes per frame; re-id-INDEPENDENT cross-check on max_students (one body = one box per frame)",
+    "teacher ID",
+    "geometric ranker margin, confirmed/overridden by a hard-budgeted vision vote (<= 6 calls/lesson)",
   ],
   [
     "confidence tiers",
-    "per dimension (coverage, tracking, occupancy, teacher) + overall = weakest link",
+    "per dimension (coverage, tracking, teacher) + overall = weakest link",
   ],
 ];
 
@@ -254,7 +253,7 @@ const STORAGE: { tier: string; contents: string; policy: string }[] = [
   },
   {
     tier: "Aggregate",
-    contents: "events, track summaries, video_analytics, 1-min occupancy continuous aggregate",
+    contents: "events, track summaries, video_analytics (three teacher KPIs)",
     policy: "permanent; negligible size; everything the dashboard reads",
   },
   {

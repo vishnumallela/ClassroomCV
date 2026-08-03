@@ -86,6 +86,10 @@ export function ZoneEditor({
         if (latest.current.hasDraft) setDraft([]);
         else latest.current.onClose();
       } else if (e.key === "Enter") {
+        // preventDefault: the stage is a focused <button>, and Enter's default
+        // activation would fire onClick at (0,0) — a phantom point that
+        // re-opens a draft and keeps Save disabled.
+        e.preventDefault();
         latest.current.closeDraft();
       } else if (e.key === "Backspace") {
         setDraft((d) => d.slice(0, -1));
@@ -126,7 +130,13 @@ export function ZoneEditor({
       await queryClient.invalidateQueries();
       onClose();
     } catch {
-      setSaveError("Save failed. The recording may still be processing.");
+      // The per-video save has a real precondition (analysis settled); the
+      // classroom-template save (onSave) has none, so don't blame processing.
+      setSaveError(
+        onSave
+          ? "Save failed. Check the connection and try again."
+          : "Save failed. The recording may still be processing.",
+      );
       setSaving(false);
     }
   };
@@ -138,6 +148,7 @@ export function ZoneEditor({
       className="fixed inset-0 z-50 flex items-center justify-center bg-black/70 p-4"
       role="dialog"
       aria-modal="true"
+      aria-label={title}
     >
       <div className="w-full max-w-3xl rounded-xl border border-border bg-card p-4 shadow-xl">
         <div className="mb-3 flex items-center justify-between">
@@ -152,9 +163,12 @@ export function ZoneEditor({
           type="button"
           className="relative block w-full cursor-crosshair overflow-hidden rounded-lg border border-border bg-black"
           style={{ aspectRatio: String(aspect) }}
-          onClick={(e: MouseEvent) =>
-            setDraft((d) => [...d, pointFromClient(e.clientX, e.clientY)])
-          }
+          onClick={(e: MouseEvent) => {
+            // detail === 0 is a keyboard-synthesized click (Enter/Space on the
+            // focused button): never a real stage coordinate.
+            if (e.detail === 0) return;
+            setDraft((d) => [...d, pointFromClient(e.clientX, e.clientY)]);
+          }}
           onMouseMove={(e: MouseEvent) => setCursor(pointFromClient(e.clientX, e.clientY))}
           onDoubleClick={closeDraft}
         >

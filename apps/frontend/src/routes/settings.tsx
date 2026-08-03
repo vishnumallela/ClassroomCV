@@ -65,7 +65,14 @@ function Settings() {
   }
   const s = settings.data;
   const g = gpu.data;
-  const podState = g?.pod ? (POD_STATE[g.pod.desiredStatus] ?? null) : null;
+  // Transitional/unknown states from RunPod still ARE an answer — show them
+  // verbatim instead of pretending the pod is unreachable.
+  const podState = g?.pod
+    ? (POD_STATE[g.pod.desiredStatus] ?? {
+        label: g.pod.desiredStatus.toLowerCase(),
+        tone: "medium" as const,
+      })
+    : null;
   const dirty = apiKey !== "" || podId !== null || mlUrl !== null;
 
   return (

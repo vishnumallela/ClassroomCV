@@ -294,7 +294,12 @@ def verify_teacher(
     for raw in pooled:
         weight[track_of_raw[raw]] += len(frames_of_raw[raw])
     track_no = weight.most_common(1)[0][0]
-    confidence = round(pooled_votes / max(1, answered), 3)
+    # Map the vote ratio onto the ROLES confidence scale (0.5 + margin, where
+    # quality.py tiers high >= 0.65, medium >= 0.55). The raw ratio (2/6 =
+    # 0.33 at the minimum passing vote) would read as LOW trust for a teacher
+    # the vision model just confirmed — enabling the verifier must never
+    # lower reported quality on a correct result.
+    confidence = round(0.5 + 0.4 * (pooled_votes / max(1, answered)), 3)
     logger.info(
         "teacher-id: track %d via fragments %s (%d/%d pooled votes, conf %.2f)",
         track_no, sorted(pooled), pooled_votes, answered, confidence,

@@ -25,13 +25,15 @@ COPY app ./app
 COPY scripts ./scripts
 
 # Weights: MODEL_NAME=auto resolves to yolo26x-pose.pt on cuda; ultralytics
-# downloads it on first use into this dir. Mount a volume here so the weight
-# AND the exported .engine survive pod restarts.
+# downloads it on first use into WEIGHTS_DIR. Mount the pod volume at
+# /workspace (NOT at the workdir — that would shadow the app code) so the
+# weight AND the exported .engine survive pod stop/start.
 ENV DEVICE=cuda \
     REQUIRE_DEVICE=cuda \
     TENSORRT_EXPORT=true \
     IMGSZ=1536 \
-    MODEL_NAME=auto
+    MODEL_NAME=auto \
+    WEIGHTS_DIR=/workspace/weights
 
 EXPOSE 8000
 CMD ["uvicorn", "app.main:app", "--host", "0.0.0.0", "--port", "8000"]
