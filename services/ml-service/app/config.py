@@ -26,16 +26,43 @@ class Settings(BaseSettings):
     #                        yolo26m-pose on mps/cpu (keeps dev iteration fast).
     #
     # YOLO26 is NMS-free and reports up to +7.2 pose AP over YOLO11 (COCO
-    # m-pose 68.8, l-pose 70.4). On a GPU, export to TensorRT for a ~5x fp16
-    # speedup and point MODEL_NAME at the engine, e.g.:
-    #   yolo export model=yolo26x-pose.pt format=engine half=True dynamic=True
-    #   MODEL_NAME=yolo26x-pose.engine DEVICE=cuda IMGSZ=1536
-    # For a large live fleet prefer yolo26l-pose (batched) over x (see docs).
+    # m-pose 68.8, l-pose 70.4). NMS-free matters here specifically: NMS merges
+    # overlapping boxes, which is how a half-visible teacher standing behind a
+    # student silently disappears from a crowded frame.
+    #
+    # Production (RunPod L4) profile — see docs/runpod-gpu-deployment.md:
+    #   DEVICE=cuda REQUIRE_DEVICE=cuda TENSORRT_EXPORT=true IMGSZ=1536
+    # The engine is exported once on the pod (cached on the volume) and served
+    # automatically on every later start. For a large live fleet prefer
+    # yolo26l-pose (batched) over x (see docs).
     model_name: str = "auto"
     device: str = "auto"
+    # Directory for auto-resolved weights AND their exported TensorRT engines.
+    # On RunPod point it at the volume (WEIGHTS_DIR=/workspace/weights): pod
+    # stop/start recreates the container layer, so a CWD-relative cache would
+    # re-download the weight and re-run the multi-minute engine export on
+    # billed GPU time at every start. Empty = current directory (dev).
+    # An explicit MODEL_NAME path is always used verbatim.
+    weights_dir: str = ""
+    # Refuse to run when the resolved device is not this one (e.g. "cuda").
+    # Empty disables the guard (dev boxes float between mps/cpu freely). A GPU
+    # pod that silently degrades to CPU bills ~20x the wall-clock for the same
+    # job, so production must die loudly instead.
+    require_device: str = ""
+    # On cuda: export MODEL_NAME's .pt to a TensorRT engine at first load
+    # (one-time, minutes, cached next to the weight) and serve the engine.
+    # fp16 engine on an L4 is the ~5x throughput lever that turns a 12-camera
+    # class-day into ~3 GPU-hours. Engines are per-GPU-model, which is why the
+    # export runs on the pod itself rather than in the image build.
+    tensorrt_export: bool = False
     # 1280 halves a 2560px CCTV frame so small back-row people survive letterbox
-    # downscale; on a GPU with headroom raise to 1536 (env IMGSZ) for more recall.
+    # downscale; on a GPU with headroom raise to 1536 (env IMGSZ) for more recall
+    # on distant, partially occluded people. The dynamic engine export covers
+    # both sizes without a rebuild.
     imgsz: int = 1280
+    # 0.1 keeps the low-confidence boxes an occluded, half-visible person
+    # produces; BoT-SORT's second association pass (track_low_thresh) is what
+    # turns them into continued tracks instead of noise.
     det_conf: float = 0.1
     max_det: int = 100
     # Comma-separated host[:port] allowlist for presigned media URLs. Empty
@@ -47,6 +74,22 @@ class Settings(BaseSettings):
     tracker_cfg: str = str(
         Path(__file__).resolve().parent / "trackers" / "classroom_botsort.yaml"
     )
+
+    # Teacher identification: bounded vision-model vote (app/teacher_id.py).
+    # Getting "who is the teacher" right decides every KPI, so the geometric
+    # ranker gets a second opinion of AT MOST vlm_frames Gemini calls per
+    # analysis (~$0.002/lesson) — never per-claim, never unbounded. Empty
+    # GEMINI_API_KEY disables it entirely (zero calls, geometric-only).
+    # vlm_model pins the "-latest" alias: dated 2.5-flash versions 404 on new
+    # API keys while still listed in the catalog.
+    gemini_api_key: str = ""
+    vlm_model: str = "gemini-flash-latest"
+    vlm_frames: int = 6  # hard per-analysis call cap
+    vlm_min_votes: int = 2  # pooled votes needed to crown/override
+    # REJECT the geometric pick only on positive evidence: the model answered
+    # at least this many frames and never once pointed at it. A network
+    # failure (0 answered) must keep the geometric pick.
+    vlm_reject_min_answered: int = 4
 
 
 @lru_cache

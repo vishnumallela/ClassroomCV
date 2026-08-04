@@ -1,13 +1,12 @@
 import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
 import { Link, createFileRoute, useNavigate } from "@tanstack/react-router";
-import { Suspense, lazy, useRef, useState } from "react";
+import { useRef, useState } from "react";
 import { BoardSessions } from "@/components/board-sessions";
 import { CirculationCard } from "@/components/circulation-card";
 import { DataQualityCard } from "@/components/data-quality-card";
 import { EventsTable } from "@/components/events-table";
 import { HeatmapCard } from "@/components/heatmap-card";
 import { KpiCards } from "@/components/kpi-cards";
-import { LessonBreakdown } from "@/components/lesson-breakdown";
 import { StatusBadge } from "@/components/status-badge";
 import { TimelineStrip } from "@/components/timeline-strip";
 import { Button } from "@/components/ui/button";
@@ -17,11 +16,6 @@ import { VideoPlayer } from "@/components/video-player";
 import { ZoneEditor } from "@/components/zone-editor";
 import { msToClock } from "@/lib/format";
 import { API_URL, orpc, orpcClient } from "@/lib/orpc";
-
-// recharts is heavy, so the occupancy chart loads on demand after the page mounts.
-const OccupancyChart = lazy(() =>
-  import("@/components/occupancy-chart").then((m) => ({ default: m.OccupancyChart })),
-);
 
 export const Route = createFileRoute("/videos/$id")({ component: VideoDetail });
 
@@ -49,8 +43,16 @@ function VideoDetail() {
   const remove = useMutation({
     mutationFn: () => orpcClient.videos.delete({ id }),
     onSuccess: async () => {
-      await queryClient.invalidateQueries();
-      navigate({ to: "/" });
+      const classroomId = data?.classroom?.id;
+      // Navigate FIRST: a global invalidate would refetch this (now deleted)
+      // video's query and flash "Could not load this recording." before the
+      // redirect lands.
+      if (classroomId) {
+        await navigate({ to: "/classrooms/$id/videos", params: { id: classroomId } });
+      } else {
+        await navigate({ to: "/" });
+      }
+      void queryClient.invalidateQueries();
     },
   });
 
@@ -66,8 +68,12 @@ function VideoDetail() {
     return <Card className="p-6 text-sm text-destructive">Could not load this recording.</Card>;
   }
 
-  const { video, analytics, events } = data;
+  const { video, analytics, events, classroom } = data;
   const done = video.status === "done";
+  // Zones and re-analyze are legal on failed lessons too (the API supports
+  // both) — that is exactly how a lesson that failed while the GPU was off
+  // gets re-run once it is back.
+  const settled = done || video.status === "failed";
   const seek = (ms: number) => {
     if (videoRef.current) videoRef.current.currentTime = ms / 1000;
   };
@@ -76,9 +82,19 @@ function VideoDetail() {
     <div className="space-y-6">
       <div className="flex flex-wrap items-start justify-between gap-4">
         <div>
-          <Link to="/" className="text-xs text-muted-foreground hover:text-foreground">
-            Back to library
-          </Link>
+          {classroom ? (
+            <Link
+              to="/classrooms/$id/videos"
+              params={{ id: classroom.id }}
+              className="text-xs text-muted-foreground hover:text-foreground"
+            >
+              ← {classroom.name}
+            </Link>
+          ) : (
+            <Link to="/" className="text-xs text-muted-foreground hover:text-foreground">
+              ← Classrooms
+            </Link>
+          )}
           <h1 className="mt-1 text-2xl font-semibold tracking-tight">{video.title}</h1>
           <div className="mt-1 flex items-center gap-2 text-sm text-muted-foreground">
             <StatusBadge status={video.status} />
@@ -86,13 +102,18 @@ function VideoDetail() {
           </div>
         </div>
         <div className="flex items-center gap-2">
-          <Button variant="outline" size="sm" disabled={!done} onClick={() => setEditorOpen(true)}>
+          <Button
+            variant="outline"
+            size="sm"
+            disabled={!settled}
+            onClick={() => setEditorOpen(true)}
+          >
             Edit zones
           </Button>
           <Button
             variant="outline"
             size="sm"
-            disabled={reanalyze.isPending || !done}
+            disabled={reanalyze.isPending || !settled}
             onClick={() => reanalyze.mutate()}
           >
             {reanalyze.isPending ? "Re-analyzing" : "Re-analyze"}
@@ -141,7 +162,6 @@ function VideoDetail() {
             }
           />
           <DataQualityCard analytics={analytics} />
-          <LessonBreakdown analytics={analytics} durationMs={video.durationMs} />
           <TimelineStrip
             durationMs={video.durationMs}
             presenceIntervals={analytics.presenceIntervals}
@@ -150,9 +170,6 @@ function VideoDetail() {
             currentMs={currentMs}
             onSeek={seek}
           />
-          <Suspense fallback={<Skeleton className="h-64 w-full rounded-xl" />}>
-            <OccupancyChart analytics={analytics} durationMs={video.durationMs} onSeek={seek} />
-          </Suspense>
           <CirculationCard analytics={analytics} />
           <HeatmapCard
             analytics={analytics}

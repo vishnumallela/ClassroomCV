@@ -2,6 +2,8 @@ import { and, desc, eq, sql } from "drizzle-orm";
 import { db, sql as pg } from "@api/lib/db";
 import {
   type Bbox,
+  classroomZones,
+  classrooms,
   events,
   type Polygon,
   tracks,
@@ -24,18 +26,192 @@ function chunk<T>(items: T[], size: number): T[][] {
 }
 
 export type VideoRow = typeof videos.$inferSelect;
+export type ClassroomRow = typeof classrooms.$inferSelect;
 export type ZoneInput = { kind: string; polygon: Polygon };
+
+// ---------------------------------------------------------------------------
+// Classrooms
+// ---------------------------------------------------------------------------
+
+export async function createClassroom(input: {
+  name: string;
+  location?: string | null;
+  description?: string | null;
+}): Promise<ClassroomRow> {
+  const [row] = await db
+    .insert(classrooms)
+    .values({
+      name: input.name,
+      location: input.location ?? null,
+      description: input.description ?? null,
+    })
+    .returning();
+  return row!;
+}
+
+export async function getClassroom(id: string): Promise<ClassroomRow | undefined> {
+  if (!isUuid(id)) return undefined;
+  const [row] = await db.select().from(classrooms).where(eq(classrooms.id, id));
+  return row;
+}
+
+export async function updateClassroom(
+  id: string,
+  patch: { name?: string; location?: string | null; description?: string | null },
+): Promise<ClassroomRow | undefined> {
+  const [row] = await db
+    .update(classrooms)
+    .set(patch)
+    .where(eq(classrooms.id, id))
+    .returning();
+  return row;
+}
+
+export async function deleteClassroomRow(id: string): Promise<void> {
+  await db.delete(classrooms).where(eq(classrooms.id, id));
+}
+
+export interface ClassroomListItem {
+  id: string;
+  name: string;
+  location: string | null;
+  description: string | null;
+  createdAt: string;
+  videoCount: number;
+  processingCount: number;
+  lastUploadAt: string | null;
+  zoneKinds: string[];
+}
+
+export async function listClassrooms(): Promise<ClassroomListItem[]> {
+  const rows = await db
+    .select({
+      id: classrooms.id,
+      name: classrooms.name,
+      location: classrooms.location,
+      description: classrooms.description,
+      createdAt: classrooms.createdAt,
+      videoCount: sql<number>`count(${videos.id})::int`,
+      processingCount: sql<number>`count(${videos.id}) filter (where ${videos.status} not in ('done', 'failed'))::int`,
+      lastUploadAt: sql<Date | null>`max(${videos.uploadedAt})`,
+    })
+    .from(classrooms)
+    .leftJoin(videos, eq(videos.classroomId, classrooms.id))
+    .groupBy(classrooms.id)
+    .orderBy(desc(classrooms.createdAt));
+  const zoneRows = await db
+    .select({ classroomId: classroomZones.classroomId, kind: classroomZones.kind })
+    .from(classroomZones);
+  const kindsByClassroom = new Map<string, string[]>();
+  for (const z of zoneRows) {
+    const list = kindsByClassroom.get(z.classroomId) ?? [];
+    list.push(z.kind);
+    kindsByClassroom.set(z.classroomId, list);
+  }
+  return rows.map((r) => ({
+    id: r.id,
+    name: r.name,
+    location: r.location,
+    description: r.description,
+    createdAt: r.createdAt.toISOString(),
+    videoCount: r.videoCount,
+    processingCount: r.processingCount,
+    lastUploadAt: r.lastUploadAt ? new Date(r.lastUploadAt).toISOString() : null,
+    zoneKinds: kindsByClassroom.get(r.id) ?? [],
+  }));
+}
+
+export async function countClassroomVideos(classroomId: string): Promise<number> {
+  const [row] = await db
+    .select({ count: sql<number>`count(*)::int` })
+    .from(videos)
+    .where(eq(videos.classroomId, classroomId));
+  return row?.count ?? 0;
+}
+
+export async function getClassroomZones(classroomId: string): Promise<
+  { id: string; kind: string; polygon: Polygon; meta: ZoneMeta | null }[]
+> {
+  if (!isUuid(classroomId)) return [];
+  const rows = await db
+    .select()
+    .from(classroomZones)
+    .where(eq(classroomZones.classroomId, classroomId))
+    .orderBy(classroomZones.createdAt);
+  return rows.map((z) => ({ id: z.id, kind: z.kind, polygon: z.polygon, meta: z.meta ?? null }));
+}
+
+export async function replaceClassroomZones(
+  classroomId: string,
+  newZones: ZoneInput[],
+): Promise<void> {
+  await db.transaction(async (tx) => {
+    await tx.delete(classroomZones).where(eq(classroomZones.classroomId, classroomId));
+    if (newZones.length > 0) {
+      await tx.insert(classroomZones).values(
+        newZones.map((z) => ({ classroomId, kind: z.kind, polygon: z.polygon, meta: null })),
+      );
+    }
+  });
+}
+
+export interface ClassroomMetrics {
+  videoCount: number;
+  analyzedCount: number;
+  totalDurationMs: number;
+  teacherPresentMs: number;
+  teacherBoardMs: number;
+  boardTrackedMs: number; // duration of lessons that HAVE a board zone (the honest denominator)
+  totalEntries: number;
+  totalExits: number;
+}
+
+/** Aggregate the three teacher KPIs across a classroom's analyzed lessons. */
+export async function getClassroomMetrics(classroomId: string): Promise<ClassroomMetrics> {
+  const [row] = await db
+    .select({
+      videoCount: sql<number>`count(${videos.id})::int`,
+      analyzedCount: sql<number>`count(${videoAnalytics.videoId})::int`,
+      totalDurationMs: sql<number>`coalesce(sum(${videos.durationMs}) filter (where ${videoAnalytics.videoId} is not null), 0)::bigint`,
+      teacherPresentMs: sql<number>`coalesce(sum(${videoAnalytics.teacherPresentMs}), 0)::bigint`,
+      teacherBoardMs: sql<number>`coalesce(sum(${videoAnalytics.teacherBoardMs}), 0)::bigint`,
+      // Board share divides by time where a board zone existed, not all time —
+      // a lesson without a board zone must not dilute the percentage.
+      boardTrackedMs: sql<number>`coalesce(sum(${videos.durationMs}) filter (where ${videoAnalytics.teacherBoardMs} is not null), 0)::bigint`,
+      totalEntries: sql<number>`coalesce(sum(${videoAnalytics.entries}), 0)::int`,
+      totalExits: sql<number>`coalesce(sum(${videoAnalytics.exits}), 0)::int`,
+    })
+    .from(videos)
+    .leftJoin(videoAnalytics, eq(videoAnalytics.videoId, videos.id))
+    .where(eq(videos.classroomId, classroomId));
+  return {
+    videoCount: row?.videoCount ?? 0,
+    analyzedCount: row?.analyzedCount ?? 0,
+    totalDurationMs: Number(row?.totalDurationMs ?? 0),
+    teacherPresentMs: Number(row?.teacherPresentMs ?? 0),
+    teacherBoardMs: Number(row?.teacherBoardMs ?? 0),
+    boardTrackedMs: Number(row?.boardTrackedMs ?? 0),
+    totalEntries: row?.totalEntries ?? 0,
+    totalExits: row?.totalExits ?? 0,
+  };
+}
+
+// ---------------------------------------------------------------------------
+// Videos
+// ---------------------------------------------------------------------------
 
 export async function createVideo(input: {
   id: string;
   title: string;
   originalFilename: string;
   filePath: string;
+  classroomId: string;
 }): Promise<VideoRow> {
   const [row] = await db
     .insert(videos)
     .values({
       id: input.id,
+      classroomId: input.classroomId,
       title: input.title,
       originalFilename: input.originalFilename,
       filePath: input.filePath,
@@ -72,10 +248,13 @@ export async function setWorkflowRunId(id: string, workflowRunId: string): Promi
 
 export interface VideoListItem {
   id: string;
+  classroomId: string | null;
   title: string;
   status: string;
   progress: number;
   durationMs: number | null;
+  width: number | null;
+  height: number | null;
   uploadedAt: string;
   thumbnailUrl: string | null;
   error: string | null;
@@ -84,14 +263,18 @@ export interface VideoListItem {
   exits: number | null;
 }
 
-export async function listVideos(): Promise<VideoListItem[]> {
+export async function listVideos(classroomId?: string): Promise<VideoListItem[]> {
+  if (classroomId !== undefined && !isUuid(classroomId)) return [];
   const rows = await db
     .select({
       id: videos.id,
+      classroomId: videos.classroomId,
       title: videos.title,
       status: videos.status,
       progress: videos.progress,
       durationMs: videos.durationMs,
+      width: videos.width,
+      height: videos.height,
       uploadedAt: videos.uploadedAt,
       thumbnailPath: videos.thumbnailPath,
       error: videos.error,
@@ -101,16 +284,20 @@ export async function listVideos(): Promise<VideoListItem[]> {
     })
     .from(videos)
     .leftJoin(videoAnalytics, eq(videoAnalytics.videoId, videos.id))
+    .where(classroomId === undefined ? undefined : eq(videos.classroomId, classroomId))
     .orderBy(desc(videos.uploadedAt));
 
   return rows.map((r) => {
     const done = r.status === "done";
     return {
       id: r.id,
+      classroomId: r.classroomId,
       title: r.title,
       status: r.status,
       progress: r.progress,
       durationMs: r.durationMs,
+      width: r.width,
+      height: r.height,
       uploadedAt: r.uploadedAt.toISOString(),
       thumbnailUrl: r.thumbnailPath ? `/videos/${r.id}/thumbnail` : null,
       error: r.error,
@@ -124,14 +311,16 @@ export async function listVideos(): Promise<VideoListItem[]> {
 export async function getVideoDetail(id: string) {
   const video = await getVideo(id);
   if (!video) return undefined;
-  const [zoneRows, trackRows, eventRows, analyticsRows] = await Promise.all([
+  const [zoneRows, trackRows, eventRows, analyticsRows, classroom] = await Promise.all([
     db.select().from(zones).where(eq(zones.videoId, id)).orderBy(zones.createdAt),
     db.select().from(tracks).where(eq(tracks.videoId, id)).orderBy(tracks.trackNo),
     db.select().from(events).where(eq(events.videoId, id)).orderBy(events.videoTsMs),
     db.select().from(videoAnalytics).where(eq(videoAnalytics.videoId, id)),
+    video.classroomId ? getClassroom(video.classroomId) : Promise.resolve(undefined),
   ]);
   return {
     video,
+    classroom: classroom ?? null,
     zones: zoneRows,
     tracks: trackRows,
     events: eventRows,
@@ -230,13 +419,10 @@ export async function replaceDerived(
       teacherBoardMs: a.teacher_board_ms,
       entries: a.entries ?? 0,
       exits: a.exits ?? 0,
-      avgStudents: a.avg_students,
-      maxStudents: a.max_students,
       presenceIntervals: a.presence_intervals ?? [],
       boardIntervals: a.board_intervals ?? [],
       entryExit: a.entry_exit ?? [],
-      occupancy: a.occupancy ?? [],
-      heatmap: a.heatmap ?? { grid_w: 0, grid_h: 0, teacher: [], students: [] },
+      heatmap: a.heatmap ?? { grid_w: 0, grid_h: 0, teacher: [] },
       dataQuality: a.data_quality ?? null,
       computedAt: new Date(),
     });

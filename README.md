@@ -2,15 +2,16 @@
 
 _Every lesson, brought to light._
 
-Upload a classroom recording and get trustworthy teaching analytics: teacher
-presence, entries and exits, time at the board, circulation among the desks,
-how the class settled, and student occupancy over time — each shown with an
-honest confidence level, never a falsely precise number. No facial recognition,
-no named students, aggregate insights only.
+Register a classroom, configure its board and door zones once, and upload
+lessons to get trustworthy teaching analytics — exactly three teacher KPIs:
+**entries/exits, time at the board, and a movement heatmap** — each shown with
+an honest confidence level, never a falsely precise number. No facial
+recognition, no named students, aggregate teacher insights only.
 
-The detection pipeline (YOLO26-pose, BoT-SORT, CLIP re-identification, SAM 2
-zone detection) runs in a durable background worker; the dashboard reads the
-results over a typed API. Every analysed lesson also carries a **data-quality
+The detection pipeline (YOLO26-pose + TensorRT, BoT-SORT, CLIP
+re-identification, YOLOE zone detection) runs on an on-demand RunPod GPU
+controlled from the app's Settings page; the dashboard reads the results over
+a typed API. Every analysed lesson also carries a **data-quality
 report** (`services/ml-service/app/quality.py`) — coverage, tracker
 fragmentation, and a re-identification-independent concurrent head count — so
 the dashboard can say how much each figure can be trusted.

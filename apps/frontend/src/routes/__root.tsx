@@ -1,6 +1,8 @@
 import type { QueryClient } from "@tanstack/react-query";
 import { Link, Outlet, createRootRouteWithContext } from "@tanstack/react-router";
-import { BookOpen, LayoutGrid } from "lucide-react";
+import { BookOpen, School, Settings2 } from "lucide-react";
+import { AuthGate } from "@/components/auth-gate";
+import { SignOut } from "@/components/sign-out";
 import { ThemeToggle } from "@/components/theme-toggle";
 
 export interface RouterContext {
@@ -12,11 +14,20 @@ export const Route = createRootRouteWithContext<RouterContext>()({
 });
 
 const NAV = [
-  { to: "/" as const, label: "Lessons", icon: LayoutGrid, exact: true },
+  { to: "/" as const, label: "Classrooms", icon: School, exact: true },
+  { to: "/settings" as const, label: "Settings", icon: Settings2, exact: false },
   { to: "/architecture" as const, label: "How it works", icon: BookOpen, exact: false },
 ];
 
 function RootLayout() {
+  return (
+    <AuthGate>
+      <RootShell />
+    </AuthGate>
+  );
+}
+
+function RootShell() {
   return (
     <div className="flex min-h-dvh bg-background text-foreground">
       <aside className="sticky top-0 hidden h-dvh w-64 shrink-0 flex-col border-r border-border bg-card/50 px-4 pb-4 md:flex">
@@ -46,7 +57,8 @@ function RootLayout() {
           ))}
         </nav>
 
-        <div className="mt-auto flex justify-end px-1">
+        <div className="mt-auto flex justify-end gap-1 px-1">
+          <SignOut />
           <ThemeToggle />
         </div>
       </aside>

@@ -7,8 +7,9 @@ import { cn } from "@/lib/utils";
 
 type ZoneKind = "board" | "door";
 type Point = [number, number];
-type Zone = RouterOutputs["videos"]["get"]["zones"][number];
+type Zone = Pick<RouterOutputs["videos"]["get"]["zones"][number], "kind" | "polygon">;
 type DraftZone = { kind: ZoneKind; polygon: Point[] };
+export type ZonePayload = { kind: ZoneKind; polygon: Point[] };
 
 const ZONE_STYLE: Record<ZoneKind, { label: string; stroke: string; fill: string }> = {
   board: { label: "Board", stroke: "#facc15", fill: "rgba(250,204,21,0.16)" },
@@ -25,12 +26,22 @@ export function ZoneEditor({
   aspect,
   initialZones,
   onClose,
+  title = "Edit zones",
+  onSave,
 }: {
+  /** Video used for auto-detect frames and (without onSave) as the save target. */
   videoId: string;
   frameSrc: string | null;
   aspect: number;
   initialZones: Zone[];
   onClose: () => void;
+  title?: string;
+  /**
+   * Override where zones are written. The classroom configuration passes its
+   * template here while auto-detect still runs against a real lesson frame;
+   * omitted, zones save to the video (the per-lesson editor).
+   */
+  onSave?: (zones: ZonePayload[]) => Promise<void>;
 }) {
   const queryClient = useQueryClient();
   const stageRef = useRef<HTMLButtonElement>(null);
@@ -75,6 +86,10 @@ export function ZoneEditor({
         if (latest.current.hasDraft) setDraft([]);
         else latest.current.onClose();
       } else if (e.key === "Enter") {
+        // preventDefault: the stage is a focused <button>, and Enter's default
+        // activation would fire onClick at (0,0) — a phantom point that
+        // re-opens a draft and keeps Save disabled.
+        e.preventDefault();
         latest.current.closeDraft();
       } else if (e.key === "Backspace") {
         setDraft((d) => d.slice(0, -1));
@@ -108,15 +123,20 @@ export function ZoneEditor({
   const save = async () => {
     setSaving(true);
     setSaveError(null);
+    const payload = zones.map((z) => ({ kind: z.kind, polygon: z.polygon }));
     try {
-      await orpcClient.zones.upsert({
-        id: videoId,
-        zones: zones.map((z) => ({ kind: z.kind, polygon: z.polygon })),
-      });
+      if (onSave) await onSave(payload);
+      else await orpcClient.zones.upsert({ id: videoId, zones: payload });
       await queryClient.invalidateQueries();
       onClose();
     } catch {
-      setSaveError("Save failed. The recording may still be processing.");
+      // The per-video save has a real precondition (analysis settled); the
+      // classroom-template save (onSave) has none, so don't blame processing.
+      setSaveError(
+        onSave
+          ? "Save failed. Check the connection and try again."
+          : "Save failed. The recording may still be processing.",
+      );
       setSaving(false);
     }
   };
@@ -128,10 +148,11 @@ export function ZoneEditor({
       className="fixed inset-0 z-50 flex items-center justify-center bg-black/70 p-4"
       role="dialog"
       aria-modal="true"
+      aria-label={title}
     >
       <div className="w-full max-w-3xl rounded-xl border border-border bg-card p-4 shadow-xl">
         <div className="mb-3 flex items-center justify-between">
-          <h2 className="font-semibold tracking-tight">Edit zones</h2>
+          <h2 className="font-semibold tracking-tight">{title}</h2>
           <Button variant="ghost" size="sm" onClick={onClose}>
             Close
           </Button>
@@ -142,9 +163,12 @@ export function ZoneEditor({
           type="button"
           className="relative block w-full cursor-crosshair overflow-hidden rounded-lg border border-border bg-black"
           style={{ aspectRatio: String(aspect) }}
-          onClick={(e: MouseEvent) =>
-            setDraft((d) => [...d, pointFromClient(e.clientX, e.clientY)])
-          }
+          onClick={(e: MouseEvent) => {
+            // detail === 0 is a keyboard-synthesized click (Enter/Space on the
+            // focused button): never a real stage coordinate.
+            if (e.detail === 0) return;
+            setDraft((d) => [...d, pointFromClient(e.clientX, e.clientY)]);
+          }}
           onMouseMove={(e: MouseEvent) => setCursor(pointFromClient(e.clientX, e.clientY))}
           onDoubleClick={closeDraft}
         >
@@ -152,6 +176,7 @@ export function ZoneEditor({
             <img
               src={frameSrc}
               alt=""
+              crossOrigin="use-credentials"
               className="absolute inset-0 h-full w-full object-fill opacity-80"
             />
           )}

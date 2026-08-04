@@ -5,7 +5,7 @@ import { Card } from "@/components/ui/card";
 import { API_URL } from "@/lib/orpc";
 import { cn } from "@/lib/utils";
 
-export function UploadZone() {
+export function UploadZone({ classroomId }: { classroomId: string }) {
   const queryClient = useQueryClient();
   const inputRef = useRef<HTMLInputElement>(null);
   const [dragging, setDragging] = useState(false);
@@ -16,7 +16,11 @@ export function UploadZone() {
     setError(null);
     setProgress(0);
     const xhr = new XMLHttpRequest();
-    xhr.open("POST", `${API_URL}/videos?filename=${encodeURIComponent(file.name)}`);
+    xhr.open(
+      "POST",
+      `${API_URL}/videos?filename=${encodeURIComponent(file.name)}&classroomId=${encodeURIComponent(classroomId)}`,
+    );
+    xhr.withCredentials = true; // admin session cookie
     xhr.upload.addEventListener("progress", (e) => {
       if (e.lengthComputable) setProgress(e.loaded / e.total);
     });
@@ -84,7 +88,11 @@ export function UploadZone() {
         type="file"
         accept="video/*"
         className="hidden"
-        onChange={(e) => onFiles(e.target.files)}
+        onChange={(e) => {
+          onFiles(e.target.files);
+          // Reset so re-picking the SAME file after a failure fires change again.
+          e.target.value = "";
+        }}
       />
     </Card>
   );

@@ -22,6 +22,10 @@ export const env = createEnv({
       .int()
       .positive()
       .default(4 * 1024 * 1024 * 1024),
+    // Frames per second the ML service samples for inference (capped at 5 by
+    // the ML service). The biggest per-video GPU cost lever: dropping to 2
+    // is ~2.5x cheaper if turnaround ever matters more than fidelity.
+    API_SERVICE__SAMPLE_FPS: z.coerce.number().positive().max(5).default(5),
     API_SERVICE__CORS_ORIGINS: z
       .string()
       .default("http://localhost:3001")
@@ -33,6 +37,11 @@ export const env = createEnv({
       ),
     API_SERVICE__QUEUE_DASHBOARD_USER: z.string().default("admin"),
     API_SERVICE__QUEUE_DASHBOARD_PASSWORD: z.string().default("admin"),
+    // Admin password gating the whole app (single-tenant). Empty (the dev
+    // default) disables auth entirely; ANY deployed instance must set it —
+    // without it, uploads, deletes, the RunPod key, and the GPU start/stop
+    // buttons are open to whoever finds the URL.
+    API_SERVICE__ADMIN_PASSWORD: z.string().default(""),
     // Durable storage for video + thumbnail bytes. "local" writes into DATA_DIR
     // (dev default). "s3" stores objects in MinIO / S3 / R2 (on-prem or cloud,
     // one S3 API): durable, shared across workers, keeps large media out of the

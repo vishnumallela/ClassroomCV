@@ -3,12 +3,12 @@ import { bigint, integer, jsonb, pgTable, real, text, timestamp, uuid } from "dr
 export type Bbox = { x: number; y: number; w: number; h: number };
 export type Polygon = [number, number][];
 export type ZoneMeta = { auto?: boolean; confidence?: number; method?: string };
-export type OccupancyPoint = { ts_ms: number; students: number; teacher: boolean };
 export type EntryExitItem = { kind: string; ts_ms: number };
 export type Interval = [number, number];
-// Spatial dwell histograms (row-major grid_h x grid_w per-cell sample counts).
-export type Heatmap = { grid_w: number; grid_h: number; teacher: number[]; students: number[] };
-const EMPTY_HEATMAP: Heatmap = { grid_w: 0, grid_h: 0, teacher: [], students: [] };
+// Teacher dwell histogram (row-major grid_h x grid_w per-cell sample counts).
+// Teacher-only since the 2026-08 KPI slimming (entry/exit, board time, heatmap).
+export type Heatmap = { grid_w: number; grid_h: number; teacher: number[] };
+const EMPTY_HEATMAP: Heatmap = { grid_w: 0, grid_h: 0, teacher: [] };
 export type QualityTier = "high" | "medium" | "low";
 // Additive per-run trust report from the ML service (services/ml-service/app/quality.py).
 export type DataQuality = {
@@ -20,11 +20,8 @@ export type DataQuality = {
   coverage: number;
   occupied_buckets: number;
   span_buckets: number;
-  concurrent_peak: number;
-  concurrent_typical: number;
   confidence: {
     overall: QualityTier;
-    occupancy: QualityTier;
     identity: QualityTier;
     coverage: QualityTier;
     teacher: QualityTier;
@@ -32,8 +29,48 @@ export type DataQuality = {
   notes: string[];
 };
 
+// Application settings the admin edits in the UI (Settings page): RunPod GPU
+// wiring, ML service URL override. Key-value so adding a setting never needs
+// a migration. Values are plain text; secrets are masked at the API layer and
+// this table must never be exposed raw.
+export const appSettings = pgTable("app_settings", {
+  key: text("key").primaryKey(),
+  value: text("value").notNull(),
+  updatedAt: timestamp("updated_at", { withTimezone: true }).notNull().defaultNow(),
+});
+
+// A classroom is the unit users organize by: one physical room / camera, its
+// zone configuration, and every lesson recorded in it.
+export const classrooms = pgTable("classrooms", {
+  id: uuid("id").primaryKey().defaultRandom(),
+  name: text("name").notNull(),
+  location: text("location"),
+  description: text("description"),
+  createdAt: timestamp("created_at", { withTimezone: true }).notNull().defaultNow(),
+});
+
+// Zone template for a classroom's fixed camera: seeded into every new upload's
+// per-video zones, so board/door only have to be drawn once per room. Per-video
+// zones stay authoritative for analysis (a bumped camera can still be fixed on
+// one video without rewriting the room).
+export const classroomZones = pgTable("classroom_zones", {
+  id: uuid("id").primaryKey().defaultRandom(),
+  classroomId: uuid("classroom_id")
+    .notNull()
+    .references(() => classrooms.id, { onDelete: "cascade" }),
+  kind: text("kind").notNull(),
+  polygon: jsonb("polygon").$type<Polygon>().notNull(),
+  meta: jsonb("meta").$type<ZoneMeta | null>(),
+  createdAt: timestamp("created_at", { withTimezone: true }).defaultNow(),
+});
+
 export const videos = pgTable("videos", {
   id: uuid("id").primaryKey().defaultRandom(),
+  // Restrict (not cascade): deleting a classroom must not silently orphan
+  // object-store bytes; the API blocks deletion while videos exist.
+  classroomId: uuid("classroom_id").references(() => classrooms.id, {
+    onDelete: "restrict",
+  }),
   title: text("title").notNull(),
   originalFilename: text("original_filename").notNull(),
   filePath: text("file_path").notNull(),
@@ -106,12 +143,9 @@ export const videoAnalytics = pgTable("video_analytics", {
   teacherBoardMs: bigint("teacher_board_ms", { mode: "number" }),
   entries: integer("entries").notNull().default(0),
   exits: integer("exits").notNull().default(0),
-  avgStudents: real("avg_students"),
-  maxStudents: integer("max_students"),
   presenceIntervals: jsonb("presence_intervals").$type<Interval[]>().notNull().default([]),
   boardIntervals: jsonb("board_intervals").$type<Interval[]>().notNull().default([]),
   entryExit: jsonb("entry_exit").$type<EntryExitItem[]>().notNull().default([]),
-  occupancy: jsonb("occupancy").$type<OccupancyPoint[]>().notNull().default([]),
   heatmap: jsonb("heatmap").$type<Heatmap>().notNull().default(EMPTY_HEATMAP),
   // Additive trust report; null for rows computed before the quality pass.
   dataQuality: jsonb("data_quality").$type<DataQuality | null>(),

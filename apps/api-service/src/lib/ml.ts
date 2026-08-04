@@ -1,6 +1,6 @@
 import { env } from "@api/lib/env";
 
-const BASE = env.API_SERVICE__ML_SERVICE_URL;
+import { mlServiceUrl } from "@api/lib/app-settings";
 
 export interface MlZone {
   kind: string;
@@ -40,11 +40,8 @@ export interface DataQuality {
   coverage: number;
   occupied_buckets: number;
   span_buckets: number;
-  concurrent_peak: number;
-  concurrent_typical: number;
   confidence: {
     overall: QualityTier;
-    occupancy: QualityTier;
     identity: QualityTier;
     coverage: QualityTier;
     teacher: QualityTier;
@@ -60,10 +57,7 @@ export interface AnalysisResultAnalytics {
   presence_intervals: [number, number][];
   board_intervals: [number, number][];
   entry_exit: { kind: string; ts_ms: number }[];
-  occupancy: { ts_ms: number; students: number; teacher: boolean }[];
-  avg_students: number | null;
-  max_students: number | null;
-  heatmap: { grid_w: number; grid_h: number; teacher: number[]; students: number[] };
+  heatmap: { grid_w: number; grid_h: number; teacher: number[] };
   data_quality?: DataQuality | null;
 }
 
@@ -97,7 +91,9 @@ async function readErrorBody(res: Response): Promise<string> {
 }
 
 async function post<T>(path: string, body: unknown): Promise<T> {
-  const res = await fetch(`${BASE}${path}`, {
+  // Base URL resolves per call (Settings-page override wins over env), so
+  // re-pointing at a fresh RunPod pod takes effect without a redeploy.
+  const res = await fetch(`${await mlServiceUrl()}${path}`, {
     method: "POST",
     headers: { "content-type": "application/json" },
     body: JSON.stringify(body),
@@ -107,7 +103,7 @@ async function post<T>(path: string, body: unknown): Promise<T> {
 }
 
 async function get<T>(path: string): Promise<T> {
-  const res = await fetch(`${BASE}${path}`);
+  const res = await fetch(`${await mlServiceUrl()}${path}`);
   if (!res.ok) throw new Error(`ML ${path} failed: ${res.status} ${await readErrorBody(res)}`);
   return (await res.json()) as T;
 }
@@ -127,7 +123,7 @@ export async function mlStartAnalysis(input: StartAnalysisInput): Promise<string
   const res = await post<{ job_id?: string }>("/analyze", {
     video_id: input.videoId,
     video_path: input.videoPath,
-    sample_fps: input.sampleFps ?? 5,
+    sample_fps: input.sampleFps ?? env.API_SERVICE__SAMPLE_FPS,
     zones: input.zones,
     idempotency_key: input.idempotencyKey,
     run_tokens: input.runTokens,

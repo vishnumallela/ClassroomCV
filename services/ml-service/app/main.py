@@ -39,6 +39,7 @@ def health() -> dict:
     return {
         "status": "ok",
         "device": detector.get_device(),
+        "model": detector.resolve_model_name(),
         "model_loaded": detector.model_loaded(),
     }
 

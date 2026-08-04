@@ -149,29 +149,21 @@ class EntryExitOut(BaseModel):
     ts_ms: int
 
 
-class OccupancyOut(BaseModel):
-    ts_ms: int
-    students: int
-    teacher: bool
-
-
 class HeatmapOut(BaseModel):
-    """Spatial dwell histogram over a grid_w x grid_h grid of the frame.
+    """Teacher dwell histogram over a grid_w x grid_h grid of the frame.
 
-    teacher / students are row-major flattened per-cell sample counts (grid_h
-    rows, grid_w cols); at a fixed sample rate a cell's count is proportional
-    to time spent there. Empty lists when no teacher / no detections.
+    Row-major flattened per-cell sample counts (grid_h rows, grid_w cols); at
+    a fixed sample rate a cell's count is proportional to time spent there.
+    Teacher-only since the 2026-08 KPI slimming. Empty list when no teacher.
     """
 
     grid_w: int
     grid_h: int
     teacher: list[int]
-    students: list[int]
 
 
 class QualityTiers(BaseModel):
     overall: Literal["high", "medium", "low"]
-    occupancy: Literal["high", "medium", "low"]
     identity: Literal["high", "medium", "low"]
     coverage: Literal["high", "medium", "low"]
     teacher: Literal["high", "medium", "low"]
@@ -180,8 +172,8 @@ class QualityTiers(BaseModel):
 class DataQualityOut(BaseModel):
     """Additive per-run trust report (app/quality.py). Annotates, never alters,
     the derived numbers: how well the camera covered the lesson, how much the
-    tracker fragmented, and a re-identification-independent concurrent crowd
-    count that cross-checks the identity-based occupancy."""
+    tracker fragmented, and how solid the teacher identification is — the
+    trust inputs behind the three teacher KPIs."""
 
     detections: int
     frames: int
@@ -191,13 +183,15 @@ class DataQualityOut(BaseModel):
     coverage: float
     occupied_buckets: int
     span_buckets: int
-    concurrent_peak: int
-    concurrent_typical: int
     confidence: QualityTiers
     notes: list[str]
 
 
 class AnalyticsOut(BaseModel):
+    """The three teacher KPIs (entry/exit, board time, heatmap) plus their
+    supporting intervals for the timeline. Per-student occupancy analytics
+    were removed in the 2026-08 KPI slimming."""
+
     teacher_present_ms: int
     teacher_board_ms: Optional[int]
     entries: int
@@ -205,9 +199,6 @@ class AnalyticsOut(BaseModel):
     presence_intervals: list[list[int]]
     board_intervals: list[list[int]]
     entry_exit: list[EntryExitOut]
-    occupancy: list[OccupancyOut]
-    avg_students: float
-    max_students: int
     heatmap: HeatmapOut
     # Optional so rows/tests predating the quality report still validate.
     data_quality: Optional[DataQualityOut] = None

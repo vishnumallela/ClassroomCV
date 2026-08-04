@@ -1,10 +1,8 @@
 import type { RouterOutputs } from "@classroom/api-contracts";
-import { useEffect, useMemo, useRef, useState } from "react";
-import { Button } from "@/components/ui/button";
+import { useEffect, useMemo, useRef } from "react";
 import { Card } from "@/components/ui/card";
 
 type Analytics = NonNullable<RouterOutputs["videos"]["get"]["analytics"]>;
-type Mode = "teacher" | "students";
 
 // Perceptual low->high ramp (deep blue -> cyan -> green -> amber -> red).
 const RAMP: [number, number, number][] = [
@@ -31,6 +29,8 @@ function sampleRamp(t: number): [number, number, number] {
 
 const RENDER_W = 640;
 
+/** Teacher movement heatmap — one of the three KPIs. Teacher-only since the
+ * 2026-08 slimming (the students grid is no longer computed or stored). */
 export function HeatmapCard({
   analytics,
   thumbnailUrl,
@@ -41,26 +41,14 @@ export function HeatmapCard({
   aspect: number;
 }) {
   const hm = analytics.heatmap;
-  const [mode, setMode] = useState<Mode>("teacher");
   const canvasRef = useRef<HTMLCanvasElement>(null);
 
-  const totals = useMemo(
-    () => ({
-      teacher: hm?.teacher?.reduce((s, v) => s + v, 0) ?? 0,
-      students: hm?.students?.reduce((s, v) => s + v, 0) ?? 0,
-    }),
-    [hm],
-  );
-
-  // A mode with no samples (e.g. no teacher detected) should not be selectable
-  // as the only view; fall back to whichever channel has data.
-  const effectiveMode: Mode =
-    mode === "teacher" && totals.teacher === 0 && totals.students > 0 ? "students" : mode;
+  const total = useMemo(() => hm?.teacher?.reduce((s, v) => s + v, 0) ?? 0, [hm]);
 
   useEffect(() => {
     const canvas = canvasRef.current;
     if (!canvas || !hm || hm.grid_w === 0) return;
-    const cells = effectiveMode === "teacher" ? hm.teacher : hm.students;
+    const cells = hm.teacher;
     const max = cells.reduce((m, v) => Math.max(m, v), 0);
     const ctx = canvas.getContext("2d");
     if (!ctx) return;
@@ -89,43 +77,25 @@ export function HeatmapCard({
     ctx.imageSmoothingEnabled = true;
     ctx.imageSmoothingQuality = "high";
     ctx.drawImage(small, 0, 0, canvas.width, canvas.height);
-  }, [hm, effectiveMode]);
+  }, [hm]);
 
-  if (!hm || hm.grid_w === 0 || (totals.teacher === 0 && totals.students === 0)) {
-    return <Card className="p-6 text-sm text-muted-foreground">No movement data to map yet.</Card>;
+  if (!hm || hm.grid_w === 0 || total === 0) {
+    return (
+      <Card className="p-6 text-sm text-muted-foreground">
+        No teacher movement to map yet.
+      </Card>
+    );
   }
 
   const renderH = Math.round(RENDER_W / (aspect || 16 / 9));
-  const caption =
-    effectiveMode === "teacher"
-      ? "Where the teacher spent the lesson: board, aisles, and the desks she visited."
-      : "Where students were seated: density across the room.";
 
   return (
     <Card className="overflow-hidden">
-      <div className="flex items-center justify-between gap-3 border-b border-border p-4">
-        <div>
-          <h3 className="text-sm font-medium">Movement heatmap</h3>
-          <p className="mt-0.5 text-xs text-muted-foreground">{caption}</p>
-        </div>
-        <div className="flex shrink-0 gap-1">
-          <Button
-            size="sm"
-            variant={effectiveMode === "teacher" ? "default" : "outline"}
-            disabled={totals.teacher === 0}
-            onClick={() => setMode("teacher")}
-          >
-            Teacher
-          </Button>
-          <Button
-            size="sm"
-            variant={effectiveMode === "students" ? "default" : "outline"}
-            disabled={totals.students === 0}
-            onClick={() => setMode("students")}
-          >
-            Students
-          </Button>
-        </div>
+      <div className="border-b border-border p-4">
+        <h3 className="text-sm font-medium">Teacher movement heatmap</h3>
+        <p className="mt-0.5 text-xs text-muted-foreground">
+          Where the teacher spent the lesson: board, aisles, and the desks she visited.
+        </p>
       </div>
 
       <div className="relative w-full bg-muted" style={{ aspectRatio: String(aspect || 16 / 9) }}>
@@ -133,6 +103,7 @@ export function HeatmapCard({
           <img
             src={thumbnailUrl}
             alt=""
+            crossOrigin="use-credentials"
             className="absolute inset-0 h-full w-full object-cover opacity-40"
           />
         )}

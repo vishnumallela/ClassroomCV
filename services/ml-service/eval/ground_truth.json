@@ -23,14 +23,6 @@
         "teacher_tracks": {
           "value": 1,
           "tol": 0
-        },
-        "max_students": {
-          "value": 30,
-          "tol": 2
-        },
-        "avg_students": {
-          "value": 26.7,
-          "tol": 1.5
         }
       },
       "report_only": {

@@ -18,8 +18,15 @@ crops per raw track (>= 1 s apart) for the identity merge stage. The crops
 are batch-embedded with CLIP ViT-B/32 AFTER the frame loop (plan M5) so the
 per-frame sampling cadence stays untouched.
 
-Robustness: MPS failures fall back to CPU with a warning; effective sample
-fps is capped at 5; the capture is always released.
+GPU serving (RunPod): device 'auto' resolves cuda > mps > cpu. On cuda the
+model is served as a TensorRT engine when one exists next to the weight (and
+TENSORRT_EXPORT=true builds it once at first load). REQUIRE_DEVICE=cuda makes
+a mis-provisioned pod fail loud instead of silently billing 20x the wall-clock
+on CPU. Engines never fall back to CPU (TensorRT is CUDA-only); .pt weights
+keep the dev-friendly MPS/CPU fallback.
+
+Robustness: effective sample fps is capped at 5; the capture is always
+released; media downloads resume from the last byte written.
 """
 
 from __future__ import annotations
@@ -28,6 +35,7 @@ import logging
 import math
 import os
 import tempfile
+import urllib.error
 import urllib.parse
 import urllib.request
 from dataclasses import dataclass
@@ -71,6 +79,7 @@ L_HIP, R_HIP = 11, 12
 L_KNEE, R_KNEE = 13, 14
 
 _model = None
+_model_is_engine = False  # set at load; engines are CUDA-only (no CPU fallback)
 _fallback_cpu = False
 _clip_bundle = None  # (model, preprocess, device), lazy like _model
 
@@ -183,25 +192,123 @@ def get_device() -> str:
     return configured  # explicit 'cpu' or a specific 'cuda:N' device string
 
 
+def _assert_required_device(resolved: str) -> None:
+    """Fail loud when REQUIRE_DEVICE is set and the box resolved elsewhere.
+
+    A RunPod worker that silently degrades to CPU still bills wall-clock — at
+    ~20x the runtime that is the whole GPU budget gone on one job. Production
+    sets REQUIRE_DEVICE=cuda so a mis-provisioned pod dies at load instead.
+    """
+    required = (get_settings().require_device or "").strip().lower()
+    if required and resolved.split(":", 1)[0] != required:
+        raise RuntimeError(
+            f"REQUIRE_DEVICE={required!r} but the resolved inference device is "
+            f"{resolved!r}; refusing to run on the wrong device"
+        )
+
+
 def resolve_model_name() -> str:
     """The YOLO weight to load: Settings.model_name, or the best device default
-    when it is 'auto'/empty."""
-    configured = (get_settings().model_name or "").strip()
+    when it is 'auto'/empty. Auto-resolved weights live under WEIGHTS_DIR when
+    set (the RunPod volume — the container layer is recreated on every pod
+    start, so a CWD cache would re-download and re-export each time). On cuda
+    an already-exported TensorRT engine next to the weight is preferred (built
+    by TENSORRT_EXPORT or scripts/export_tensorrt.py); an explicit MODEL_NAME
+    is always honoured verbatim."""
+    settings = get_settings()
+    configured = (settings.model_name or "").strip()
     if configured and configured.lower() != "auto":
         return configured
     base = get_device().split(":", 1)[0]  # 'cuda:0' -> 'cuda'
-    return _DEVICE_MODEL_DEFAULT.get(base, "yolo26m-pose.pt")
+    name = _DEVICE_MODEL_DEFAULT.get(base, "yolo26m-pose.pt")
+    weights_dir = (settings.weights_dir or "").strip()
+    if weights_dir:
+        os.makedirs(weights_dir, exist_ok=True)
+        name = str(Path(weights_dir) / name)
+    if base == "cuda":
+        engine = Path(name).with_suffix(".engine")
+        if engine.is_file():
+            return str(engine)
+    return name
+
+
+def _export_engine(weight: str, device: str) -> Optional[str]:
+    """One-time TensorRT export of a .pt weight; returns the engine path.
+
+    half=True is the ~free 2x; dynamic=True lets IMGSZ move between 1280 and
+    1536 without a rebuild. Engines are specific to the GPU model and TensorRT
+    version, so this runs on the pod itself (first load, several minutes) and
+    the result is cached on disk for every later start. Failure degrades to
+    the .pt weight — a batch job must not die because an export did.
+    """
+    from ultralytics import YOLO
+
+    try:
+        logger.info(
+            "TensorRT export of %s starting (one-time on this GPU, several minutes)",
+            weight,
+        )
+        exported = YOLO(weight).export(
+            format="engine",
+            half=True,
+            dynamic=True,
+            batch=1,
+            imgsz=get_settings().imgsz,
+            device=device,
+        )
+        logger.info("TensorRT export complete: %s", exported)
+        return str(exported)
+    except Exception:
+        logger.warning(
+            "TensorRT export failed; serving the PyTorch weight instead", exc_info=True
+        )
+        return None
+
+
+def _warmup(model, device: str) -> None:
+    """Run one dummy inference so engine deserialization / cuDNN autotune has
+    happened before the first billed frame. Best-effort: a warmup failure is
+    logged and the real frames decide."""
+    try:
+        dummy = np.zeros((720, 1280, 3), dtype=np.uint8)
+        model.predict(
+            dummy, imgsz=get_settings().imgsz, device=device, verbose=False
+        )
+        logger.info("warmup inference complete on %s", device)
+    except Exception:
+        logger.warning("warmup inference failed", exc_info=True)
 
 
 def _get_model():
-    global _model
+    global _model, _model_is_engine
     if _model is None:
         _ensure_lap_shim()  # must precede any ultralytics.trackers import
         from ultralytics import YOLO
 
+        device = get_device()
+        _assert_required_device(device)
         name = resolve_model_name()
-        logger.info("loading pose model %s on device %s", name, get_device())
-        _model = YOLO(name)
+        if (
+            get_settings().tensorrt_export
+            and device.split(":", 1)[0] == "cuda"
+            and name.endswith(".pt")
+        ):
+            engine = Path(name).with_suffix(".engine")
+            if engine.is_file():
+                name = str(engine)
+            else:
+                name = _export_engine(name, device) or name
+        _model_is_engine = name.endswith(".engine")
+        logger.info(
+            "loading pose model %s on device %s%s",
+            name,
+            device,
+            " (TensorRT engine)" if _model_is_engine else "",
+        )
+        # Engines carry no task metadata, so tell ultralytics this is pose.
+        _model = YOLO(name, task="pose") if _model_is_engine else YOLO(name)
+        if device.split(":", 1)[0] == "cuda":
+            _warmup(_model, device)
     return _model
 
 
@@ -228,15 +335,23 @@ def _track_frame(model, frame: np.ndarray, device: str):
         max_det=settings.max_det,
         verbose=False,
     )
-    try:
+    if not _model_is_engine:
         # fp16 on any GPU path (cuda or mps); the cpu fallback stays fp32.
-        return model.track(frame, device=effective, half=effective != "cpu", **kwargs)
+        # Engine precision is baked at export, so the flag is meaningless there.
+        kwargs["half"] = effective != "cpu"
+    try:
+        return model.track(frame, device=effective, **kwargs)
     except Exception as exc:
         if effective == "cpu":
             raise
+        if _model_is_engine or (settings.require_device or "").strip():
+            # A TensorRT engine cannot run on CPU, and a REQUIRE_DEVICE box
+            # must fail loud rather than silently burn 20x the wall-clock.
+            raise
         logger.warning("device %s failed (%s); falling back to cpu", effective, exc)
         _fallback_cpu = True
-        return model.track(frame, device="cpu", half=False, **kwargs)
+        kwargs["half"] = False
+        return model.track(frame, device="cpu", **kwargs)
 
 
 def _validate_video_path(video_path: str) -> str:
@@ -308,6 +423,31 @@ _MEDIA_URL_OPENER = urllib.request.build_opener(_AllowlistRedirectHandler)
 # override with MEDIA_MAX_DOWNLOAD_BYTES.
 _MEDIA_MAX_DOWNLOAD_BYTES = int(os.environ.get("MEDIA_MAX_DOWNLOAD_BYTES", 8 * 1024**3))
 _DOWNLOAD_CHUNK = 1024 * 1024
+# A multi-GB object crossing the WAN to a RunPod worker stalls sooner or later;
+# resuming with a Range header from the byte already on disk keeps the work
+# done instead of restarting a whole camera-day transfer from zero.
+_DOWNLOAD_TIMEOUT = 60
+_DOWNLOAD_RETRIES = 5
+
+
+def _content_total(resp) -> Optional[int]:
+    """Total object size from Content-Range (a 206) or Content-Length (a 200).
+
+    None when the response carries neither; the caller then cannot detect a
+    truncated stream and accepts what it got.
+    """
+    headers = getattr(resp, "headers", None)
+    if headers is None:
+        return None
+    cr = headers.get("Content-Range")
+    if cr and "/" in cr:
+        tail = cr.rsplit("/", 1)[-1].strip()
+        if tail.isdigit():
+            return int(tail)
+    cl = headers.get("Content-Length")
+    if cl and str(cl).isdigit():
+        return int(cl)
+    return None
 
 
 def _download_to_temp(url: str) -> str:
@@ -315,29 +455,62 @@ def _download_to_temp(url: str) -> str:
 
     Redirects are re-validated against the allowlist on every hop, and the total
     byte count is capped, so neither an SSRF-via-redirect nor an oversized object
-    can slip through. Placed inside DATA_DIR when configured so the downloaded
-    copy also satisfies _validate_video_path's DATA_DIR containment when the
-    pipeline re-validates.
+    can slip through. A stalled transfer resumes from the byte already written
+    (Range request); a server that ignores the Range restarts cleanly. Placed
+    inside DATA_DIR when configured so the downloaded copy also satisfies
+    _validate_video_path's DATA_DIR containment when the pipeline re-validates.
     """
     data_dir = os.environ.get("DATA_DIR")
     tmp_dir = data_dir if data_dir and os.path.isdir(data_dir) else tempfile.gettempdir()
     fd, tmp = tempfile.mkstemp(prefix="mediacache_", suffix=".mp4", dir=tmp_dir)
+    os.close(fd)
+    written = 0
+    total: Optional[int] = None
     try:
-        with os.fdopen(fd, "wb") as out:
+        for attempt in range(_DOWNLOAD_RETRIES):
             # noqa: S310 (host allowlisted, redirects re-validated per hop)
-            with _MEDIA_URL_OPENER.open(url, timeout=30) as resp:
-                remaining = _MEDIA_MAX_DOWNLOAD_BYTES
-                while True:
-                    chunk = resp.read(_DOWNLOAD_CHUNK)
-                    if not chunk:
-                        break
-                    remaining -= len(chunk)
-                    if remaining < 0:
-                        raise ValueError(
-                            "media download exceeds "
-                            f"{_MEDIA_MAX_DOWNLOAD_BYTES} byte cap: {url!r}"
-                        )
-                    out.write(chunk)
+            req = urllib.request.Request(url)
+            if written:
+                req.add_header("Range", f"bytes={written}-")
+            try:
+                with _MEDIA_URL_OPENER.open(req, timeout=_DOWNLOAD_TIMEOUT) as resp:
+                    mode = "ab"
+                    if written and getattr(resp, "status", 200) != 206:
+                        # Server ignored the Range: start over rather than
+                        # appending a second copy of the whole object.
+                        written, mode = 0, "wb"
+                    if total is None:
+                        total = _content_total(resp)
+                    with open(tmp, mode) as out:
+                        while True:
+                            chunk = resp.read(_DOWNLOAD_CHUNK)
+                            if not chunk:
+                                break
+                            if written + len(chunk) > _MEDIA_MAX_DOWNLOAD_BYTES:
+                                raise ValueError(
+                                    "media download exceeds "
+                                    f"{_MEDIA_MAX_DOWNLOAD_BYTES} byte cap: {url!r}"
+                                )
+                            out.write(chunk)
+                            # Advance only AFTER the bytes are on disk: the
+                            # resume offset must never run ahead of the file,
+                            # or a failed write leaves a silent hole.
+                            written += len(chunk)
+                if total is None or written >= total:
+                    return tmp
+                # Short read without an exception is still a truncated file.
+                raise TimeoutError(f"stream ended at {written} of {total} bytes")
+            except (TimeoutError, OSError, urllib.error.URLError) as exc:
+                if attempt == _DOWNLOAD_RETRIES - 1:
+                    raise
+                logger.warning(
+                    "media download stalled at %d/%s bytes (%s); resuming (attempt %d/%d)",
+                    written,
+                    total if total is not None else "?",
+                    exc,
+                    attempt + 2,
+                    _DOWNLOAD_RETRIES,
+                )
     except Exception:
         try:
             os.unlink(tmp)
@@ -481,7 +654,7 @@ def _upper_crop(frame: np.ndarray, bbox: dict) -> Optional[np.ndarray]:
     crop = frame[py0:py1, px0:px1]
     scale = CLIP_CROP_MAX_SIDE / max(crop.shape[:2])
     if scale < 1.0:
-        crop = cv2.resize(
+        return cv2.resize(
             crop,
             (
                 max(1, int(round(crop.shape[1] * scale))),
@@ -489,7 +662,12 @@ def _upper_crop(frame: np.ndarray, bbox: dict) -> Optional[np.ndarray]:
             ),
             interpolation=cv2.INTER_AREA,
         )
-    return crop
+    # A slice is a VIEW: it keeps the whole decoded frame (6 MB at 1080p, 11 MB
+    # at 1440p) alive for as long as the crop is held, and crops are held until
+    # the post-loop CLIP embed. Most people in a classroom are smaller than the
+    # 224 px cap and skip the resize above, so a long lesson would pin thousands
+    # of full frames while the crops themselves measure a few MB. Copy the bytes.
+    return crop.copy()
 
 
 def _embed_tracks(crops: dict[int, list[np.ndarray]]) -> dict[int, list[float]]:

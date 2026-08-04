@@ -5,8 +5,10 @@ type Detail = NonNullable<Awaited<ReturnType<typeof getVideoDetail>>>;
 export function toDetailDto(d: Detail) {
   const v = d.video;
   return {
+    classroom: d.classroom ? { id: d.classroom.id, name: d.classroom.name } : null,
     video: {
       id: v.id,
+      classroomId: v.classroomId,
       title: v.title,
       originalFilename: v.originalFilename,
       durationMs: v.durationMs,
@@ -39,12 +41,9 @@ export function toDetailDto(d: Detail) {
           teacherBoardMs: d.analytics.teacherBoardMs,
           entries: d.analytics.entries,
           exits: d.analytics.exits,
-          avgStudents: d.analytics.avgStudents,
-          maxStudents: d.analytics.maxStudents,
           presenceIntervals: d.analytics.presenceIntervals,
           boardIntervals: d.analytics.boardIntervals,
           entryExit: d.analytics.entryExit,
-          occupancy: d.analytics.occupancy,
           heatmap: d.analytics.heatmap,
           dataQuality: d.analytics.dataQuality ?? null,
         }

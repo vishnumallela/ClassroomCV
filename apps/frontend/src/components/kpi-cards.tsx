@@ -27,39 +27,34 @@ export function KpiCards({
 }) {
   const hasBoard = analytics.teacherBoardMs !== null;
   const badge = confidenceBadge(teacherConfidence);
+  // The three KPIs, teacher-centric by design: board time, and her door
+  // entries/exits. The confidence badge rides the first tile because every
+  // number below hangs off the same "who is the teacher" decision.
   const tiles = [
-    {
-      label: "Teacher in class",
-      value: msToClock(analytics.teacherPresentMs),
-      sub: percentOf(analytics.teacherPresentMs, durationMs) + " of lesson",
-      badge,
-    },
     {
       label: "Time at board",
       value: hasBoard ? msToClock(analytics.teacherBoardMs) : "n/a",
       sub: hasBoard
         ? percentOf(analytics.teacherBoardMs, durationMs) + " of lesson"
         : "no board zone",
-      badge: null,
+      badge,
     },
-    { label: "Entries", value: String(analytics.entries), sub: "into the room", badge: null },
-    { label: "Exits", value: String(analytics.exits), sub: "out of the room", badge: null },
     {
-      label: "Avg students",
-      value: analytics.avgStudents !== null ? analytics.avgStudents.toFixed(1) : "n/a",
-      sub: "avg concurrent (per 5s)",
+      label: "Teacher entries",
+      value: String(analytics.entries),
+      sub: "into the room",
       badge: null,
     },
     {
-      label: "Peak students",
-      value: analytics.maxStudents !== null ? String(analytics.maxStudents) : "n/a",
-      sub: "at once",
+      label: "Teacher exits",
+      value: String(analytics.exits),
+      sub: "out of the room",
       badge: null,
     },
   ];
 
   return (
-    <div className="stagger grid grid-cols-2 gap-3 md:grid-cols-3 lg:grid-cols-6">
+    <div className="stagger grid grid-cols-3 gap-3">
       {tiles.map((t, i) => (
         <Card
           key={t.label}
