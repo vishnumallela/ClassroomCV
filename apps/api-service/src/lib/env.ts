@@ -37,6 +37,11 @@ export const env = createEnv({
       ),
     API_SERVICE__QUEUE_DASHBOARD_USER: z.string().default("admin"),
     API_SERVICE__QUEUE_DASHBOARD_PASSWORD: z.string().default("admin"),
+    // Admin password gating the whole app (single-tenant). Empty (the dev
+    // default) disables auth entirely; ANY deployed instance must set it —
+    // without it, uploads, deletes, the RunPod key, and the GPU start/stop
+    // buttons are open to whoever finds the URL.
+    API_SERVICE__ADMIN_PASSWORD: z.string().default(""),
     // Durable storage for video + thumbnail bytes. "local" writes into DATA_DIR
     // (dev default). "s3" stores objects in MinIO / S3 / R2 (on-prem or cloud,
     // one S3 API): durable, shared across workers, keeps large media out of the

@@ -12,6 +12,12 @@ export const SETTING_KEYS = [
   "runpodApiKey",
   "runpodPodId",
   "mlServiceUrl",
+  // "true" = start the pod automatically when work is queued and the ML
+  // service is unreachable.
+  "gpuAutoStart",
+  // Minutes of idle (no active/waiting/delayed jobs) after which the pod is
+  // stopped automatically. "" / "0" disables.
+  "gpuAutoStopMinutes",
 ] as const;
 export type SettingKey = (typeof SETTING_KEYS)[number];
 

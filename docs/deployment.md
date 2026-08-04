@@ -30,6 +30,7 @@ from it): create a bucket + API token.
 **api-service variables**
 
 ```
+API_SERVICE__ADMIN_PASSWORD=…               # REQUIRED in production: gates the whole app
 API_SERVICE__DATABASE_URL=postgres://…      # the db service
 API_SERVICE__REDIS_URL=redis://…
 API_SERVICE__CORS_ORIGINS=https://<frontend-domain>
@@ -65,6 +66,10 @@ Open **Settings** in the app and fill in:
 - **RunPod API key + pod ID** — enables the Start/Stop GPU buttons and the
   live status card. Stop when the batch is done; a stopped pod bills volume
   storage only (~cents/month) instead of ~$0.39/hr.
+- **GPU autopilot** — "Auto-start GPU" boots the pod when a lesson is queued
+  while it's off; "Auto-stop after idle" shuts it down once the queue has
+  been empty for the configured minutes. Together they make the
+  rent-by-the-hour model fully hands-off.
 - **ML service URL** — the pod's exposed port, e.g.
   `https://<podId>-8000.proxy.runpod.net`. Applies immediately (no redeploy);
   it overrides the env default.

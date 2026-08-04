@@ -176,6 +176,7 @@ export function ZoneEditor({
             <img
               src={frameSrc}
               alt=""
+              crossOrigin="use-credentials"
               className="absolute inset-0 h-full w-full object-fill opacity-80"
             />
           )}

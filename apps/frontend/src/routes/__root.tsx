@@ -1,6 +1,7 @@
 import type { QueryClient } from "@tanstack/react-query";
 import { Link, Outlet, createRootRouteWithContext } from "@tanstack/react-router";
 import { BookOpen, School, Settings2 } from "lucide-react";
+import { AuthGate } from "@/components/auth-gate";
 import { ThemeToggle } from "@/components/theme-toggle";
 
 export interface RouterContext {
@@ -18,6 +19,14 @@ const NAV = [
 ];
 
 function RootLayout() {
+  return (
+    <AuthGate>
+      <RootShell />
+    </AuthGate>
+  );
+}
+
+function RootShell() {
   return (
     <div className="flex min-h-dvh bg-background text-foreground">
       <aside className="sticky top-0 hidden h-dvh w-64 shrink-0 flex-col border-r border-border bg-card/50 px-4 pb-4 md:flex">

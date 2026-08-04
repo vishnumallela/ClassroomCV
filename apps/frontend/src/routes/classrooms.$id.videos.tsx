@@ -61,6 +61,7 @@ function ClassroomVideos() {
                     <img
                       src={`${API_URL}${v.thumbnailUrl}`}
                       alt={v.title}
+                      crossOrigin="use-credentials"
                       className="size-full object-cover"
                     />
                     <div className="pointer-events-none absolute inset-0 bg-gradient-to-t from-black/25 to-transparent opacity-0 transition-opacity duration-200 group-hover:opacity-100" />

@@ -19,6 +19,8 @@ export const settingsRouter = {
       mlServiceUrl: s.mlServiceUrl ?? null,
       mlServiceUrlEffective: await mlServiceUrl(),
       mlServiceUrlDefault: env.API_SERVICE__ML_SERVICE_URL,
+      gpuAutoStart: s.gpuAutoStart === "true",
+      gpuAutoStopMinutes: Number(s.gpuAutoStopMinutes ?? "0") || 0,
     };
   }),
 
@@ -31,6 +33,8 @@ export const settingsRouter = {
         mlServiceUrl: z
           .union([z.literal(""), z.url()])
           .optional(),
+        gpuAutoStart: z.boolean().optional(),
+        gpuAutoStopMinutes: z.number().int().min(0).max(24 * 60).optional(),
       }),
     )
     .handler(async ({ input }) => {
@@ -42,6 +46,15 @@ export const settingsRouter = {
       }
       if (input.mlServiceUrl !== undefined) {
         await setAppSetting("mlServiceUrl", input.mlServiceUrl || null);
+      }
+      if (input.gpuAutoStart !== undefined) {
+        await setAppSetting("gpuAutoStart", input.gpuAutoStart ? "true" : null);
+      }
+      if (input.gpuAutoStopMinutes !== undefined) {
+        await setAppSetting(
+          "gpuAutoStopMinutes",
+          input.gpuAutoStopMinutes > 0 ? String(input.gpuAutoStopMinutes) : null,
+        );
       }
       return { ok: true as const };
     }),

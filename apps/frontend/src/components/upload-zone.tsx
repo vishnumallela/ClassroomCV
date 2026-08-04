@@ -20,6 +20,7 @@ export function UploadZone({ classroomId }: { classroomId: string }) {
       "POST",
       `${API_URL}/videos?filename=${encodeURIComponent(file.name)}&classroomId=${encodeURIComponent(classroomId)}`,
     );
+    xhr.withCredentials = true; // admin session cookie
     xhr.upload.addEventListener("progress", (e) => {
       if (e.lengthComputable) setProgress(e.loaded / e.total);
     });

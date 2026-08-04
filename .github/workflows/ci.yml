@@ -1,0 +1,33 @@
+# Tests + typecheck + build on every push and PR. Deploy workflows run only
+# on main; this one is the gate everything passes through first.
+name: ci
+
+on:
+  push:
+    branches: [main]
+  pull_request: {}
+  workflow_dispatch: {}
+
+jobs:
+  app:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: oven-sh/setup-bun@v2
+      - run: bun install --frozen-lockfile
+      - run: bun run typecheck
+      - run: bun run build
+
+  ml:
+    runs-on: ubuntu-latest
+    defaults:
+      run:
+        working-directory: services/ml-service
+    steps:
+      - uses: actions/checkout@v4
+      - uses: astral-sh/setup-uv@v5
+        with:
+          enable-cache: true
+          cache-dependency-glob: services/ml-service/uv.lock
+      - run: uv sync --frozen
+      - run: uv run pytest tests/ -q

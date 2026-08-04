@@ -239,6 +239,7 @@ export function VideoPlayer({
           ref={videoRef}
           src={streamUrl}
           controls
+          crossOrigin="use-credentials"
           className="block aspect-video w-full bg-black"
           onTimeUpdate={(e) => onTimeUpdate?.(e.currentTarget.currentTime * 1000)}
         >

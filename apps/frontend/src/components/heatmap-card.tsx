@@ -103,6 +103,7 @@ export function HeatmapCard({
           <img
             src={thumbnailUrl}
             alt=""
+            crossOrigin="use-credentials"
             className="absolute inset-0 h-full w-full object-cover opacity-40"
           />
         )}

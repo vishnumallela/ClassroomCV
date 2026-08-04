@@ -7,7 +7,12 @@ import { env } from "@/lib/env";
 
 export const API_URL = env.FRONTEND__API_URL;
 
-const link = new RPCLink({ url: `${API_URL}/rpc` });
+// credentials include: the admin session is an httpOnly cookie on the API
+// origin, and the SPA runs on a different origin.
+const link = new RPCLink({
+  url: `${API_URL}/rpc`,
+  fetch: (input, init) => fetch(input, { ...init, credentials: "include" }),
+});
 
 export const orpcClient: RouterClient<AppRouter> = createORPCClient(link);
 export const orpc = createTanstackQueryUtils(orpcClient);

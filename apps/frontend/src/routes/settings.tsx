@@ -33,6 +33,8 @@ function Settings() {
   const [apiKey, setApiKey] = useState("");
   const [podId, setPodId] = useState<string | null>(null);
   const [mlUrl, setMlUrl] = useState<string | null>(null);
+  const [autoStart, setAutoStart] = useState<boolean | null>(null);
+  const [autoStopMin, setAutoStopMin] = useState<number | null>(null);
   const [saved, setSaved] = useState(false);
 
   const save = useMutation({
@@ -41,11 +43,15 @@ function Settings() {
         ...(apiKey ? { runpodApiKey: apiKey } : {}),
         ...(podId !== null ? { runpodPodId: podId } : {}),
         ...(mlUrl !== null ? { mlServiceUrl: mlUrl } : {}),
+        ...(autoStart !== null ? { gpuAutoStart: autoStart } : {}),
+        ...(autoStopMin !== null ? { gpuAutoStopMinutes: autoStopMin } : {}),
       }),
     onSuccess: async () => {
       setApiKey("");
       setPodId(null);
       setMlUrl(null);
+      setAutoStart(null);
+      setAutoStopMin(null);
       setSaved(true);
       await queryClient.invalidateQueries();
     },
@@ -73,7 +79,8 @@ function Settings() {
         tone: "medium" as const,
       })
     : null;
-  const dirty = apiKey !== "" || podId !== null || mlUrl !== null;
+  const dirty =
+    apiKey !== "" || podId !== null || mlUrl !== null || autoStart !== null || autoStopMin !== null;
 
   return (
     <div className="space-y-8">
@@ -206,6 +213,40 @@ function Settings() {
             />
             <span className="block text-xs text-muted-foreground">
               The on-demand GPU pod (not serverless) created from the ml-service image.
+            </span>
+          </label>
+          <label className="flex items-start gap-3 rounded-lg border border-border p-3">
+            <input
+              type="checkbox"
+              checked={autoStart ?? s?.gpuAutoStart ?? false}
+              onChange={(e) => {
+                setAutoStart(e.target.checked);
+                setSaved(false);
+              }}
+              className="mt-0.5 size-4 accent-primary"
+            />
+            <span className="space-y-0.5">
+              <span className="block text-sm font-medium">Auto-start GPU</span>
+              <span className="block text-xs text-muted-foreground">
+                Start the pod automatically when a lesson is queued and the GPU is off.
+              </span>
+            </span>
+          </label>
+          <label className="block space-y-1.5">
+            <span className="text-sm font-medium">Auto-stop after idle (minutes)</span>
+            <input
+              type="number"
+              min={0}
+              max={1440}
+              value={autoStopMin ?? s?.gpuAutoStopMinutes ?? 0}
+              onChange={(e) => {
+                setAutoStopMin(Math.max(0, Math.floor(Number(e.target.value) || 0)));
+                setSaved(false);
+              }}
+              className="w-full rounded-lg border border-input bg-background px-3 py-2 text-sm outline-none transition-colors focus:border-ring focus:ring-2 focus:ring-ring/25"
+            />
+            <span className="block text-xs text-muted-foreground">
+              Stop the pod once the queue has been empty this long. 0 disables.
             </span>
           </label>
           <label className="block space-y-1.5 sm:col-span-2">
