@@ -15,8 +15,9 @@
     <script>
       // Apply the saved theme before first paint (no flash). Default: chalk (light).
       try {
+        // Dark ("control room") is the default; light "chalk" is the opt-out.
         var t = localStorage.getItem("luminary-theme");
-        if (t === "dark") document.documentElement.classList.add("dark");
+        if (t !== "light") document.documentElement.classList.add("dark");
       } catch (e) {}
     </script>
     <div id="root"></div>

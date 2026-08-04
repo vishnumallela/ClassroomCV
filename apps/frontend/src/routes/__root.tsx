@@ -3,6 +3,7 @@ import { Link, Outlet, createRootRouteWithContext } from "@tanstack/react-router
 import { BookOpen, School, Settings2 } from "lucide-react";
 import { AuthGate } from "@/components/auth-gate";
 import { SignOut } from "@/components/sign-out";
+import { SystemStatus } from "@/components/system-status";
 import { ThemeToggle } from "@/components/theme-toggle";
 
 export interface RouterContext {
@@ -31,10 +32,11 @@ function RootShell() {
   return (
     <div className="flex min-h-dvh bg-background text-foreground">
       <aside className="sticky top-0 hidden h-dvh w-64 shrink-0 flex-col border-r border-border bg-card/50 px-4 pb-4 md:flex">
-        <Link to="/" className="flex h-16 items-center">
+        <Link to="/" className="flex h-16 flex-col justify-center gap-1">
           <span className="font-display text-[1.35rem] font-medium leading-none tracking-[-0.02em]">
             Luminary
           </span>
+          <span className="micro-label text-[0.58rem]">Classroom intelligence</span>
         </Link>
 
         <nav className="mt-2 flex flex-col gap-1">
@@ -57,9 +59,12 @@ function RootShell() {
           ))}
         </nav>
 
-        <div className="mt-auto flex justify-end gap-1 px-1">
-          <SignOut />
-          <ThemeToggle />
+        <div className="mt-auto">
+          <SystemStatus />
+          <div className="flex justify-end gap-1 px-1">
+            <SignOut />
+            <ThemeToggle />
+          </div>
         </div>
       </aside>
 

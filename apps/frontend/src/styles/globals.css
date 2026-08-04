@@ -91,29 +91,33 @@
   --z-tooltip: 70;
 }
 
+/* Dark "control room" — the DEFAULT. Near-black with a spruce undertone
+   (never flat grey), luminous green as the working accent, hairline borders.
+   The register of a professional video-analytics console: calm surfaces,
+   precise numerals, one confident accent. */
 .dark {
-  --background: oklch(0.22 0.021 167); /* deep chalkboard green */
+  --background: oklch(0.17 0.014 167);
   --foreground: oklch(0.95 0.008 160);
-  --card: oklch(0.26 0.022 167);
+  --card: oklch(0.205 0.016 167);
   --card-foreground: oklch(0.95 0.008 160);
-  --popover: oklch(0.26 0.022 167);
+  --popover: oklch(0.205 0.016 167);
   --popover-foreground: oklch(0.95 0.008 160);
 
-  --primary: oklch(0.74 0.11 168);
-  --primary-foreground: oklch(0.2 0.03 167);
+  --primary: oklch(0.78 0.135 163);
+  --primary-foreground: oklch(0.17 0.03 167);
 
-  --secondary: oklch(0.3 0.02 167);
+  --secondary: oklch(0.27 0.018 167);
   --secondary-foreground: oklch(0.95 0.008 160);
-  --muted: oklch(0.3 0.018 167);
-  --muted-foreground: oklch(0.74 0.016 165);
-  --accent: oklch(0.32 0.022 167);
+  --muted: oklch(0.26 0.016 167);
+  --muted-foreground: oklch(0.72 0.016 165);
+  --accent: oklch(0.29 0.02 167);
   --accent-foreground: oklch(0.95 0.008 160);
 
   --destructive: oklch(0.62 0.2 25);
   --destructive-foreground: oklch(0.98 0.01 25);
 
-  --border: oklch(0.33 0.02 167);
-  --input: oklch(0.35 0.02 167);
+  --border: oklch(0.29 0.016 167);
+  --input: oklch(0.32 0.018 167);
   --ring: oklch(0.8 0.14 76);
 
   --light: oklch(0.82 0.14 76);
@@ -292,6 +296,91 @@
   .tabular {
     font-variant-numeric: tabular-nums;
     font-feature-settings: "tnum";
+  }
+
+  /* ---- precision kit: the control-room register ------------------------- */
+
+  /* Uppercase mono micro-label: section eyebrows, tile captions, HUD text.
+     The single strongest "professional console" signal — use sparingly and
+     consistently, never for prose. */
+  .micro-label {
+    font-family: var(--font-mono);
+    font-size: 0.66rem;
+    font-weight: 500;
+    letter-spacing: 0.14em;
+    text-transform: uppercase;
+    color: var(--color-muted-foreground);
+  }
+
+  /* Status LED: a quiet dot that reads at a glance. Pair with .led-ok /
+     .led-warn / .led-off; .led-live adds the slow heartbeat. */
+  .led {
+    display: inline-block;
+    width: 0.42rem;
+    height: 0.42rem;
+    border-radius: 9999px;
+    flex-shrink: 0;
+  }
+  .led-ok {
+    background: var(--color-tier-high);
+    box-shadow: 0 0 6px 1px color-mix(in oklab, var(--color-tier-high) 55%, transparent);
+  }
+  .led-warn {
+    background: var(--color-tier-medium);
+    box-shadow: 0 0 6px 1px color-mix(in oklab, var(--color-tier-medium) 55%, transparent);
+  }
+  .led-off {
+    background: var(--color-state-absent);
+  }
+  @media (prefers-reduced-motion: no-preference) {
+    .led-live {
+      animation: led-pulse 2.4s ease-in-out infinite;
+    }
+  }
+
+  /* HUD corner brackets: frames video-truth surfaces (player, heatmap, zone
+     stage) the way a calibrated instrument marks its viewport. Pure CSS,
+     pointer-transparent, sits above the media. */
+  .hud-corners {
+    position: relative;
+  }
+  .hud-corners::after {
+    content: "";
+    position: absolute;
+    inset: 10px;
+    pointer-events: none;
+    z-index: 2;
+    --hud-c: color-mix(in oklab, var(--color-primary) 85%, white 15%);
+    background:
+      linear-gradient(var(--hud-c), var(--hud-c)) left top / 14px 1.5px,
+      linear-gradient(var(--hud-c), var(--hud-c)) left top / 1.5px 14px,
+      linear-gradient(var(--hud-c), var(--hud-c)) right top / 14px 1.5px,
+      linear-gradient(var(--hud-c), var(--hud-c)) right top / 1.5px 14px,
+      linear-gradient(var(--hud-c), var(--hud-c)) left bottom / 14px 1.5px,
+      linear-gradient(var(--hud-c), var(--hud-c)) left bottom / 1.5px 14px,
+      linear-gradient(var(--hud-c), var(--hud-c)) right bottom / 14px 1.5px,
+      linear-gradient(var(--hud-c), var(--hud-c)) right bottom / 1.5px 14px;
+    background-repeat: no-repeat;
+    opacity: 0.75;
+  }
+
+  /* Faint engineering grid for empty/backstage surfaces (lock screen). */
+  .grid-bg {
+    background-image:
+      linear-gradient(color-mix(in oklab, var(--color-border) 55%, transparent) 1px, transparent 1px),
+      linear-gradient(90deg, color-mix(in oklab, var(--color-border) 55%, transparent) 1px, transparent 1px);
+    background-size: 28px 28px;
+    mask-image: radial-gradient(ellipse 90% 70% at 50% 40%, black 30%, transparent 75%);
+  }
+}
+
+@keyframes led-pulse {
+  0%,
+  100% {
+    opacity: 1;
+  }
+  50% {
+    opacity: 0.45;
   }
 }
 

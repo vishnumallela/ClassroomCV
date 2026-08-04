@@ -62,7 +62,7 @@ export function KpiCards({
           style={{ "--i": i } as CSSProperties}
         >
           <div className="flex items-start justify-between gap-1">
-            <div className="text-xs text-muted-foreground">{t.label}</div>
+            <div className="micro-label">{t.label}</div>
             {t.badge && (
               <Badge
                 variant={t.badge.tone}
@@ -73,7 +73,7 @@ export function KpiCards({
               </Badge>
             )}
           </div>
-          <div className="mt-1.5 font-display text-2xl font-semibold tabular-nums tracking-tight">
+          <div className="mt-2 font-mono text-2xl font-semibold tabular-nums tracking-tight">
             {t.value}
           </div>
           <div className="mt-0.5 text-xs text-muted-foreground">{t.sub}</div>

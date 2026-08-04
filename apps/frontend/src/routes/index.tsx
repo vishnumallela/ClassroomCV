@@ -21,6 +21,7 @@ function ClassroomsHome() {
     <div className="space-y-8">
       <header className="reveal flex flex-wrap items-end justify-between gap-4">
         <div className="space-y-1.5">
+          <span className="micro-label">Fleet overview</span>
           <h1 className="font-display text-3xl font-semibold tracking-tight">Classrooms</h1>
           <p className="max-w-xl text-sm leading-relaxed text-muted-foreground">
             Each classroom holds its camera's zone configuration and every lesson recorded in it.

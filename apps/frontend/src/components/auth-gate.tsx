@@ -58,10 +58,16 @@ export function AuthGate({ children }: { children: ReactNode }) {
   };
 
   return (
-    <div className="flex min-h-dvh items-center justify-center bg-background p-6">
+    <div className="grid-bg flex min-h-dvh items-center justify-center bg-background p-6">
       <div className="reveal w-full max-w-sm space-y-6">
         <div className="space-y-2 text-center">
-          <span className="font-display text-2xl font-medium tracking-[-0.02em]">Luminary</span>
+          <span className="micro-label flex items-center justify-center gap-2">
+            <span className="led led-ok led-live" />
+            Secure access
+          </span>
+          <span className="block font-display text-2xl font-medium tracking-[-0.02em]">
+            Luminary
+          </span>
           <p className="text-sm text-muted-foreground">
             Enter the admin password to open the dashboard.
           </p>

@@ -98,7 +98,10 @@ export function HeatmapCard({
         </p>
       </div>
 
-      <div className="relative w-full bg-muted" style={{ aspectRatio: String(aspect || 16 / 9) }}>
+      <div
+        className="hud-corners relative w-full bg-muted"
+        style={{ aspectRatio: String(aspect || 16 / 9) }}
+      >
         {thumbnailUrl && (
           <img
             src={thumbnailUrl}

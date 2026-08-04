@@ -234,7 +234,7 @@ export function VideoPlayer({
 
   return (
     <div className="space-y-3">
-      <div className="relative overflow-hidden rounded-xl border border-border bg-black">
+      <div className="hud-corners relative overflow-hidden rounded-xl border border-border bg-black">
         <video
           ref={videoRef}
           src={streamUrl}

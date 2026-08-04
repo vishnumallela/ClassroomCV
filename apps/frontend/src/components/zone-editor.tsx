@@ -161,7 +161,7 @@ export function ZoneEditor({
         <button
           ref={stageRef}
           type="button"
-          className="relative block w-full cursor-crosshair overflow-hidden rounded-lg border border-border bg-black"
+          className="hud-corners relative block w-full cursor-crosshair overflow-hidden rounded-lg border border-border bg-black"
           style={{ aspectRatio: String(aspect) }}
           onClick={(e: MouseEvent) => {
             // detail === 0 is a keyboard-synthesized click (Enter/Space on the

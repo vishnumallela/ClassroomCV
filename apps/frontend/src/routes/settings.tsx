@@ -85,6 +85,7 @@ function Settings() {
   return (
     <div className="space-y-8">
       <header className="reveal space-y-1.5">
+        <span className="micro-label">System</span>
         <h1 className="font-display text-3xl font-semibold tracking-tight">Settings</h1>
         <p className="max-w-xl text-sm leading-relaxed text-muted-foreground">
           The GPU that runs analysis, and how this app reaches it. Lessons queue while the GPU is

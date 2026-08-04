@@ -105,8 +105,8 @@ function ClassroomMetrics() {
             className="p-4 transition-colors hover:border-primary/40"
             style={{ "--i": i } as CSSProperties}
           >
-            <div className="text-xs text-muted-foreground">{t.label}</div>
-            <div className="mt-1.5 font-display text-2xl font-semibold tabular-nums tracking-tight">
+            <div className="micro-label">{t.label}</div>
+            <div className="mt-2 font-mono text-2xl font-semibold tabular-nums tracking-tight">
               {t.value}
             </div>
             <div className="mt-0.5 text-xs text-muted-foreground">{t.sub}</div>
