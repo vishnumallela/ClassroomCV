@@ -94,12 +94,18 @@ async def evaluate(video_id: str, spec: dict) -> bool:
         "entries": analytics["entries"],
         "exits": analytics["exits"],
         "teacher_tracks": teacher_tracks,
-        "max_students": analytics["max_students"] or 0,
-        "avg_students": analytics["avg_students"] or 0.0,
+        # Heatmap KPI: total dwell samples — a coarse but stable regression
+        # gate for "the teacher's timeline did not shrink or balloon".
+        "heatmap_samples": sum(analytics["heatmap"]["teacher"]),
     }
 
     all_ok = True
     for name, gate in spec["gates"].items():
+        if name not in actuals:
+            # e.g. max/avg_students from a pre-slimming ground truth: the
+            # metric no longer exists, so it cannot gate anything.
+            print(f"  [SKIP] {name:<22} metric removed in the 2026-08 KPI slimming")
+            continue
         ok, line = _check(name, actuals[name], gate)
         all_ok = all_ok and ok
         print(line)

@@ -2,6 +2,7 @@ import type { QueryClient } from "@tanstack/react-query";
 import { Link, Outlet, createRootRouteWithContext } from "@tanstack/react-router";
 import { BookOpen, School, Settings2 } from "lucide-react";
 import { AuthGate } from "@/components/auth-gate";
+import { SignOut } from "@/components/sign-out";
 import { ThemeToggle } from "@/components/theme-toggle";
 
 export interface RouterContext {
@@ -56,7 +57,8 @@ function RootShell() {
           ))}
         </nav>
 
-        <div className="mt-auto flex justify-end px-1">
+        <div className="mt-auto flex justify-end gap-1 px-1">
+          <SignOut />
           <ThemeToggle />
         </div>
       </aside>

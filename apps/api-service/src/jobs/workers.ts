@@ -1,6 +1,7 @@
 import { DelayedError, Worker } from "bullmq";
 import { JOB_NAMES, QUEUE_NAMES } from "@api/lib/constants";
 import { getAppSettings, mlServiceUrl } from "@api/lib/app-settings";
+import { updateStatus } from "@api/db/queries";
 import { logger } from "@api/lib/logger";
 import { getPodStatus, startPod, stopPod } from "@api/lib/runpod";
 import { createBullConnection } from "@api/lib/redis";
@@ -95,6 +96,10 @@ export function startWorkers(): void {
             { jobId: job.id, videoId: job.data.videoId },
             "ML service unreachable (GPU off?); delaying job without burning an attempt",
           );
+          // Let the dashboard say WHY nothing is happening. Benign if a newer
+          // run owns the video: it only runs when ML is reachable, and its
+          // first step immediately stamps its own status.
+          await updateStatus(job.data.videoId, { status: "waiting_gpu" }).catch(() => undefined);
           await maybeAutoStart();
           await job.moveToDelayed(Date.now() + GPU_WAIT_DELAY_MS, token);
           throw new DelayedError();
