@@ -157,9 +157,10 @@ export default defineRailway(() => {
       API_SERVICE__S3_ACCESS_KEY: "${{minio.MINIO_ROOT_USER}}",
       API_SERVICE__S3_SECRET_KEY: "${{minio.MINIO_ROOT_PASSWORD}}",
       API_SERVICE__S3_REGION: "us-east-1",
-      // The SPA is a separate origin and sends its session cookie with
-      // credentials, so the browser needs this exact origin echoed back.
-      // Written as a raw reference so the two services stay acyclic in code.
+      // The browser never uses this: it reaches the API same-origin through
+      // web's /api proxy, so no request carries an Origin header. It only
+      // covers anything hitting the api's own domain directly. Written as a
+      // raw reference so the two services stay acyclic in code.
       API_SERVICE__CORS_ORIGINS: "https://${{web.RAILWAY_PUBLIC_DOMAIN}}",
       // Gates every route. Never leave this empty on a public URL: uploads,
       // deletes, the RunPod key and the GPU start/stop buttons sit behind it.
@@ -187,9 +188,12 @@ export default defineRailway(() => {
       // Caddy binds this (apps/frontend/Caddyfile) and Railway's edge routes
       // the public domain to it.
       PORT: "8080",
-      // Vite inlines this at BUILD time (see apps/frontend/Dockerfile), so the
-      // api must already have its public domain when web builds.
-      FRONTEND__API_URL: "https://${{api.RAILWAY_PUBLIC_DOMAIN}}",
+      // This service's OWN domain, not the api's: Caddy proxies /api to the
+      // api service (apps/frontend/Caddyfile) so the SPA and the API share an
+      // origin and the session cookie is first-party. Pointing the SPA
+      // straight at the api's domain makes every browser drop that cookie.
+      // Vite inlines it at BUILD time, so it is a build arg on this image.
+      FRONTEND__API_URL: "https://${{RAILWAY_PUBLIC_DOMAIN}}/api",
     },
   });
 

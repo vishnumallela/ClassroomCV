@@ -10,8 +10,8 @@ GitHub main ──► Railway build (api, web)   ── app code deploys itself
         ├────► deploy-railway.yml ─────────► railway config apply (infrastructure)
         └────► deploy-ml-runpod.yml ───────► GHCR image ─► RunPod pod restart (pulls :latest)
 
-browser ─► web (Caddy/SPA) ─► api ─► Timescale / Redis / MinIO
-                                └──► RunPod pod :8000 (ml-service, L4 GPU)
+browser ─► web (Caddy: SPA + /api proxy) ─► api ─► Timescale / Redis / MinIO
+                                              └──► RunPod pod :8000 (L4 GPU)
 ```
 
 ## 1. Railway project
@@ -32,7 +32,7 @@ railway config apply        # reconcile
 | `Redis` | Railway Redis | BullMQ broker for the upload → analyse → derive pipeline |
 | `minio` | `minio/minio:latest` + volume | S3-compatible store for video + thumbnail bytes. Also what lets the *remote* GPU worker read a lesson: it gets a presigned URL, never a path on the api's disk |
 | `api` | this repo, `apps/api-service/Dockerfile` | Bun + Hono + the BullMQ workers. Migrations run as a pre-deploy step; healthcheck `/health` |
-| `web` | this repo, `apps/frontend/Dockerfile` | Vite SPA built at image-build time, served by Caddy with an SPA fallback |
+| `web` | this repo, `apps/frontend/Dockerfile` | Vite SPA built at image-build time, served by Caddy with an SPA fallback. Also proxies `/api` to `api` — the browser only ever talks to this one origin |
 
 Both Dockerfiles build from the **repo root** (Bun workspaces need the root
 lockfile), which is why each service sets `build.dockerfilePath` rather than a
@@ -41,11 +41,10 @@ root directory.
 Two things the config file deliberately does not contain:
 
 - **Public domains.** They are generated per environment
-  (`railway domain --service api`), and referenced as
-  `${{api.RAILWAY_PUBLIC_DOMAIN}}` / `${{web.RAILWAY_PUBLIC_DOMAIN}}` so the
-  CORS origin and the SPA's API origin follow whatever Railway hands out.
-  Because Vite inlines `FRONTEND__API_URL` at **build** time, the api's domain
-  must exist before `web` builds — generate domains first, then redeploy `web`.
+  (`railway domain --service api`) and referenced as
+  `${{RAILWAY_PUBLIC_DOMAIN}}`, so the wiring follows whatever Railway hands
+  out. Because Vite inlines `FRONTEND__API_URL` at **build** time, a domain
+  must exist before `web` builds — generate domains first, then redeploy.
 - **Secrets.** They are platform-managed and declared `preserve()`. Do **not**
   put a `generator:` on a live credential — it re-runs on every
   `config apply`, so an unrelated infrastructure change silently rotates it.
@@ -65,7 +64,15 @@ Two things the config file deliberately does not contain:
   `railway redeploy --service <name>` afterwards, or MinIO answers
   `SignatureDoesNotMatch` to every S3 call.
 
-Two platform behaviours worth knowing before changing this file:
+**The SPA and the API must share an origin.** Caddy proxies `/api` on the web
+service through to `api` for exactly one reason: the admin session is a
+cookie, and browsers discard a `Set-Cookie` that arrives from a different
+origin. Point the SPA at the api's own domain and `/auth/login` answers 200
+while the session never sticks — the lock screen simply never opens. Same
+origin also means no CORS preflight on a multi-GB upload, and `<video>`
+elements send the session without a `crossorigin` dance.
+
+Three platform behaviours worth knowing before changing this file:
 
 - **MinIO must not run its console.** Left on, it opens a *random* high port,
   which gives Railway's proxy a second listener to choose from and it answers
@@ -93,8 +100,8 @@ Project `classroomcv` in the **Ravi Sankar's Projects** workspace.
 
 | | |
 |---|---|
-| App | <https://web-production-cc3f0e.up.railway.app> |
-| API | <https://api-production-5260.up.railway.app> (`/health`, queue dashboard at `/admin/queues`) |
+| App | <https://web-production-cc3f0e.up.railway.app> — also serves the API at `/api` |
+| API (direct) | <https://api-production-5260.up.railway.app> (`/health`, queue dashboard at `/admin/queues`) |
 | Object storage | <https://minio-production-14a9.up.railway.app> (S3 API only, credentialed) |
 | Database | `timescale.railway.internal:5432` in-network; TCP proxy for the GPU pod |
 

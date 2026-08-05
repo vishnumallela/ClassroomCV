@@ -50,6 +50,16 @@ export function AuthGate({ children }: { children: ReactNode }) {
         setSubmitting(false);
         return;
       }
+      // Re-check instead of assuming 200 means signed in. A browser that
+      // refuses to keep the session cookie still answers 200 here, and
+      // leaving `submitting` set on that path hangs the button on
+      // "Signing in…" forever with nothing to explain it.
+      const refreshed = await me.refetch();
+      setSubmitting(false);
+      if (!refreshed.data?.authenticated) {
+        setError("Signed in, but this browser did not keep the session cookie.");
+        return;
+      }
       await queryClient.invalidateQueries();
     } catch {
       setError("Could not reach the service.");

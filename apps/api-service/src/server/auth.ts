@@ -9,8 +9,13 @@ import { env } from "@api/lib/env";
  *
  * Sessions are a signed cookie whose HMAC secret IS the admin password, so
  * rotating the password invalidates every session with zero stored state.
- * httpOnly + SameSite=None + Secure: the SPA runs on a different origin and
- * every media element / XHR sends the cookie with credentials.
+ *
+ * httpOnly + SameSite=Lax + Secure. Lax, not None, because the SPA reaches
+ * the API through its own origin (Caddy proxies /api — see
+ * apps/frontend/Caddyfile): the cookie is first-party, which is the only way
+ * it survives a browser at all, and Lax then blocks cross-site requests from
+ * riding on it. A deployment that serves the API on its own domain instead
+ * gets a 200 from /auth/login and a session that never sticks.
  */
 
 const COOKIE = "luminary_session";
@@ -63,7 +68,7 @@ export function registerAuthRoutes(app: Hono): void {
     await setSignedCookie(c, COOKIE, COOKIE_VALUE, env.API_SERVICE__ADMIN_PASSWORD, {
       httpOnly: true,
       secure: true,
-      sameSite: "None",
+      sameSite: "Lax",
       path: "/",
       maxAge: MAX_AGE_S,
     });
@@ -71,7 +76,7 @@ export function registerAuthRoutes(app: Hono): void {
   });
 
   app.post("/auth/logout", (c) => {
-    deleteCookie(c, COOKIE, { path: "/", secure: true, sameSite: "None" });
+    deleteCookie(c, COOKIE, { path: "/", secure: true, sameSite: "Lax" });
     return c.json({ ok: true });
   });
 }
