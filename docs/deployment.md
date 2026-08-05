@@ -46,13 +46,55 @@ Two things the config file deliberately does not contain:
   CORS origin and the SPA's API origin follow whatever Railway hands out.
   Because Vite inlines `FRONTEND__API_URL` at **build** time, the api's domain
   must exist before `web` builds — generate domains first, then redeploy `web`.
-- **Secrets.** `API_SERVICE__ADMIN_PASSWORD`, the queue-dashboard password and
-  the MinIO root password are declared as Railway `secret(…)` generators, so
-  they are created on the platform and never live in the repo. Read the admin
-  password back with `railway variables list --service api --kv`.
+- **Secrets.** They are platform-managed and declared `preserve()`. Do **not**
+  put a `generator:` on a live credential — it re-runs on every
+  `config apply`, so an unrelated infrastructure change silently rotates it.
+  That rotated `POSTGRES_PASSWORD` after initdb had already baked the old one
+  into the data directory, locking the api out of its own database. Set them
+  once instead, and the file will never touch them again:
+
+  ```bash
+  railway variables set POSTGRES_PASSWORD=…                     --service Timescale
+  railway variables set MINIO_ROOT_PASSWORD=…                   --service minio
+  railway variables set API_SERVICE__ADMIN_PASSWORD=…           --service api
+  railway variables set API_SERVICE__QUEUE_DASHBOARD_PASSWORD=… --service api
+  ```
+
+  Read one back with `railway variables list --service api --kv`. Setting a
+  secret with `--skip-deploys` leaves the running container on the old value —
+  `railway redeploy --service <name>` afterwards, or MinIO answers
+  `SignatureDoesNotMatch` to every S3 call.
+
+Two platform behaviours worth knowing before changing this file:
+
+- **MinIO must not run its console.** Left on, it opens a *random* high port,
+  which gives Railway's proxy a second listener to choose from and it answers
+  502 on the S3 API. `MINIO_BROWSER=off` plus an explicit `PORT` leaves one.
+  It also needs `--address [::]:9000`; the bare `:9000` form is IPv4-only and
+  Railway routes over IPv6.
+- **`database(name, "postgres", { image })` cannot deliver TimescaleDB.** It
+  provisions Railway's own Postgres image first and swaps the custom one in
+  afterwards — initdb has already run, so the cluster ends up the wrong major
+  version with no `timescaledb` in `shared_preload_libraries`. Declare the
+  service straight from the image, as this file does.
 
 No ML host is pinned here: the api resolves the ML service URL from app
 settings at call time (§3), so re-pointing at a fresh pod needs no redeploy.
+
+### Live deployment
+
+Project `classroomcv` in the **Ravi Sankar's Projects** workspace.
+
+| | |
+|---|---|
+| App | <https://web-production-cc3f0e.up.railway.app> |
+| API | <https://api-production-5260.up.railway.app> (`/health`, queue dashboard at `/admin/queues`) |
+| Object storage | <https://minio-production-14a9.up.railway.app> (S3 API only, credentialed) |
+| Database | `timescale.railway.internal:5432` in-network; TCP proxy for the GPU pod |
+
+`railway config plan` reports one standing `Update Timescale networking` diff
+it cannot converge — the CLI does not read the TCP proxy back, so it re-plans
+the same no-op every time. Harmless; the proxy is live.
 
 ## 2. RunPod pod (one-time)
 
