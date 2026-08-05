@@ -29,6 +29,27 @@
         "total_tracks": 42,
         "note": "fewer tracks with unchanged gates = better re-ID (less fragmentation); more = regression. 40->42 here is intentional: the teacher chain evicted 2 wrongly-merged student fragments into their own identities."
       }
+    },
+    "khaitan_ch10": {
+      "label": "Khaitan class, camera 10 (11.5 min, ~28 people, one teacher)",
+      "note": "Per-frame teacher ground truth in eval/gt/khaitan_ch10.teacher.json, built by eval/annotate_teacher.py from a cue the pipeline may not use (she is the only person not in a coloured school polo) and spot-checked on a 32-crop contact sheet. BASELINE BEFORE THIS WORK: the pipeline labelled NO teacher at all on this lesson - her timeline landed in three different merged identities which then cancelled each other's margin, so every KPI was zero. Gates are identity gates: KPI totals can be right for the wrong reasons.",
+      "identity_gates": {
+        "coverage": {
+          "min": 0.85
+        },
+        "purity": {
+          "min": 0.95
+        },
+        "id_switches": {
+          "max": 3
+        },
+        "cold_start_ms": {
+          "max": 150000
+        }
+      },
+      "report_only": {
+        "note": "coverage/purity measured 89.9%/98.9% at the time of writing"
+      }
     }
   },
   "budgets": {

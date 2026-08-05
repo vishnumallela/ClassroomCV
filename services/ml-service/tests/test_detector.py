@@ -186,7 +186,12 @@ class TestValidateVideoPath:
 def test_embed_tracks_streams_and_normalizes(monkeypatch):
     """CLIP embedding must batch INSIDE the loop (not materialize every tensor
     up front) so a 1-hour video's tens of thousands of crops cannot OOM, and it
-    must return a unit-norm median vector per raw track."""
+    must return a timestamped gallery of unit-norm vectors per raw track.
+
+    A gallery rather than one averaged vector: re-identification needs to ask
+    whether her BEST view of one stretch matches her BEST view of another, and
+    the timestamps are what let a raw id that changed person be split with each
+    half keeping its own crops."""
     import numpy as np
     import torch
 
@@ -210,15 +215,21 @@ def test_embed_tracks_streams_and_normalizes(monkeypatch):
     monkeypatch.setattr(D, "_get_clip", lambda: (FakeModel(), fake_preprocess, "cpu"))
 
     crops = {
-        7: [np.full((8, 8, 3), v, np.uint8) for v in (10, 20, 30)],
-        9: [np.full((8, 8, 3), v, np.uint8) for v in (40, 50)],
+        7: [(ts, np.full((8, 8, 3), v, np.uint8)) for ts, v in ((0, 10), (1000, 20), (2000, 30))],
+        9: [(ts, np.full((8, 8, 3), v, np.uint8)) for ts, v in ((500, 40), (1500, 50))],
     }
     out = D._embed_tracks(crops)
 
     assert set(out.keys()) == {7, 9}
-    for vec in out.values():
-        assert len(vec) == 12  # 3*2*2 flattened
-        assert abs(float(np.linalg.norm(vec)) - 1.0) < 1e-5  # unit-normalized
+    assert [ts for ts, _v in out[7]] == [0, 1000, 2000]
+    assert [ts for ts, _v in out[9]] == [500, 1500]
+    for gallery in out.values():
+        for _ts, vec in gallery:
+            assert len(vec) == 12  # 3*2*2 flattened
+            assert abs(float(np.linalg.norm(vec)) - 1.0) < 1e-5  # unit-normalized
+    # gallery_vectors strips the stamps for consumers that only want appearance
+    assert len(D.gallery_vectors(out[7])) == 3
+    assert len(D.gallery_vectors(D.median_embed(out[7]))) == 1
     # 5 crops at batch size 2 -> batches of [2, 2, 1]; never all 5 at once.
     assert seen_batch_sizes == [2, 2, 1]
     assert max(seen_batch_sizes) <= 2

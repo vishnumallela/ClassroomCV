@@ -62,6 +62,15 @@ CLIP_CROP_UPPER_FRAC = 0.6
 CLIP_CROP_MAX_SIDE = 224
 CLIP_BATCH_SIZE = 64
 CLIP_MODEL_NAME = "ViT-B/32"
+# Occlusion gate for appearance sampling (see _appearance_sample_ok): a crop
+# where a third of the body is behind someone else already contains more of the
+# occluder than of the subject.
+OCCLUSION_SAMPLE_MAX = 0.35
+# ...relaxed only while a track still has almost no appearance evidence, so a
+# permanently half-hidden back-row pupil is still represented (badly) rather
+# than not at all.
+OCCLUSION_SAMPLE_FALLBACK = 0.65
+OCCLUSION_FALLBACK_UNTIL = 3
 KPT_CONF_LOW = 0.3
 KPT_CONF_VISIBLE = 0.5
 STANDING_ASPECT = 1.6
@@ -151,6 +160,16 @@ def _ensure_lap_shim() -> None:
 
 def model_loaded() -> bool:
     return _model is not None
+
+
+def clip_loaded() -> bool:
+    """True when the CLIP checkpoint is already resident in this process.
+
+    Callers use this to keep optional appearance work free: a path that has
+    not embedded anything must not pull a 350 MB checkpoint onto the box just
+    to add one more signal.
+    """
+    return _clip_bundle is not None
 
 
 # Best YOLO26 pose weight per resolved device when Settings.model_name is
@@ -655,6 +674,108 @@ def _back_to_camera(kconf: Optional[np.ndarray]) -> bool:
     return face < KPT_CONF_LOW and shoulders > KPT_CONF_VISIBLE
 
 
+def _occlusions(
+    raw: list[tuple[float, float, float, float]]
+) -> list[float]:
+    """Per-box occlusion in 0..1 for one frame's boxes (center-format, normalized).
+
+    Two things hide a person in a classroom, and both corrupt every downstream
+    reading of that box (appearance crop, height, posture):
+
+    COVERED   a person BETWEEN them and the camera. On a fixed overhead camera
+              the ground-plane rule is reliable: whoever's feet are lower in
+              the frame is nearer, so only boxes with a lower bottom edge can
+              occlude. Contribution is summed (a back-row pupil is commonly
+              hidden by two people at once) and clamped at 1.
+    TRUNCATED the frame edge cuts the box off — the teacher half out of shot at
+              the door reads as a short, cropped person.
+
+    Combined as independent losses of visibility: 1 - (1-covered)(1-truncated).
+    O(n^2) over the ~30 boxes of one frame is a few microseconds.
+    """
+    n = len(raw)
+    out = [0.0] * n
+    boxes = []
+    for cx, cy, w, h in raw:
+        boxes.append((cx - w / 2.0, cy - h / 2.0, cx + w / 2.0, cy + h / 2.0))
+    for i, (x0, y0, x1, y1) in enumerate(boxes):
+        area = max(1e-9, (x1 - x0) * (y1 - y0))
+        covered = 0.0
+        for j, (a0, b0, a1, b1) in enumerate(boxes):
+            if i == j or b1 <= y1:  # only nearer-to-camera boxes occlude
+                continue
+            iw = min(x1, a1) - max(x0, a0)
+            ih = min(y1, b1) - max(y0, b0)
+            if iw > 0 and ih > 0:
+                covered += iw * ih / area
+        covered = min(1.0, covered)
+        visible_w = max(0.0, min(1.0, x1) - max(0.0, x0))
+        visible_h = max(0.0, min(1.0, y1) - max(0.0, y0))
+        truncated = max(0.0, 1.0 - (visible_w * visible_h) / area)
+        out[i] = round(1.0 - (1.0 - covered) * (1.0 - truncated), 4)
+    return out
+
+
+def _body_ratios(
+    kxy: Optional[np.ndarray],
+    kconf: Optional[np.ndarray],
+    frame_aspect: float,
+) -> Optional[dict]:
+    """Scale-free body proportions, or None when the keypoints cannot support them.
+
+    Adults and children differ in PROPORTION, not just size: a child's head is
+    roughly 1/6 of their stature and an adult's about 1/8, and adult legs are
+    longer relative to the torso. Ratios of keypoint distances are invariant to
+    how far the person is from the camera, which is exactly what raw bbox
+    height is not — the front-row pupil is the tallest box in the room.
+
+    - head: nose-to-shoulder-line distance over torso length (shoulders to
+      hips). Larger for children.
+    - leg: hip-to-ankle (falling back to twice hip-to-knee when the feet are
+      under a desk) over torso length. Larger for adults.
+    - vis: fraction of the 17 keypoints the model is confident about, so
+      consumers can discount a measurement taken through an occlusion.
+
+    xyn is normalized by frame width/height independently, so x is rescaled by
+    the frame aspect before any distance is taken; otherwise a 16:9 frame
+    stretches every horizontal component by 1.78.
+    """
+    if kxy is None or kconf is None or len(kconf) < 17:
+        return None
+    conf = np.asarray(kconf, dtype=np.float64)
+    pts = np.asarray(kxy, dtype=np.float64).copy()
+    if frame_aspect > 0:
+        pts[:, 0] *= frame_aspect
+
+    def ok(*idx: int) -> bool:
+        return all(conf[i] > STANDING_KPT_CONF for i in idx)
+
+    def mid(a: int, b: int) -> np.ndarray:
+        return (pts[a] + pts[b]) / 2.0
+
+    if not ok(L_SHOULDER, R_SHOULDER, L_HIP, R_HIP):
+        return None
+    shoulder = mid(L_SHOULDER, R_SHOULDER)
+    hip = mid(L_HIP, R_HIP)
+    torso = float(np.linalg.norm(shoulder - hip))
+    if torso < 1e-4:
+        return None
+
+    out: dict = {"vis": round(float((conf > STANDING_KPT_CONF).mean()), 3)}
+    if conf[NOSE] > STANDING_KPT_CONF:
+        out["head"] = round(float(np.linalg.norm(pts[NOSE] - shoulder)) / torso, 4)
+    ankles = [i for i in (15, 16) if conf[i] > STANDING_KPT_CONF]
+    knees = [i for i in (L_KNEE, R_KNEE) if conf[i] > STANDING_KPT_CONF]
+    if ankles:
+        foot = pts[ankles].mean(axis=0)
+        out["leg"] = round(float(np.linalg.norm(foot - hip)) / torso, 4)
+    elif knees:
+        # Feet under a desk: the knee is half the leg, doubled to estimate it.
+        knee = pts[knees].mean(axis=0)
+        out["leg"] = round(2.0 * float(np.linalg.norm(knee - hip)) / torso, 4)
+    return out if len(out) > 1 else None
+
+
 def _torso_hist(
     frame: np.ndarray,
     bbox: dict,
@@ -693,6 +814,21 @@ def _torso_hist(
     if total > 0:
         hist /= total
     return hist.astype(np.float32)
+
+
+def _appearance_sample_ok(occlusion: float, samples_so_far: int) -> bool:
+    """May this frame contribute appearance evidence for this track?
+
+    Clean views only, except while a track is still nearly evidence-free: then
+    a heavily occluded view is still better than none (it can only be vetoed
+    against, never used to claim a match).
+    """
+    if occlusion <= OCCLUSION_SAMPLE_MAX:
+        return True
+    return (
+        samples_so_far < OCCLUSION_FALLBACK_UNTIL
+        and occlusion <= OCCLUSION_SAMPLE_FALLBACK
+    )
 
 
 def _get_clip():
@@ -742,8 +878,19 @@ def _upper_crop(frame: np.ndarray, bbox: dict) -> Optional[np.ndarray]:
     return crop.copy()
 
 
-def _embed_tracks(crops: dict[int, list[np.ndarray]]) -> dict[int, list[float]]:
-    """L2-normalized median CLIP embedding (512 floats) per raw track.
+def _embed_tracks(
+    crops: dict[int, list[tuple[int, np.ndarray]]]
+) -> dict[int, list[tuple[int, list[float]]]]:
+    """Timestamped L2-normalized CLIP embedding GALLERY per raw track.
+
+    A gallery, not a single median, because a median collapses exactly the
+    information re-ID needs on this footage: one crop catches her from behind,
+    one against a blown-out doorway, one clean. Averaging them produces a
+    vector that matches nothing well, while keeping the samples lets a matcher
+    ask "did her BEST view match this track's BEST view" — the question that
+    survives a person walking out of frame and back in under different light.
+    Consumers that want one vector per track (the merge, DB persistence) take
+    the median themselves.
 
     One batched post-pass over all sampled crops, so the 5 fps detection loop
     stays untouched. Preprocessing happens INSIDE the batch loop, not up front:
@@ -755,8 +902,10 @@ def _embed_tracks(crops: dict[int, list[np.ndarray]]) -> dict[int, list[float]]:
     discard a completed multi-minute YOLO pass — the merge falls back to
     hist+spatial.
     """
-    flat: list[tuple[int, np.ndarray]] = [
-        (raw_id, crop) for raw_id, samples in crops.items() for crop in samples
+    flat: list[tuple[int, int, np.ndarray]] = [
+        (raw_id, ts, crop)
+        for raw_id, samples in crops.items()
+        for ts, crop in samples
     ]
     if not flat:
         return {}
@@ -772,7 +921,7 @@ def _embed_tracks(crops: dict[int, list[np.ndarray]]) -> dict[int, list[float]]:
                 tensors = [
                     # cv2 frames are BGR; CLIP's preprocess expects an RGB PIL image.
                     preprocess(Image.fromarray(cv2.cvtColor(crop, cv2.COLOR_BGR2RGB)))
-                    for _raw_id, crop in chunk
+                    for _raw_id, _ts, crop in chunk
                 ]
                 batch = torch.stack(tensors).to(device)
                 feats.append(model.encode_image(batch).float().cpu().numpy())
@@ -781,21 +930,120 @@ def _embed_tracks(crops: dict[int, list[np.ndarray]]) -> dict[int, list[float]]:
         logger.warning("CLIP track embedding failed; merge will run without embeds", exc_info=True)
         return {}
 
-    by_id: dict[int, list[np.ndarray]] = {}
-    for (raw_id, _crop), feat in zip(flat, all_feats):
+    out: dict[int, list[tuple[int, list[float]]]] = {}
+    for (raw_id, ts, _crop), feat in zip(flat, all_feats):
         norm = float(np.linalg.norm(feat))
         if norm > 0:
-            # Normalize per sample so the median averages directions, not
-            # magnitudes (CLIP feature norms vary with crop content).
-            by_id.setdefault(raw_id, []).append(feat / norm)
-    out: dict[int, list[float]] = {}
-    for raw_id, samples in by_id.items():
-        med = np.median(np.stack(samples), axis=0)
-        norm = float(np.linalg.norm(med))
-        if norm > 0:
-            # Median of unit vectors is not unit; re-normalize so downstream
-            # dot products are true cosines.
-            out[raw_id] = [float(v) for v in med / norm]
+            # Normalize per sample so every later dot product is a true cosine
+            # (CLIP feature norms vary with crop content).
+            out.setdefault(raw_id, []).append((ts, [float(v) for v in feat / norm]))
+    return out
+
+
+def gallery_vectors(samples) -> list[list[float]]:
+    """Plain vectors from one track's appearance evidence, whatever shape it is in.
+
+    Three shapes are legitimately in circulation and callers that only want
+    appearance (the merge, DB persistence) should not have to tell them apart:
+    a single vector (what the database stores per track), a list of vectors,
+    and the list of (timestamp, vector) samples /analyze produces.
+    """
+    items = list(samples or [])
+    if not items:
+        return []
+    if np.isscalar(items[0]):  # one bare vector
+        return [[float(v) for v in items]]
+    out: list[list[float]] = []
+    for s in items:
+        if (
+            isinstance(s, (tuple, list))
+            and len(s) == 2
+            and np.isscalar(s[0])
+            and not np.isscalar(s[1])
+        ):
+            out.append([float(v) for v in s[1]])
+        else:
+            out.append([float(v) for v in s])
+    return out
+
+
+def median_embed(samples) -> Optional[list[float]]:
+    """One representative unit vector for a gallery (median, re-normalized)."""
+    vecs = gallery_vectors(samples)
+    if not vecs:
+        return None
+    med = np.median(np.stack([np.asarray(v, dtype=np.float64) for v in vecs]), axis=0)
+    norm = float(np.linalg.norm(med))
+    if norm <= 0:
+        return None
+    return [float(v) for v in med / norm]
+
+
+# Zero-shot age reading. Prompt pairs rather than single prompts: CLIP's
+# absolute image-text cosine is dominated by the scene ("classroom"), so what
+# carries signal is the DIFFERENCE between two prompts that hold the scene
+# fixed and vary only the age of the person.
+_ADULT_PROMPTS = (
+    "a photo of an adult teacher standing in a classroom",
+    "a photo of a grown woman in a classroom",
+    "a photo of a grown man in a classroom",
+)
+_CHILD_PROMPTS = (
+    "a photo of a school child sitting in a classroom",
+    "a photo of a young pupil in school uniform",
+    "a photo of a small boy or girl in a classroom",
+)
+_text_cache: Optional[tuple[np.ndarray, np.ndarray]] = None
+
+
+def _adult_child_text_features():
+    """(adult, child) mean unit text embeddings, cached for the process."""
+    global _text_cache
+    if _text_cache is None:
+        import clip
+        import torch
+
+        model, _preprocess, device = _get_clip()
+        with torch.no_grad():
+            def encode(prompts):
+                toks = clip.tokenize(list(prompts)).to(device)
+                feats = model.encode_text(toks).float().cpu().numpy()
+                feats /= np.maximum(np.linalg.norm(feats, axis=1, keepdims=True), 1e-9)
+                mean = feats.mean(axis=0)
+                return mean / max(float(np.linalg.norm(mean)), 1e-9)
+
+            _text_cache = (encode(_ADULT_PROMPTS), encode(_CHILD_PROMPTS))
+    return _text_cache
+
+
+def zero_shot_adult(galleries: dict) -> dict[int, float]:
+    """Per-track 0..1 adult-vs-child reading of the CLIP crops already embedded.
+
+    Uses the track's BEST (most adult-leaning) views rather than its average:
+    a walking adult is half-occluded in most frames, and the frames where she
+    is clearly visible are the ones that carry age information. Returns {} when
+    CLIP is unavailable — this is an optional signal, never a dependency.
+    """
+    if not galleries:
+        return {}
+    try:
+        adult_t, child_t = _adult_child_text_features()
+    except Exception:
+        logger.warning("zero-shot adult scoring unavailable", exc_info=True)
+        return {}
+
+    out: dict[int, float] = {}
+    for raw_id, samples in galleries.items():
+        vecs = gallery_vectors(samples)
+        if not vecs:
+            continue
+        mat = np.asarray(vecs, dtype=np.float64)
+        margins = mat @ adult_t - mat @ child_t
+        # Top third of views, minimum one: the cleanest evidence available.
+        keep = max(1, len(margins) // 3)
+        best = float(np.mean(np.sort(margins)[-keep:]))
+        # CLIP prompt margins land in roughly [-0.06, 0.06]; map to 0..1.
+        out[raw_id] = float(min(1.0, max(0.0, (best + 0.03) / 0.06)))
     return out
 
 
@@ -826,7 +1074,7 @@ def _extract_frame(
     detections: list[Detection],
     hists: dict[int, list[np.ndarray]],
     last_hist_ms: dict[int, int],
-    crops: dict[int, list[np.ndarray]],
+    crops: dict[int, list[tuple[int, np.ndarray]]],
     last_crop_ms: dict[int, int],
 ) -> None:
     r = results[0]
@@ -852,12 +1100,14 @@ def _extract_frame(
 
     fh, fw = frame.shape[:2]
     frame_aspect = (fw / fh) if fh > 0 else 1.0
+    occl = _occlusions([tuple(float(v) for v in xywhn[i]) for i in range(len(ids))])
 
     for i, raw_id in enumerate(ids):
         cx, cy, w, h = (float(v) for v in xywhn[i])
         bbox = _clip_bbox(cx, cy, w, h)
         kxy = kpts_xy[i] if kpts_xy is not None else None
         kcf = kpts_conf[i] if kpts_conf is not None else None
+        occlusion = occl[i]
         detections.append(
             Detection(
                 video_ts_ms=ts_ms,
@@ -868,8 +1118,19 @@ def _extract_frame(
                 # is more faithful for the standing heuristic.
                 standing=_is_standing(w, h, kxy, kcf, frame_aspect),
                 back_to_camera=_back_to_camera(kcf),
+                occlusion=occlusion,
+                body=_body_ratios(kxy, kcf, frame_aspect),
             )
         )
+
+        # Appearance sampling is OCCLUSION-GATED. A crop taken while someone
+        # stands in front of this person embeds the OTHER person: in a packed
+        # classroom that quietly poisons re-ID for exactly the people who move
+        # (the teacher walking between rows is occluded most of the time). Only
+        # a clean view earns a sample; a track that never gets one falls back to
+        # its least-bad views rather than being left with no appearance at all.
+        if not _appearance_sample_ok(occlusion, len(hists.get(int(raw_id), []))):
+            continue
 
         samples = hists.setdefault(int(raw_id), [])
         if len(samples) < MAX_HIST_SAMPLES_PER_TRACK and (
@@ -891,7 +1152,11 @@ def _extract_frame(
         ):
             crop = _upper_crop(frame, bbox)
             if crop is not None:
-                crop_samples.append(crop)
+                # Stamped with WHEN it was taken: a raw id that the tracker
+                # hands from one person to another is split downstream, and
+                # each half must keep only the crops of the body it described
+                # (app/teacher_track.py).
+                crop_samples.append((ts_ms, crop))
                 last_crop_ms[int(raw_id)] = ts_ms
 
 
@@ -982,20 +1247,26 @@ def detect_video(
     video_path: str,
     sample_fps: float = 5.0,
     progress_cb: Optional[Callable[[float], None]] = None,
-) -> tuple[VideoMeta, list[Detection], dict[int, list[np.ndarray]], dict[int, list[float]]]:
+) -> tuple[
+    VideoMeta,
+    list[Detection],
+    dict[int, list[np.ndarray]],
+    dict[int, list[tuple[int, list[float]]]],
+]:
     """Run detection+tracking over the video.
 
     video_path must be an absolute path to an existing file (inside DATA_DIR
     when that env var is set); see _validate_video_path.
     Returns (video_meta, detections, torso_hist_samples_by_raw_track_id,
-    clip_embed_by_raw_track_id) where each embed is the L2-normalized median
-    CLIP ViT-B/32 vector of the track's sampled upper-body crops.
+    clip_embed_gallery_by_raw_track_id) where each gallery is the list of
+    L2-normalized CLIP ViT-B/32 vectors of that track's sampled upper-body
+    crops (see _embed_tracks on why the samples are kept, not averaged).
     progress_cb receives the 0..1 fraction of sampled frames processed.
     """
     detections: list[Detection] = []
     hists: dict[int, list[np.ndarray]] = {}
     last_hist_ms: dict[int, int] = {}
-    crops: dict[int, list[np.ndarray]] = {}
+    crops: dict[int, list[tuple[int, np.ndarray]]] = {}
     last_crop_ms: dict[int, int] = {}
     last_ts_ms = 0
 
