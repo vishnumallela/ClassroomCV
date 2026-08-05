@@ -60,7 +60,7 @@ export default defineRailway(() => {
   // the custom one — initdb has already run by that point, so the cluster ends
   // up with the wrong major version and no timescaledb in
   // shared_preload_libraries.
-  const dbData = volume("timescale-data", { sizeMB: 50000, region: "sfo" });
+  const dbData = volume("timescale-pgdata", { sizeMB: 50000, region: "sfo" });
   const db = service("Timescale", {
     source: image("timescale/timescaledb:latest-pg17"),
     volumeMounts: { "/var/lib/postgresql/data": dbData },
