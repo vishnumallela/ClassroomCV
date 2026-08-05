@@ -16,10 +16,10 @@
  * patterns. This file only describes infrastructure and wiring.
  */
 import {
-  database,
   defineRailway,
   github,
   image,
+  preserve,
   project,
   redis,
   service,
@@ -32,18 +32,52 @@ const BRANCH = "main";
 /** Object key prefix the api-service writes video + thumbnail bytes under. */
 const MEDIA_BUCKET = "luminary-videos";
 
-/** Password generator matching the one Railway uses for its own databases. */
-const SECRET = (bytes: number) => ({
-  generator: `secret(${bytes}, "abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789")`,
-});
+/**
+ * Secrets are platform-managed, never generated from here. A `generator:`
+ * re-runs on EVERY `config apply`, which silently rotates a live credential —
+ * it rotated the Postgres password after initdb had already baked the old one
+ * in, locking the api out of its own database. preserve() keeps whatever
+ * Railway holds.
+ *
+ * Set them once, out of band (values never enter this repo):
+ *
+ *   railway variables set POSTGRES_PASSWORD=… --service Timescale
+ *   railway variables set MINIO_ROOT_PASSWORD=… --service minio
+ *   railway variables set API_SERVICE__ADMIN_PASSWORD=… --service api
+ *   railway variables set API_SERVICE__QUEUE_DASHBOARD_PASSWORD=… --service api
+ */
+
+const PG_USER = "luminary";
+const PG_DB = "classroom";
 
 export default defineRailway(() => {
   // Railway's managed Postgres has no TimescaleDB, and the schema needs it:
   // detection_events is a hypertable with compression + retention policies and
   // a continuous aggregate (apps/api-service/drizzle/0003_storage_tiering.sql).
-  const db = database("Timescale", "postgres", {
-    image: "timescale/timescaledb:latest-pg17",
-    defaultMountPath: "/var/lib/postgresql/data",
+  //
+  // Declared as a plain image service rather than database("…", "postgres"),
+  // which provisions Railway's own Postgres image first and only then swaps in
+  // the custom one — initdb has already run by that point, so the cluster ends
+  // up with the wrong major version and no timescaledb in
+  // shared_preload_libraries.
+  const dbData = volume("timescale-data", { sizeMB: 50000, region: "sfo" });
+  const db = service("Timescale", {
+    source: image("timescale/timescaledb:latest-pg17"),
+    volumeMounts: { "/var/lib/postgresql/data": dbData },
+    // A TCP proxy, because the ML service on RunPod is off-platform and writes
+    // detections straight to the database.
+    tcp: [5432],
+    env: {
+      // Postgres refuses to initdb into a non-empty directory, and Railway's
+      // volume mount point is not empty (lost+found), so the cluster lives one
+      // level down.
+      PGDATA: "/var/lib/postgresql/data/pgdata",
+      POSTGRES_USER: PG_USER,
+      POSTGRES_DB: PG_DB,
+      POSTGRES_PASSWORD: preserve(),
+      DATABASE_URL: `postgres://${PG_USER}:\${{POSTGRES_PASSWORD}}@\${{RAILWAY_PRIVATE_DOMAIN}}:5432/${PG_DB}`,
+      DATABASE_PUBLIC_URL: `postgres://${PG_USER}:\${{POSTGRES_PASSWORD}}@\${{RAILWAY_TCP_PROXY_DOMAIN}}:\${{RAILWAY_TCP_PROXY_PORT}}/${PG_DB}`,
+    },
   });
 
   // BullMQ's broker: the upload → analyse → derive pipeline.
@@ -63,8 +97,13 @@ export default defineRailway(() => {
     start: `/bin/sh -c "mkdir -p /data/${MEDIA_BUCKET} && exec minio server /data --address [::]:9000"`,
     volumeMounts: { "/data": minioData },
     env: {
+      // Only the S3 API is wanted here. Left on, MinIO also opens its console
+      // on a *random* high port, which is a second listener for Railway's
+      // proxy to pick from — and picking it answers 502 on every S3 call.
+      MINIO_BROWSER: "off",
+      PORT: "9000",
       MINIO_ROOT_USER: "luminary",
-      MINIO_ROOT_PASSWORD: SECRET(32),
+      MINIO_ROOT_PASSWORD: preserve(),
     },
   });
 
@@ -124,9 +163,9 @@ export default defineRailway(() => {
       API_SERVICE__CORS_ORIGINS: "https://${{web.RAILWAY_PUBLIC_DOMAIN}}",
       // Gates every route. Never leave this empty on a public URL: uploads,
       // deletes, the RunPod key and the GPU start/stop buttons sit behind it.
-      API_SERVICE__ADMIN_PASSWORD: SECRET(24),
+      API_SERVICE__ADMIN_PASSWORD: preserve(),
       API_SERVICE__QUEUE_DASHBOARD_USER: "admin",
-      API_SERVICE__QUEUE_DASHBOARD_PASSWORD: SECRET(24),
+      API_SERVICE__QUEUE_DASHBOARD_PASSWORD: preserve(),
     },
   });
 
@@ -155,6 +194,6 @@ export default defineRailway(() => {
   });
 
   return project("classroomcv", {
-    resources: [db, cache, minio, minioData, mediaCache, api, web],
+    resources: [db, dbData, cache, minio, minioData, mediaCache, api, web],
   });
 });
