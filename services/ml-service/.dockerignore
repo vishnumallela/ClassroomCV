@@ -1,0 +1,22 @@
+# CI builds from a fresh checkout, so this is about LOCAL builds: without it the
+# build context is ~1.8 GB (venv, model weights, caches) instead of ~3.6 MB.
+.venv/
+__pycache__/
+**/__pycache__/
+*.pyc
+
+# Model weights + the YOLOE text encoder are downloaded at runtime, never baked in.
+*.pt
+*.engine
+*.onnx
+mobileclip*.ts
+
+# Local-only state
+.env
+.vlm-cache/
+data/
+weights/
+tests/
+eval/
+.pytest_cache/
+.ruff_cache/
