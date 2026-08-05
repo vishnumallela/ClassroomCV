@@ -52,7 +52,7 @@ export default defineRailway(() => {
   // On-prem-style object storage. The api-service talks to it with Bun's S3
   // client, and it is what lets a *remote* GPU worker read a lesson: the
   // worker gets a presigned URL, never a path on the api's disk.
-  const minioData = volume("minio-data", { sizeMB: 50000 });
+  const minioData = volume("minio-data", { sizeMB: 50000, region: "sfo" });
   const minio = service("minio", {
     source: image("minio/minio:latest"),
     // MinIO's default command only prints help, so the server command is
@@ -69,7 +69,7 @@ export default defineRailway(() => {
   // DATA_DIR. On the s3 backend this is a *cache*, not the source of truth:
   // ffprobe/ffmpeg need a real file path, so the worker materialises objects
   // here before probing them. It still has to survive restarts.
-  const mediaCache = volume("api-media-cache", { sizeMB: 20000 });
+  const mediaCache = volume("api-media-cache", { sizeMB: 20000, region: "sfo" });
 
   const api = service("api", {
     source: github(REPO, { branch: BRANCH }),
@@ -82,6 +82,9 @@ export default defineRailway(() => {
         "package.json",
         "bun.lock",
         ".dockerignore",
+        // This file too: it owns the variables baked into or read by the
+        // image, so a change here has to reach a new build.
+        ".railway/railway.ts",
       ],
     },
     start: "bun run start",
@@ -136,9 +139,13 @@ export default defineRailway(() => {
         "package.json",
         "bun.lock",
         ".dockerignore",
+        ".railway/railway.ts",
       ],
     },
     env: {
+      // Caddy binds this (apps/frontend/Caddyfile) and Railway's edge routes
+      // the public domain to it.
+      PORT: "8080",
       // Vite inlines this at BUILD time (see apps/frontend/Dockerfile), so the
       // api must already have its public domain when web builds.
       FRONTEND__API_URL: "https://${{api.RAILWAY_PUBLIC_DOMAIN}}",
