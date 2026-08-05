@@ -265,14 +265,81 @@ def _export_engine(weight: str, device: str) -> Optional[str]:
         return None
 
 
+def _precision_kwargs(device: str) -> dict:
+    """The fp16 request for predict/track, or {} when it must not be asked for.
+
+    MUST be passed to the FIRST predict/track call of the process. ultralytics
+    builds its AutoBackend exactly once -- predictor.setup_model() runs only
+    `if not self.model`, and it computes `fp16=self.args.quantize == 16` at that
+    moment. Every later call merges args but never rebuilds the backend, so a
+    warmup that omits this pins the weights to fp32 for the whole run and the
+    fp16 asked for on the real frames is silently ignored.
+
+    'quantize' rather than the older 'half': half is a deprecated alias in the
+    pinned ultralytics (it is not even in DEFAULT_CFG_DICT any more) and warns
+    on every call. cpu stays fp32 -- fp16 on cpu is pathologically slow, not
+    faster. Engine precision is baked at export, so the flag is meaningless
+    there.
+    """
+    if _model_is_engine or device.split(":", 1)[0] == "cpu":
+        return {}
+    return {"quantize": 16}
+
+
+def _record_precision(model, device: str) -> None:
+    """Log the precision the backend ACTUALLY loaded, read back from the weights.
+
+    Deliberately not read from predictor.args.quantize: that reports the value
+    we asked for (16) even when the backend was already built fp32, so it shows
+    a green light on exactly the broken configuration this guards against. The
+    parameter dtype is the ground truth. Best-effort -- a diagnostic must never
+    be the thing that fails an analysis.
+    """
+    if _model_is_engine:
+        return
+    import torch  # lazy, like every other torch use here (module import is hot)
+
+    try:
+        backend = model.predictor.model
+        inner = getattr(backend, "backend", backend)
+        module = getattr(inner, "model", None)
+        dtype = next(module.parameters()).dtype if module is not None else None
+    except Exception:
+        logger.warning("could not read back inference precision", exc_info=True)
+        return
+    if dtype is None:
+        return
+    want_fp16 = bool(_precision_kwargs(device))
+    logger.info("inference precision on %s: %s", device, dtype)
+    if want_fp16 and dtype is not torch.float16:
+        # Not fatal: the run is correct, just about 2x slower than it should be
+        # and 2x the VRAM. Loud because it is otherwise invisible -- it was
+        # shipped this way and nothing in the product surfaced it.
+        logger.error(
+            "DEGRADED: asked for fp16 on %s but the backend loaded %s; "
+            "inference will run at roughly half speed",
+            device,
+            dtype,
+        )
+
+
 def _warmup(model, device: str) -> None:
     """Run one dummy inference so engine deserialization / cuDNN autotune has
     happened before the first billed frame. Best-effort: a warmup failure is
-    logged and the real frames decide."""
+    logged and the real frames decide.
+
+    This call also DECIDES the backend precision for the entire process (see
+    _precision_kwargs), so it must carry the same precision the real frames
+    will ask for.
+    """
     try:
         dummy = np.zeros((720, 1280, 3), dtype=np.uint8)
         model.predict(
-            dummy, imgsz=get_settings().imgsz, device=device, verbose=False
+            dummy,
+            imgsz=get_settings().imgsz,
+            device=device,
+            verbose=False,
+            **_precision_kwargs(device),
         )
         logger.info("warmup inference complete on %s", device)
     except Exception:
@@ -307,8 +374,14 @@ def _get_model():
         )
         # Engines carry no task metadata, so tell ultralytics this is pose.
         _model = YOLO(name, task="pose") if _model_is_engine else YOLO(name)
-        if device.split(":", 1)[0] == "cuda":
+        # Every non-cpu device, not just cuda: the warmup is what fixes the
+        # backend precision, so skipping it on mps meant the dev Macs and the
+        # billed GPU pod ran DIFFERENT precisions (mps got fp16 because its
+        # first call was the real track(); cuda got fp32 from this warmup).
+        # Running it everywhere makes the pod's path testable on a laptop.
+        if device.split(":", 1)[0] != "cpu":
             _warmup(_model, device)
+            _record_precision(_model, device)
     return _model
 
 
@@ -335,10 +408,9 @@ def _track_frame(model, frame: np.ndarray, device: str):
         max_det=settings.max_det,
         verbose=False,
     )
-    if not _model_is_engine:
-        # fp16 on any GPU path (cuda or mps); the cpu fallback stays fp32.
-        # Engine precision is baked at export, so the flag is meaningless there.
-        kwargs["half"] = effective != "cpu"
+    # Same helper the warmup used, so the request can never drift from the
+    # precision the backend was actually built with.
+    kwargs.update(_precision_kwargs(effective))
     try:
         return model.track(frame, device=effective, **kwargs)
     except Exception as exc:
@@ -350,7 +422,7 @@ def _track_frame(model, frame: np.ndarray, device: str):
             raise
         logger.warning("device %s failed (%s); falling back to cpu", effective, exc)
         _fallback_cpu = True
-        kwargs["half"] = False
+        kwargs.pop("quantize", None)  # cpu stays fp32
         return model.track(frame, device="cpu", **kwargs)
 
 
