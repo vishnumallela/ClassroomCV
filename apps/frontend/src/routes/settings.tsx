@@ -120,9 +120,7 @@ function Settings() {
             <div className="grid gap-3 text-sm sm:grid-cols-3">
               <div>
                 <div className="text-xs text-muted-foreground">Pod</div>
-                <div className="mt-0.5 font-medium">
-                  {g?.pod?.name ?? g?.pod?.id ?? "—"}
-                </div>
+                <div className="mt-0.5 font-medium">{g?.pod?.name ?? g?.pod?.id ?? "—"}</div>
                 <div className="text-xs text-muted-foreground">{g?.pod?.gpuTypeId ?? ""}</div>
               </div>
               <div>
@@ -258,12 +256,16 @@ function Settings() {
                 setMlUrl(e.target.value);
                 setSaved(false);
               }}
-              placeholder={s?.mlServiceUrlDefault ?? "http://127.0.0.1:8000"}
+              placeholder={
+                s?.mlServiceUrlEffective ?? s?.mlServiceUrlDefault ?? "http://127.0.0.1:8000"
+              }
               className="w-full rounded-lg border border-input bg-background px-3 py-2 text-sm outline-none transition-colors placeholder:text-muted-foreground/60 focus:border-ring focus:ring-2 focus:ring-ring/25"
             />
             <span className="block text-xs text-muted-foreground">
-              The pod's exposed port 8000 (e.g. https://abc123xyz-8000.proxy.runpod.net). Empty
-              uses the deployment default; changes apply immediately, no redeploy.
+              Leave this empty. With a pod ID set, the URL is derived from it — RunPod's proxy
+              hostname is the one address that survives stop/start, so autopilot never leaves a
+              stale URL behind. Fill it in only to override (a tunnel, a second pod); changes apply
+              immediately, no redeploy.
             </span>
           </label>
           <div className="flex items-center gap-3 sm:col-span-2">

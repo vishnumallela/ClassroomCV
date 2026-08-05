@@ -58,9 +58,32 @@ export async function setAppSetting(key: SettingKey, value: string | null): Prom
   generation++;
 }
 
-/** ML service base URL: the Settings-page value wins over the env default, so
- * pointing the app at a fresh RunPod pod never needs a redeploy. */
+/** The port the ml-service listens on inside the pod (services/ml-service/Dockerfile). */
+const ML_POD_PORT = 8000;
+
+/**
+ * ML service base URL, resolved per call so re-pointing the app never needs a
+ * redeploy. Three sources, in order:
+ *
+ * 1. An explicit Settings-page override.
+ * 2. RunPod's HTTP proxy hostname, derived from the pod id. This is the one
+ *    RunPod address that SURVIVES stop/start — the public IP and the direct
+ *    TCP port mappings are reassigned every time the pod starts, so anything
+ *    built from those goes stale on the first stop. Deriving it means the pod
+ *    id is the only thing anyone has to configure, and the autopilot's
+ *    stop/start cycle needs no follow-up edit.
+ * 3. The deployment default (local dev).
+ *
+ * A pod *migration* is the exception: RunPod moves the pod to another host and
+ * issues a new id, at which point the id in Settings is what changes.
+ */
 export async function mlServiceUrl(): Promise<string> {
   const settings = await getAppSettings().catch(() => ({}) as Record<string, never>);
-  return (settings.mlServiceUrl || env.API_SERVICE__ML_SERVICE_URL).replace(/\/+$/, "");
+  const explicit = settings.mlServiceUrl?.trim();
+  if (explicit) return explicit.replace(/\/+$/, "");
+
+  const podId = settings.runpodPodId?.trim();
+  if (podId) return `https://${podId}-${ML_POD_PORT}.proxy.runpod.net`;
+
+  return env.API_SERVICE__ML_SERVICE_URL.replace(/\/+$/, "");
 }
