@@ -76,6 +76,13 @@ SPLIT_STATURE_DELTA = 0.28
 # 5 fps this is 1.2 s of consistent evidence, which a crouch (transient) does
 # not produce but a steal (permanent) does.
 SPLIT_SUSTAIN = 6
+# ...and the change must arrive as a STEP: this fraction of it has to happen
+# between two consecutive samples. Walking towards the camera produces the same
+# total change spread over seconds, and splitting on that is actively harmful.
+SPLIT_STEP_FRACTION = 0.5
+# ...and the perspective model has to be worth trusting before a height change
+# is read as a change of person at all (see adult.GroundPlane.confidence).
+SPLIT_MIN_PLANE_CONFIDENCE = 0.4
 # Never cut a tracklet shorter than this; below it there is nothing to score.
 MIN_TRACKLET_DETS = 3
 # Appearance split: two halves of one raw id whose mean CLIP views disagree
@@ -270,11 +277,19 @@ class Tracklet:
 
 
 def _sustained_levels(ratios: list[float], sustain: int, delta: float) -> list[int]:
-    """Indices where the height level steps and STAYS stepped.
+    """Indices where the height level STEPS, abruptly, and stays stepped.
 
     Compares the median of the `sustain` samples before an index with the
     median of the `sustain` samples after it. A crouch dips and recovers, so
     both windows agree; a handoff to another body changes the level for good.
+
+    The abruptness test is what makes this safe. A person walking towards the
+    camera also changes apparent height by a lot — smoothly, over seconds —
+    and an earlier version without this test shredded a teacher's 136-second
+    track into nineteen pieces on a second lesson, destroying the very
+    behaviour evidence the search bootstraps from. A tracker handing a box
+    from one body to another does it BETWEEN two frames, so a genuine handoff
+    puts most of the level change into a single step.
     """
     cuts: list[int] = []
     n = len(ratios)
@@ -284,11 +299,19 @@ def _sustained_levels(ratios: list[float], sustain: int, delta: float) -> list[i
     while i <= n - sustain:
         before = float(np.median(ratios[i - sustain : i]))
         after = float(np.median(ratios[i : i + sustain]))
-        if abs(after - before) >= delta:
-            cuts.append(i)
-            i += sustain  # one cut per transition, not one per sample
-        else:
-            i += 1
+        change = abs(after - before)
+        if change >= delta:
+            # The largest single-sample jump anywhere near the boundary must
+            # account for most of the change; a gradual walk cannot do that.
+            window = ratios[max(0, i - 2) : min(n, i + 3)]
+            step = max(
+                (abs(b - a) for a, b in zip(window, window[1:])), default=0.0
+            )
+            if step >= SPLIT_STEP_FRACTION * change:
+                cuts.append(i)
+                i += sustain  # one cut per transition, not one per sample
+                continue
+        i += 1
     return cuts
 
 
@@ -359,7 +382,15 @@ def build_tracklets(
             cuts: set[int] = set()
             wore_two_outfits = False
             # Cut 2: the body it describes changed size and stayed changed.
-            if plane.ok and len(piece) >= 2 * SPLIT_SUSTAIN:
+            # Only where the perspective model is good enough to make "size"
+            # mean something. With a flat or unfitted plane, apparent height
+            # tracks how far down the room somebody walked, and cutting on it
+            # shreds the one person who walks — the teacher.
+            if (
+                plane.ok
+                and plane.confidence >= SPLIT_MIN_PLANE_CONFIDENCE
+                and len(piece) >= 2 * SPLIT_SUSTAIN
+            ):
                 ratios = [
                     d.bbox["h"] / plane.predict(d.bbox["y"] + d.bbox["h"])
                     for d in piece

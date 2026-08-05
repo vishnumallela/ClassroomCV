@@ -24,6 +24,16 @@ The catalogue is the list of things people actually report from classrooms:
                         and over, shredding her track into fragments
     lookalike_pupil     a tall senior pupil stands and walks about for minutes
                         — the classic false positive
+    pupil_presents_at_board  a pupil holds the board for two minutes while the
+                        teacher is elsewhere in the room
+    uniformed_teacher   she wears the school polo, so colour says nothing and
+                        age has to carry the decision alone
+    backlit_doorway     a stretch where she is a silhouette against daylight
+                        and her appearance evidence is worthless
+    detection_dropout   the camera produces nothing for half a minute
+    group_activity      every pupil is up and moving, so "stands and walks" no
+                        longer distinguishes anyone
+    late_arrival        the room is unsupervised for four minutes first
     sitting_teacher     she teaches a seated group and barely moves at all
     no_teacher          an unsupervised room; the honest answer is nobody
     two_adults          a second adult visits; only one of them is teaching
@@ -44,7 +54,7 @@ import numpy as np
 from app.models import Detection, VideoMeta
 
 SAMPLE_MS = 200  # 5 fps, the production sampling cadence
-HIST_BINS = 30 * 32
+HIST_BINS = 30 * 32  # matches detector._torso_hist
 EMBED_DIM = 512
 
 BOARD = [[0.35, 0.10], [0.65, 0.10], [0.65, 0.30], [0.35, 0.30]]
@@ -451,12 +461,198 @@ def two_adults() -> Scenario:
     )
 
 
+def late_arrival() -> Scenario:
+    """The room is unsupervised for four minutes, then she walks in."""
+    duration = 420_000
+    dets, hists, embeds = _seated_class(duration_ms=duration, standing_until_ms=60_000)
+    teacher = _person(
+        1, 240_000, duration,
+        lambda u: (0.08 + 0.8 * u if u < 0.15 else 0.5 + 0.3 * math.sin(u * 7), 0.38),
+        0.30, body=ADULT_BODY,
+    )
+    _teacher_appearance([1], hists, embeds)
+    return Scenario(
+        name="late_arrival",
+        description="unsupervised class for 4 minutes, then the teacher enters through the door",
+        meta=_meta(duration),
+        detections=dets + teacher,
+        hists=hists,
+        embeds=embeds,
+        zones=ZONES,
+        truth=_truth(teacher),
+        # The interesting number is purity: nobody may be called the teacher
+        # during the four minutes when there was no teacher in the room.
+        gates={"coverage": {"min": 0.85}, "purity": {"min": 0.9}},
+    )
+
+
+def uniformed_teacher() -> Scenario:
+    """She wears the school's own polo, so colour cannot tell her from the class."""
+    duration = 300_000
+    dets, hists, embeds = _seated_class(duration_ms=duration)
+    teacher = _person(
+        1, 0, duration,
+        lambda u: (0.5 + 0.33 * math.sin(u * 8), 0.36),
+        0.30, body=ADULT_BODY,
+    )
+    # Same histogram archetype as a third of the pupils: the uniform-outlier
+    # signal is worth nothing here and age plus behaviour must carry it.
+    hists[1] = [_hist(500)]
+    embeds[1] = [_embed(500, jitter=0.3)]
+    return Scenario(
+        name="uniformed_teacher",
+        description="teacher dressed in the same uniform colour as the pupils",
+        meta=_meta(duration),
+        detections=dets + teacher,
+        hists=hists,
+        embeds=embeds,
+        zones=ZONES,
+        truth=_truth(teacher),
+        gates={"coverage": {"min": 0.85}, "purity": {"min": 0.85}},
+    )
+
+
+def pupil_presents_at_board() -> Scenario:
+    """A pupil presents at the board for two minutes while the teacher sits with a group."""
+    duration = 360_000
+    dets, hists, embeds = _seated_class(duration_ms=duration)
+    teacher = _person(
+        1, 0, duration,
+        lambda u: (0.62 + 0.16 * math.sin(u * 5), 0.44 + 0.04 * math.cos(u * 3)),
+        0.26, body=ADULT_BODY,
+    )
+    presenter = _person(
+        2, 90_000, 210_000,
+        lambda u: (0.50 + 0.03 * math.sin(u * 12), 0.30),
+        0.24, body=CHILD_BODY,
+    )
+    _teacher_appearance([1], hists, embeds)
+    hists[2] = [_hist(501)]
+    embeds[2] = [_embed(501, jitter=0.2)]
+    return Scenario(
+        name="pupil_presents_at_board",
+        description="a pupil stands presenting at the board for 2 minutes; the teacher is elsewhere",
+        meta=_meta(duration),
+        detections=dets + teacher + presenter,
+        hists=hists,
+        embeds=embeds,
+        zones=ZONES,
+        truth=_truth(teacher),
+        gates={"coverage": {"min": 0.8}, "purity": {"min": 0.85}},
+    )
+
+
+def backlit_doorway() -> Scenario:
+    """She spends a stretch in a blown-out doorway, where her crops are silhouettes."""
+    duration = 360_000
+    dets, hists, embeds = _seated_class(duration_ms=duration)
+    before = _person(1, 0, 140_000, lambda u: (0.5 - 0.35 * u, 0.37), 0.30, body=ADULT_BODY)
+    # In the doorway the tracker keeps losing her and her appearance is useless.
+    doorway = _person(
+        2, 145_000, 205_000, lambda u: (0.09 + 0.02 * math.sin(u * 9), 0.45),
+        0.28, body=ADULT_BODY, occlusion=0.45,
+    )
+    after = _person(
+        3, 210_000, duration,
+        lambda u: (0.15 + 0.65 * u, 0.38 + 0.05 * math.sin(u * 6)),
+        0.30, body=ADULT_BODY,
+    )
+    _teacher_appearance([1, 3], hists, embeds)
+    # Silhouette: a washed-out histogram and an embedding that matches nothing.
+    hists[2] = [_hist(999, spread=0.4)]
+    embeds[2] = [_embed(999, jitter=0.6)]
+    return Scenario(
+        name="backlit_doorway",
+        description="teacher stands in a blown-out doorway for a minute; her appearance evidence is garbage there",
+        meta=_meta(duration),
+        detections=dets + before + doorway + after,
+        hists=hists,
+        embeds=embeds,
+        zones=ZONES,
+        truth=_truth(before + doorway + after),
+        # KNOWN LIMIT: the silhouette stretch itself is not recoverable from
+        # appearance; what must hold is that the stretches either side stay
+        # hers and that the silhouette is never given to a pupil.
+        gates={"coverage": {"min": 0.7}, "purity": {"min": 0.9}},
+    )
+
+
+def detection_dropout() -> Scenario:
+    """The camera drops out mid-lesson; nothing is detected for half a minute."""
+    duration = 360_000
+    dark = lambda ts: 150_000 <= ts <= 180_000
+    dets, hists, embeds = _seated_class(duration_ms=duration)
+    dets = [d for d in dets if not dark(d.video_ts_ms)]
+    before = _person(1, 0, 150_000, lambda u: (0.5 + 0.3 * math.sin(u * 6), 0.37), 0.30, body=ADULT_BODY)
+    after = _person(2, 180_000, duration, lambda u: (0.5 + 0.3 * math.sin(u * 6), 0.37), 0.30, body=ADULT_BODY)
+    _teacher_appearance([1, 2], hists, embeds)
+    return Scenario(
+        name="detection_dropout",
+        description="30s of the lesson produces no detections at all, then everything resumes",
+        meta=_meta(duration),
+        detections=dets + before + after,
+        hists=hists,
+        embeds=embeds,
+        zones=ZONES,
+        truth=_truth(before + after),
+        gates={"coverage": {"min": 0.9}, "purity": {"min": 0.9}, "id_switches": {"max": 0}},
+    )
+
+
+def group_activity() -> Scenario:
+    """Group work: the whole class is up and milling about for four minutes."""
+    duration = 420_000
+    dets: list[Detection] = []
+    hists: dict[int, list[list[float]]] = {}
+    embeds: dict[int, list] = {}
+    for i in range(22):
+        raw = 100 + i
+        seat = (0.12 + 0.76 * ((i % 6) / 5.0), 0.45 + 0.16 * (i // 6))
+        height = 0.10 + 0.13 * seat[1]
+        dets += _person(raw, 0, 120_000, lambda u, s=seat: s, height, standing=False, body=CHILD_BODY)
+        # Up and wandering between desks, but each pupil stays in their corner
+        # of the room — unlike the teacher, who covers all of it.
+        dets += _person(
+            raw, 120_200, duration,
+            lambda u, s=seat, k=i: (
+                s[0] + 0.09 * math.sin(u * 5 + k),
+                s[1] - 0.03 + 0.05 * math.cos(u * 4 + k),
+            ),
+            height * 1.15, standing=True, body=CHILD_BODY, occlusion=0.4,
+        )
+        hists[raw] = [_hist(500 + (i % 3))]
+        embeds[raw] = [_embed(500 + (i % 3), jitter=0.35)]
+    teacher = _person(
+        1, 0, duration,
+        lambda u: (0.5 + 0.36 * math.sin(u * 9), 0.38 + 0.06 * math.cos(u * 7)),
+        0.30, body=ADULT_BODY, occlusion=0.35,
+    )
+    _teacher_appearance([1], hists, embeds)
+    return Scenario(
+        name="group_activity",
+        description="group work: every pupil is standing and moving for the last 5 minutes",
+        meta=_meta(duration),
+        detections=dets + teacher,
+        hists=hists,
+        embeds=embeds,
+        zones=ZONES,
+        truth=_truth(teacher),
+        gates={"coverage": {"min": 0.85}, "purity": {"min": 0.85}},
+    )
+
+
 ALL: list[Callable[[], Scenario]] = [
     cold_start,
+    late_arrival,
     leaves_and_returns,
     crouch_handoff,
     crowded_occlusion,
+    group_activity,
     lookalike_pupil,
+    pupil_presents_at_board,
+    uniformed_teacher,
+    backlit_doorway,
+    detection_dropout,
     sitting_teacher,
     no_teacher,
     two_adults,

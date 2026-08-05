@@ -150,6 +150,13 @@ class GroundPlane:
     a: float
     b: float
     ok: bool = True
+    # 0..1 confidence in the fit. A camera whose people all stand at a similar
+    # depth, or a room where almost nobody stands, yields a nearly flat slope:
+    # the model then predicts one height everywhere and "stature" degenerates
+    # into raw box height, which is exactly the measurement perspective was
+    # supposed to correct. Consumers weight the signal by this rather than
+    # trusting a degenerate fit at face value.
+    confidence: float = 1.0
 
     def predict(self, foot_y: float) -> float:
         return max(1e-4, self.a + self.b * foot_y)
@@ -181,13 +188,40 @@ def fit_ground_plane(dets_by_key: dict[int, list[Detection]]) -> GroundPlane:
         height = float(np.median([d.bbox["h"] for d in clean]))
         points.append((foot, height))
 
+    degraded = False
     if len(points) < GROUND_MIN_TRACKS:
-        return GroundPlane(a=float(np.median([p[1] for p in points])) if points else 0.2, b=0.0, ok=False)
+        # A lesson where almost nobody stands leaves too few clean standing
+        # tracks to fit anything. Fall back to each person's TALLEST posture
+        # (p90 height), which is the closest thing to their standing height
+        # the footage contains, and mark the fit degraded so consumers weight
+        # it down rather than trusting it.
+        degraded = True
+        points = []
+        for dets in dets_by_key.values():
+            usable = [d for d in dets if d.occlusion <= MAX_OCCLUSION and d.bbox.get("h", 0) > 0]
+            if len(usable) < MIN_STANDING_SAMPLES:
+                continue
+            hs = np.array([d.bbox["h"] for d in usable])
+            tall = np.argsort(hs)[-max(1, len(hs) // 10) :]
+            points.append(
+                (
+                    float(np.median([usable[i].bbox["y"] + usable[i].bbox["h"] for i in tall])),
+                    float(np.median(hs[tall])),
+                )
+            )
+
+    if len(points) < GROUND_MIN_TRACKS:
+        return GroundPlane(
+            a=float(np.median([p[1] for p in points])) if points else 0.2,
+            b=0.0,
+            ok=False,
+            confidence=0.0,
+        )
 
     ys = np.array([p[0] for p in points])
     hs = np.array([p[1] for p in points])
     if float(ys.max() - ys.min()) < GROUND_MIN_Y_SPREAD:
-        return GroundPlane(a=float(np.median(hs)), b=0.0, ok=False)
+        return GroundPlane(a=float(np.median(hs)), b=0.0, ok=False, confidence=0.0)
 
     slopes: list[float] = []
     n = len(points)
@@ -202,14 +236,22 @@ def fit_ground_plane(dets_by_key: dict[int, list[Detection]]) -> GroundPlane:
             if abs(dy) > 1e-6:
                 slopes.append((hs[j] - hs[i]) / dy)
     if not slopes:
-        return GroundPlane(a=float(np.median(hs)), b=0.0, ok=False)
+        return GroundPlane(a=float(np.median(hs)), b=0.0, ok=False, confidence=0.0)
     b = float(np.median(slopes))
     # Perspective can only make nearer (lower) bodies taller; a negative slope
     # means the fit found noise, not geometry.
     if b < 0:
         b = 0.0
     a = float(np.median(hs - b * ys))
-    return GroundPlane(a=a, b=b, ok=True)
+    # How much of the height variation the model actually explains: the height
+    # difference the slope predicts across the observed rows, against the
+    # spread of the heights themselves.
+    explained = b * float(ys.max() - ys.min())
+    spread = float(np.percentile(hs, 90) - np.percentile(hs, 10))
+    confidence = float(min(1.0, explained / spread)) if spread > 1e-6 else 0.0
+    if degraded:
+        confidence *= 0.5
+    return GroundPlane(a=a, b=b, ok=True, confidence=max(0.1, confidence))
 
 
 # --------------------------------------------------------------------------- #
@@ -400,7 +442,13 @@ def score_tracks(
 
         s = _band(stature_raw[key], STATURE_LO, STATURE_HI)
         if s is not None:
-            parts.append((W_STATURE * _reliability(clean_n[key], 30), s, "stature"))
+            parts.append(
+                (
+                    W_STATURE * _reliability(clean_n[key], 30) * plane.confidence,
+                    s,
+                    "stature",
+                )
+            )
         if key in leg_rank:
             # Weighted by how many limb measurements exist, NOT by how often
             # this person stood: proportions are exactly the age cue that still

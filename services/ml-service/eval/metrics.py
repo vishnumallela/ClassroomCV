@@ -14,6 +14,9 @@ failures has its own number:
     coverage        of the frames where she is visible, how many did we
                     label as her (recall)
     purity          of the frames we called her, how many were her (precision)
+    abstention      of the frames where she is visible, how many did we say
+                    nothing about at all — being silent and being wrong are
+                    different failures and want different fixes
     id_switches     how many times the answer flipped from her to someone
                     else and back — the "id keeps changing" complaint
     cold_start_ms   how long into the lesson before she was first labelled —
@@ -84,6 +87,7 @@ def evaluate_teacher(
         return {
             "coverage": 0.0,
             "purity": 0.0,
+            "abstention": 1.0,
             "id_switches": 0,
             "cold_start_ms": None,
             "reentry_recall": None,
@@ -132,9 +136,16 @@ def evaluate_teacher(
     reentry_recall = (len(recovered) / len(reentries)) if reentries else None
     gap_recovery = (sum(recovered) / len(recovered)) if recovered else None
 
+    # Long-term-tracking practice (VOT-LT) separates being WRONG from being
+    # SILENT, because they need different fixes: a wrong label is an identity
+    # failure, a missing one is a coverage failure. Our single coverage number
+    # conflated them, which is why "no teacher for the first two minutes" and
+    # "the teacher is actually a pupil" used to look like the same regression.
+    abstention = 1.0 - (scored / len(ts_sorted))
     return {
         "coverage": round(coverage, 4),
         "purity": round(purity, 4),
+        "abstention": round(abstention, 4),
         "id_switches": switches,
         "cold_start_ms": cold_start,
         "reentry_recall": None if reentry_recall is None else round(reentry_recall, 4),
@@ -162,10 +173,11 @@ def teacher_boxes(tracks: Iterable[dict], detections: Iterable) -> dict[int, Box
 
 def summarize(name: str, m: dict) -> str:
     cold = "never" if m["cold_start_ms"] is None else f"{m['cold_start_ms'] / 1000:.0f}s"
+    silent = f"{m.get('abstention', 0) * 100:.0f}%"
     reentry = "-" if m.get("reentry_recall") is None else f"{m['reentry_recall'] * 100:.0f}%"
     return (
         f"{name:<28} coverage={m['coverage'] * 100:5.1f}%  purity={m['purity'] * 100:5.1f}%  "
-        f"switches={m['id_switches']:<3} cold_start={cold:<6} reentry={reentry}"
+        f"switches={m['id_switches']:<3} silent={silent:<5} cold_start={cold:<6} reentry={reentry}"
     )
 
 

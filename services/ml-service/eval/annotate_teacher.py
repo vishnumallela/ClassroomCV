@@ -37,11 +37,18 @@ from eval import fixture as fixture_mod  # noqa: E402
 
 GT_DIR = EVAL_DIR / "gt"
 
-# "Not wearing a coloured uniform": pale, unsaturated torso pixels. Numbers are
-# in OpenCV HSV units (S 0-255, V 0-255) and are deliberately loose — the
-# decision is made by RANKING people within a frame, not by the threshold.
+# "Not wearing a coloured uniform" — which in practice means one of two things,
+# because school uniforms are bright and saturated and teachers' clothes are
+# not. Numbers are in OpenCV HSV units (S 0-255, V 0-255) and are deliberately
+# loose: the decision is made by RANKING people within a frame, never by the
+# threshold. Which cue applies is a property of the video and is recorded in
+# the ground-truth file.
 WHITE_S_MAX = 70
 WHITE_V_MIN = 110
+# ...and the dark counterpart, for a teacher in a dark or muted outfit among
+# bright polos.
+DARK_S_MAX = 120
+DARK_V_MAX = 95
 # The teacher is an adult standing among seated children: require a candidate
 # to be at least this tall relative to the median box in the frame, which
 # removes blown-out doorway slivers and desk reflections.
@@ -69,8 +76,8 @@ def _plausible(bbox: dict, median_h: float, exclude_x_below: float) -> bool:
     return bbox["x"] + bbox["w"] / 2.0 >= exclude_x_below
 
 
-def _torso_whiteness(frame: np.ndarray, bbox: dict) -> float:
-    """Fraction of the upper-body crop that is pale and unsaturated."""
+def _torso_offuniform(frame: np.ndarray, bbox: dict, cue: str) -> float:
+    """Fraction of the chest band that does not look like a bright uniform."""
     fh, fw = frame.shape[:2]
     # A tight band across the chest: wider or taller and a seated pupil's box
     # starts sampling the white desktop behind them, which reads as a white
@@ -82,8 +89,11 @@ def _torso_whiteness(frame: np.ndarray, bbox: dict) -> float:
     if x1 - x0 < 4 or y1 - y0 < 4:
         return 0.0
     hsv = cv2.cvtColor(frame[y0:y1, x0:x1], cv2.COLOR_BGR2HSV)
-    pale = (hsv[:, :, 1] < WHITE_S_MAX) & (hsv[:, :, 2] > WHITE_V_MIN)
-    return float(pale.mean())
+    if cue == "dark":
+        hit = (hsv[:, :, 1] < DARK_S_MAX) & (hsv[:, :, 2] < DARK_V_MAX)
+    else:
+        hit = (hsv[:, :, 1] < WHITE_S_MAX) & (hsv[:, :, 2] > WHITE_V_MIN)
+    return float(hit.mean())
 
 
 def _link_runs(labels: list[tuple[int, dict]]) -> list[tuple[int, dict]]:
@@ -113,7 +123,13 @@ def _link_runs(labels: list[tuple[int, dict]]) -> list[tuple[int, dict]]:
     return out
 
 
-def annotate(name: str, review_path: str | None, exclude_x_below: float = 0.0) -> int:
+def annotate(
+    name: str,
+    review_path: str | None,
+    exclude_x_below: float = 0.0,
+    cue: str = "pale",
+    min_fraction: float = MIN_WHITE_FRACTION,
+) -> int:
     fx = fixture_mod.load(name)
     if fx is None:
         print(f"no fixture named {name!r}")
@@ -145,13 +161,13 @@ def annotate(name: str, review_path: str | None, exclude_x_below: float = 0.0) -
                 # the frames where she crouches rather than guessing.
                 if not d.standing or not _plausible(d.bbox, median_h, exclude_x_below):
                     continue
-                scored.append((_torso_whiteness(frame, d.bbox), d.bbox))
+                scored.append((_torso_offuniform(frame, d.bbox, cue), d.bbox))
             if not scored:
                 continue
             scored.sort(key=lambda s: -s[0])
             best = scored[0]
             runner = scored[1][0] if len(scored) > 1 else 0.0
-            if best[0] >= MIN_WHITE_FRACTION and best[0] - runner >= MIN_LEAD:
+            if best[0] >= min_fraction and best[0] - runner >= MIN_LEAD:
                 labels.append((ts_ms, best[1]))
     finally:
         frames.close()
@@ -163,8 +179,9 @@ def annotate(name: str, review_path: str | None, exclude_x_below: float = 0.0) -
         json.dumps(
             {
                 "fixture": name,
+                "cue": cue,
                 "rule": (
-                    "torso pale-pixel fraction, ranked within each frame; "
+                    f"torso {cue}-pixel fraction, ranked within each frame; "
                     f"candidates shorter than {MIN_RELATIVE_HEIGHT} x the frame "
                     f"median height, not standing, or centred left of "
                     f"x={exclude_x_below} are excluded; runs shorter than "
@@ -230,6 +247,8 @@ if __name__ == "__main__":
     ap = argparse.ArgumentParser()
     ap.add_argument("name")
     ap.add_argument("--review", default=None, help="write a contact sheet here")
+    ap.add_argument("--cue", choices=("pale", "dark"), default="pale")
+    ap.add_argument("--min-fraction", type=float, default=MIN_WHITE_FRACTION)
     ap.add_argument(
         "--exclude-x-below",
         type=float,
@@ -238,4 +257,6 @@ if __name__ == "__main__":
         "distractor: a white-shirted pupil in a corner seat)",
     )
     args = ap.parse_args()
-    raise SystemExit(annotate(args.name, args.review, args.exclude_x_below))
+    raise SystemExit(
+        annotate(args.name, args.review, args.exclude_x_below, args.cue, args.min_fraction)
+    )

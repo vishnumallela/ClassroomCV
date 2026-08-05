@@ -213,6 +213,10 @@ def test_embed_tracks_streams_and_normalizes(monkeypatch):
         return torch.full((3, 2, 2), m)  # a fake 3x2x2 "image" tensor
 
     monkeypatch.setattr(D, "_get_clip", lambda: (FakeModel(), fake_preprocess, "cpu"))
+    # Exercise the CLIP fallback path specifically: the person re-ID encoder is
+    # preferred in production but needs a 28 MB ONNX weight this test must not
+    # download.
+    monkeypatch.setattr(D, "_get_reid", lambda: None)
 
     crops = {
         7: [(ts, np.full((8, 8, 3), v, np.uint8)) for ts, v in ((0, 10), (1000, 20), (2000, 30))],

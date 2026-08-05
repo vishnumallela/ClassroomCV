@@ -54,11 +54,36 @@ MAX_SAMPLE_FPS = 5.0
 FALLBACK_NATIVE_FPS = 30.0
 MAX_HIST_SAMPLES_PER_TRACK = 10
 HIST_SAMPLE_SPACING_MS = 1_000
-# CLIP re-ID crops (plan M5): upper 60% keeps head+shoulders+torso (the parts
-# that separate same-uniform people) and drops legs/desk clutter; 224 matches
-# CLIP's input resolution, so bigger crops only waste memory while they wait
-# for the post-loop batch embed.
+# Appearance crops for re-identification. The upper 60% (head+shoulders+torso)
+# is what CLIP wanted; a purpose-built person re-ID encoder is trained on FULL
+# bodies, so REID_CROP_UPPER_FRAC = 1.0 when one is in use.
+#
+# Why the encoder changed: raw CLIP is at CHANCE for person re-identification
+# (published zero-shot mAP on MSMT17: CLIP-B/32 = 0.10, and scaling to L/14
+# only reaches 0.14), which is exactly what we measured on our own footage —
+# different people sat at cosine 0.82-0.89, leaving no dynamic range to
+# threshold. The ultralytics-native re-ID encoder puts different people at
+# 0.12-0.23 and two views of one person at ~0.64 on the same crops: roughly
+# three times the margin, no new licence, and no new dependency beyond the
+# ONNX runtime.
 CLIP_CROP_UPPER_FRAC = 0.6
+REID_CROP_UPPER_FRAC = 1.0
+# OFF BY DEFAULT, pending a measurement that separates two confounded changes.
+# Set REID_MODEL=yolo26s-reid.onnx to enable (weights auto-download, 28 MB, no
+# new licence obligation beyond ultralytics itself).
+#
+# Measured with the encoder enabled, against per-frame ground truth on two
+# lessons:
+#     Khaitan (tuned on):  coverage 91.4 -> 78.9, purity 98.0 -> 81.6
+#     Demo    (held out):  coverage 59.9 -> 64.3, purity 80.6 -> 96.9
+# It clearly helps the room it was not tuned against and clearly hurts the one
+# it was. Neither configuration dominates, and the run that produced those
+# numbers ALSO changed the torso histogram, so the two effects are confounded.
+# The honest next experiment is to carry re-ID, CLIP and colour as three
+# separate modalities and let the fusion weigh them, rather than swapping one
+# for another. Until that is measured, the default is the configuration whose
+# numbers we actually verified.
+REID_MODEL_DEFAULT = ""
 CLIP_CROP_MAX_SIDE = 224
 CLIP_BATCH_SIZE = 64
 CLIP_MODEL_NAME = "ViT-B/32"
@@ -91,6 +116,8 @@ _model = None
 _model_is_engine = False  # set at load; engines are CUDA-only (no CPU fallback)
 _fallback_cpu = False
 _clip_bundle = None  # (model, preprocess, device), lazy like _model
+_reid_encoder = None
+_reid_failed = False
 
 
 def _lapjv_shim(cost, extend_cost=False, cost_limit=None, return_cost=True):
@@ -782,7 +809,23 @@ def _torso_hist(
     kxy: Optional[np.ndarray],
     kconf: Optional[np.ndarray],
 ) -> Optional[np.ndarray]:
-    """HSV (H,S) histogram of the torso crop, L1-normalized, flattened."""
+    """Coarse HSV histogram of the torso crop, L1-normalized, flattened.
+
+    All three channels, not hue and saturation only. Hue is meaningless where
+    there is no light: a teacher in a dark kurta among bright school polos
+    produced a diffuse, noisy H-S histogram that looked like everybody and
+    nobody, and the "who is not wearing the uniform" signal — the strongest
+    appearance cue in a uniformed classroom — collapsed to zero on that
+    lesson. Brightness is what makes dark clothing describable.
+
+    MEASURED, and kept at 30 hue x 32 saturation. Adding a brightness axis and
+    coarsening hue to 12x6x6 was tried, to describe a teacher in a dark kurta
+    whose hue is meaningless — and it was much worse on both lessons
+    (coverage 91.4 -> 77.6 and 59.9 -> 10.0), because hue resolution is exactly
+    what separates one uniform colour from another, and brightness mostly
+    encodes where in the room somebody is standing. The dark-clothing case
+    needs a better encoder, not a coarser histogram.
+    """
     fh, fw = frame.shape[:2]
     torso_pts = (L_SHOULDER, R_SHOULDER, L_HIP, R_HIP)
     if (
@@ -849,13 +892,43 @@ def _get_clip():
     return _clip_bundle
 
 
+def _get_reid():
+    """Lazily load the person re-ID encoder, or None when unavailable.
+
+    Failure is remembered and degrades to CLIP rather than raising: losing the
+    better embedding must never cost a completed multi-minute detection pass.
+    """
+    global _reid_encoder, _reid_failed
+    if _reid_encoder is None and not _reid_failed:
+        name = (os.environ.get("REID_MODEL") or REID_MODEL_DEFAULT).strip()
+        if not name:
+            _reid_failed = True
+            return None
+        try:
+            from ultralytics.trackers.utils.reid import ReID
+
+            weights_dir = (get_settings().weights_dir or "").strip()
+            path = str(Path(weights_dir) / name) if weights_dir else name
+            _reid_encoder = ReID(path, device=get_device())
+            logger.info("re-ID encoder loaded: %s", path)
+        except Exception:
+            logger.warning(
+                "person re-ID encoder unavailable; falling back to CLIP "
+                "(which is near-chance for re-identification)",
+                exc_info=True,
+            )
+            _reid_failed = True
+    return _reid_encoder
+
+
 def _upper_crop(frame: np.ndarray, bbox: dict) -> Optional[np.ndarray]:
-    """BGR crop of the upper 60% of the bbox, downscaled to <= 224 px."""
+    """BGR crop of the body for appearance embedding, downscaled to <= 224 px."""
+    frac = REID_CROP_UPPER_FRAC if _get_reid() is not None else CLIP_CROP_UPPER_FRAC
     fh, fw = frame.shape[:2]
     px0 = max(0, min(fw - 1, int(bbox["x"] * fw)))
     px1 = max(0, min(fw, int((bbox["x"] + bbox["w"]) * fw)))
     py0 = max(0, min(fh - 1, int(bbox["y"] * fh)))
-    py1 = max(0, min(fh, int((bbox["y"] + bbox["h"] * CLIP_CROP_UPPER_FRAC) * fh)))
+    py1 = max(0, min(fh, int((bbox["y"] + bbox["h"] * frac) * fh)))
     # Below ~8 px the crop is compression mush that embeds as noise.
     if px1 - px0 < 8 or py1 - py0 < 8:
         return None
@@ -909,6 +982,28 @@ def _embed_tracks(
     ]
     if not flat:
         return {}
+
+    encoder = _get_reid()
+    if encoder is not None:
+        try:
+            out: dict[int, list[tuple[int, list[float]]]] = {}
+            for i in range(0, len(flat), CLIP_BATCH_SIZE):
+                chunk = flat[i : i + CLIP_BATCH_SIZE]
+                for raw_id, ts, crop in chunk:
+                    h, w = crop.shape[:2]
+                    # The encoder crops from a frame given a box, so hand it the
+                    # crop itself as a full-frame box.
+                    box = np.array([[w / 2.0, h / 2.0, w, h]], dtype=np.float32)
+                    feat = np.asarray(encoder(crop, box)[0], dtype=np.float64).ravel()
+                    norm = float(np.linalg.norm(feat))
+                    if norm > 0:
+                        out.setdefault(raw_id, []).append(
+                            (ts, [float(v) for v in feat / norm])
+                        )
+            return out
+        except Exception:
+            logger.warning("re-ID embedding failed; falling back to CLIP", exc_info=True)
+
     try:
         import torch
         from PIL import Image

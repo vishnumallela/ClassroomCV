@@ -50,6 +50,21 @@
       "report_only": {
         "note": "coverage/purity measured 89.9%/98.9% at the time of writing"
       }
+    },
+    "demo_teacher": {
+      "label": "Demo lesson (4:46, ~30 pupils, teacher in a dark kurta) - the SECOND room, held out from tuning",
+      "note": "Per-frame ground truth from eval/annotate_teacher.py with the DARK cue (this teacher wears a dark patterned kurta among bright polos; the other room's teacher wears white, hence two cues). This fixture exists to catch tuning that only works on one room, and it does its job: every threshold in teacher_track was swept against the Khaitan lesson, the first run here claimed two pupils, and that is what exposed the tracklet over-splitting bug and the degenerate-ground-plane bug. Gates are set at the MEASURED level (59.9% coverage / 80.6% purity), not at an aspiration, so they catch regressions rather than failing permanently. This room is genuinely harder than Khaitan: the uniform-outlier colour signal is worth nothing when the teacher wears dark clothing, and the perspective model cannot be fitted because almost nobody in this lesson stands. Closing that gap needs a real re-ID encoder - see docs/teacher-identification-research.md.",
+      "identity_gates": {
+        "coverage": {
+          "min": 0.55
+        },
+        "purity": {
+          "min": 0.75
+        },
+        "cold_start_ms": {
+          "max": 30000
+        }
+      }
     }
   },
   "budgets": {
