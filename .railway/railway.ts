@@ -58,7 +58,9 @@ export default defineRailway(() => {
     // MinIO's default command only prints help, so the server command is
     // explicit. On the single-drive backend a top-level directory *is* a
     // bucket, so mkdir is the idempotent "create bucket if missing".
-    start: `/bin/sh -c "mkdir -p /data/${MEDIA_BUCKET} && exec minio server /data --address :9000"`,
+    // [::] and not :9000 — MinIO resolves the bare form to IPv4 only, which
+    // Railway's proxy cannot reach (502) and sibling services cannot dial.
+    start: `/bin/sh -c "mkdir -p /data/${MEDIA_BUCKET} && exec minio server /data --address [::]:9000"`,
     volumeMounts: { "/data": minioData },
     env: {
       MINIO_ROOT_USER: "luminary",

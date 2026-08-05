@@ -23,7 +23,10 @@ RUN apt-get update \
     && ffprobe -version | head -1
 
 WORKDIR /srv
-COPY --from=deps /srv/node_modules ./node_modules
+# The whole tree, not just /srv/node_modules: Bun hoists most packages to the
+# root but keeps some in each workspace's own node_modules, and a root-only
+# copy loses those (drizzle-orm resolved to nothing at runtime).
+COPY --from=deps /srv /srv
 COPY package.json bun.lock bunfig.toml tsconfig.base.json ./
 COPY packages ./packages
 COPY apps/api-service ./apps/api-service
