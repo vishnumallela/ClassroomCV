@@ -31,12 +31,12 @@
 #   (23 identities, max_students 23). Revisit only with offline scenario
 #   tooling, one knob at a time.
 tracker_type: botsort
-track_high_thresh: 0.25
+track_high_thresh: 0.25 
 track_low_thresh: 0.1
-new_track_thresh: 0.25
-track_buffer: 60
+new_track_thresh: 0.25 
+track_buffer: 100 # testing for 20s 
 match_thresh: 0.8
-fuse_score: true
+fuse_score: false
 gmc_method: none
 proximity_thresh: 0.5
 appearance_thresh: 0.25
