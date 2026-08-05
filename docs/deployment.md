@@ -77,6 +77,12 @@ Two platform behaviours worth knowing before changing this file:
   afterwards — initdb has already run, so the cluster ends up the wrong major
   version with no `timescaledb` in `shared_preload_libraries`. Declare the
   service straight from the image, as this file does.
+- **Never delete a volume out of band.** Doing so leaves the service attached
+  to a pending-deletion volume, which `config plan` cannot read through — so
+  it plans another create, Railway refuses the second volume, and every apply
+  re-enters the loop. `volume detach` does not clear it and the pending
+  deletion cannot be cancelled; the only exit is deleting the service and
+  letting the config recreate it against a differently-named volume.
 
 No ML host is pinned here: the api resolves the ML service URL from app
 settings at call time (§3), so re-pointing at a fresh pod needs no redeploy.
