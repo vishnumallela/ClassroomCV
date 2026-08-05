@@ -1,0 +1,26 @@
+# Build context for apps/api-service/Dockerfile and apps/frontend/Dockerfile,
+# both of which build from the repo root. services/ml-service is excluded on
+# purpose — it ships as its own GPU image with its own .dockerignore.
+.git
+.github
+.turbo
+.railway
+.agents
+node_modules
+**/node_modules
+**/.turbo
+**/dist
+**/.output
+**/*.tsbuildinfo
+**/.tanstack
+data
+docs
+services
+.venv
+**/__pycache__
+**/.pytest_cache
+*.pt
+*.engine
+.env
+.env.*
+.DS_Store

@@ -1,33 +1,42 @@
-# CI/CD for the application: deploy api-service + frontend to Railway on
-# every push to main. Postgres (TimescaleDB image service) and Redis live in
-# the same Railway project; media bytes live in R2/S3 (see docs/deployment.md).
+# Infrastructure reconciliation for the Railway project.
 #
-# Required repo secret: RAILWAY_TOKEN (project token).
-# Required repo vars: RAILWAY_API_SERVICE, RAILWAY_FRONTEND (service names).
+# Application code deploys ITSELF: the `api` and `web` services are connected
+# to this repo, so Railway builds and releases every push to main that touches
+# their watch patterns (see .railway/railway.ts). Nothing in CI has to run
+# `railway up`.
+#
+# What this workflow owns is the other half — the project's shape: services,
+# volumes, variables and the wiring between them, all declared in
+# .railway/railway.ts. It applies that file whenever it changes, so the live
+# project can never drift from what is committed.
+#
+# Required repo secret: RAILWAY_TOKEN (a project token for `classroomcv`).
+# Required repo var:    RAILWAY_DEPLOY_ENABLED = "true".
 name: deploy-railway
 
 on:
   push:
     branches: [main]
     paths:
-      - "apps/**"
-      - "packages/**"
-      - "package.json"
-      - "bun.lock"
+      - ".railway/**"
       - ".github/workflows/deploy-railway.yml"
   workflow_dispatch: {}
 
 jobs:
-  deploy:
+  infra:
     runs-on: ubuntu-latest
     if: ${{ vars.RAILWAY_DEPLOY_ENABLED == 'true' }}
     env:
       RAILWAY_TOKEN: ${{ secrets.RAILWAY_TOKEN }}
     steps:
       - uses: actions/checkout@v4
+      - uses: oven-sh/setup-bun@v2
+      # `railway config` evaluates .railway/railway.ts with the railway SDK
+      # from the repo's own node_modules.
+      - run: bun install --frozen-lockfile
       - name: Install Railway CLI
         run: npm i -g @railway/cli
-      - name: Deploy api-service
-        run: railway up --service "${{ vars.RAILWAY_API_SERVICE }}" --ci
-      - name: Deploy frontend
-        run: railway up --service "${{ vars.RAILWAY_FRONTEND }}" --ci
+      - name: Preview infrastructure changes
+        run: railway config plan
+      - name: Apply infrastructure changes
+        run: railway config apply --yes

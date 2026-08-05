@@ -1,0 +1,151 @@
+/**
+ * Luminary on Railway — the whole project as code.
+ *
+ * Five resources: TimescaleDB, Redis, MinIO (S3-compatible object storage for
+ * video bytes), the Bun/Hono api-service and the Vite SPA behind Caddy. The
+ * ML pipeline is deliberately NOT here: it needs a GPU, so it runs on an
+ * on-demand RunPod pod that the app's Settings page starts and stops
+ * (docs/runpod-gpu-deployment.md). The api reaches it over the URL stored in
+ * app settings, which is why nothing below pins an ML host.
+ *
+ *   railway config plan     preview changes (safe)
+ *   railway config apply    reconcile the project with this file
+ *
+ * Application code deploys itself: `api` and `web` are connected to the
+ * GitHub repo, so Railway builds every push to main that matches their watch
+ * patterns. This file only describes infrastructure and wiring.
+ */
+import {
+  database,
+  defineRailway,
+  github,
+  image,
+  project,
+  redis,
+  service,
+  volume,
+} from "railway/iac";
+
+const REPO = "vishnumallela/ClassroomCV";
+const BRANCH = "main";
+
+/** Object key prefix the api-service writes video + thumbnail bytes under. */
+const MEDIA_BUCKET = "luminary-videos";
+
+/** Password generator matching the one Railway uses for its own databases. */
+const SECRET = (bytes: number) => ({
+  generator: `secret(${bytes}, "abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789")`,
+});
+
+export default defineRailway(() => {
+  // Railway's managed Postgres has no TimescaleDB, and the schema needs it:
+  // detection_events is a hypertable with compression + retention policies and
+  // a continuous aggregate (apps/api-service/drizzle/0003_storage_tiering.sql).
+  const db = database("Timescale", "postgres", {
+    image: "timescale/timescaledb:latest-pg17",
+    defaultMountPath: "/var/lib/postgresql/data",
+  });
+
+  // BullMQ's broker: the upload → analyse → derive pipeline.
+  const cache = redis("Redis");
+
+  // On-prem-style object storage. The api-service talks to it with Bun's S3
+  // client, and it is what lets a *remote* GPU worker read a lesson: the
+  // worker gets a presigned URL, never a path on the api's disk.
+  const minioData = volume("minio-data", { sizeMB: 50000 });
+  const minio = service("minio", {
+    source: image("minio/minio:latest"),
+    // MinIO's default command only prints help, so the server command is
+    // explicit. On the single-drive backend a top-level directory *is* a
+    // bucket, so mkdir is the idempotent "create bucket if missing".
+    start: `/bin/sh -c "mkdir -p /data/${MEDIA_BUCKET} && exec minio server /data --address :9000"`,
+    volumeMounts: { "/data": minioData },
+    env: {
+      MINIO_ROOT_USER: "luminary",
+      MINIO_ROOT_PASSWORD: SECRET(32),
+    },
+  });
+
+  // DATA_DIR. On the s3 backend this is a *cache*, not the source of truth:
+  // ffprobe/ffmpeg need a real file path, so the worker materialises objects
+  // here before probing them. It still has to survive restarts.
+  const mediaCache = volume("api-media-cache", { sizeMB: 20000 });
+
+  const api = service("api", {
+    source: github(REPO, { branch: BRANCH }),
+    build: {
+      builder: "DOCKERFILE",
+      dockerfilePath: "apps/api-service/Dockerfile",
+      watchPatterns: [
+        "apps/api-service/**",
+        "packages/**",
+        "package.json",
+        "bun.lock",
+        ".dockerignore",
+      ],
+    },
+    start: "bun run start",
+    // Migrations run before the new deployment takes traffic, so a schema
+    // change can never be served by the old image or half-applied by two
+    // replicas racing on boot.
+    preDeploy: "bun run db:migrate",
+    healthcheck: "/health",
+    healthcheckTimeout: 300,
+    volumeMounts: { "/data": mediaCache },
+    env: {
+      NODE_ENV: "production",
+      // Railway routes public traffic to $PORT; the app binds it explicitly.
+      PORT: "8787",
+      API_SERVICE__PORT: "8787",
+      // "::" and not "0.0.0.0": Railway's private network is IPv6-only, so a
+      // v4-only listener is unreachable from sibling services.
+      API_SERVICE__HOST: "::",
+      API_SERVICE__DATABASE_URL: db.env.DATABASE_URL,
+      API_SERVICE__REDIS_URL: cache.env.REDIS_URL,
+      API_SERVICE__DATA_DIR: "/data",
+      API_SERVICE__STORAGE_BACKEND: "s3",
+      // The PUBLIC MinIO origin on purpose, not minio.railway.internal: the
+      // presigned URLs signed against this endpoint are handed to the RunPod
+      // GPU worker, which is off-platform and cannot resolve a private domain.
+      // The bucket itself stays credentialed; only time-limited links escape.
+      API_SERVICE__S3_ENDPOINT: "https://${{minio.RAILWAY_PUBLIC_DOMAIN}}",
+      API_SERVICE__S3_BUCKET: MEDIA_BUCKET,
+      API_SERVICE__S3_ACCESS_KEY: "${{minio.MINIO_ROOT_USER}}",
+      API_SERVICE__S3_SECRET_KEY: "${{minio.MINIO_ROOT_PASSWORD}}",
+      API_SERVICE__S3_REGION: "us-east-1",
+      // The SPA is a separate origin and sends its session cookie with
+      // credentials, so the browser needs this exact origin echoed back.
+      // Written as a raw reference so the two services stay acyclic in code.
+      API_SERVICE__CORS_ORIGINS: "https://${{web.RAILWAY_PUBLIC_DOMAIN}}",
+      // Gates every route. Never leave this empty on a public URL: uploads,
+      // deletes, the RunPod key and the GPU start/stop buttons sit behind it.
+      API_SERVICE__ADMIN_PASSWORD: SECRET(24),
+      API_SERVICE__QUEUE_DASHBOARD_USER: "admin",
+      API_SERVICE__QUEUE_DASHBOARD_PASSWORD: SECRET(24),
+    },
+  });
+
+  const web = service("web", {
+    source: github(REPO, { branch: BRANCH }),
+    build: {
+      builder: "DOCKERFILE",
+      dockerfilePath: "apps/frontend/Dockerfile",
+      watchPatterns: [
+        "apps/frontend/**",
+        "packages/**",
+        "package.json",
+        "bun.lock",
+        ".dockerignore",
+      ],
+    },
+    env: {
+      // Vite inlines this at BUILD time (see apps/frontend/Dockerfile), so the
+      // api must already have its public domain when web builds.
+      FRONTEND__API_URL: "https://${{api.RAILWAY_PUBLIC_DOMAIN}}",
+    },
+  });
+
+  return project("classroomcv", {
+    resources: [db, cache, minio, minioData, mediaCache, api, web],
+  });
+});

@@ -1,0 +1,23 @@
+# Static host for the SPA. Railway terminates TLS at its edge and injects
+# $PORT, so no automatic HTTPS and no admin endpoint in here.
+{
+	admin off
+	auto_https off
+	persist_config off
+}
+
+:{$PORT:8080} {
+	root * /srv/dist
+	encode zstd gzip
+
+	# Vite fingerprints everything under /assets, so those are immutable;
+	# index.html must never be cached or a deploy keeps serving the old bundle.
+	@assets path /assets/*
+	header @assets Cache-Control "public, max-age=31536000, immutable"
+	header /index.html Cache-Control "no-cache"
+
+	# TanStack Router owns every path client-side: unknown paths are routes,
+	# not 404s.
+	try_files {path} /index.html
+	file_server
+}

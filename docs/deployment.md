@@ -6,46 +6,53 @@ Settings page and the meter stops with it. CI/CD is automatic on push to
 `main`.
 
 ```
-GitHub main ──► deploy-railway.yml ──► Railway: frontend + api-service
-        └────► deploy-ml-runpod.yml ─► GHCR image ─► RunPod pod restart (pulls :latest)
+GitHub main ──► Railway build (api, web)   ── app code deploys itself
+        ├────► deploy-railway.yml ─────────► railway config apply (infrastructure)
+        └────► deploy-ml-runpod.yml ───────► GHCR image ─► RunPod pod restart (pulls :latest)
 
-browser ─► frontend ─► api-service ─► Postgres(Timescale) / Redis / R2
-                              └──────► RunPod pod :8000 (ml-service, L4 GPU)
+browser ─► web (Caddy/SPA) ─► api ─► Timescale / Redis / MinIO
+                                └──► RunPod pod :8000 (ml-service, L4 GPU)
 ```
 
-## 1. Railway project (one-time)
+## 1. Railway project
 
-Create a Railway project with these services:
+The whole project is **declared in code** at [`.railway/railway.ts`](../.railway/railway.ts)
+— services, volumes, variables and the wiring between them. There is no
+click-through setup to reproduce:
 
-| Service | Source | Notes |
+```bash
+railway link                # pick the classroomcv project
+railway config plan         # preview (safe)
+railway config apply        # reconcile
+```
+
+| Resource | What it is | Why |
 |---|---|---|
-| `api-service` | this repo, root dir `apps/api-service` | config in `apps/api-service/railway.json` (migrates on boot, healthcheck `/health`) |
-| `frontend` | this repo, root dir `apps/frontend` | config in `apps/frontend/railway.json` |
-| `db` | Docker image `timescale/timescaledb:latest-pg16` + volume | Railway's managed Postgres lacks TimescaleDB Community (compression/retention), so run the image |
-| `redis` | Railway Redis | BullMQ queue |
+| `Timescale` | `timescale/timescaledb:latest-pg17` + volume | Railway's managed Postgres has no TimescaleDB, and the schema needs hypertables, compression, retention and a continuous aggregate |
+| `Redis` | Railway Redis | BullMQ broker for the upload → analyse → derive pipeline |
+| `minio` | `minio/minio:latest` + volume | S3-compatible store for video + thumbnail bytes. Also what lets the *remote* GPU worker read a lesson: it gets a presigned URL, never a path on the api's disk |
+| `api` | this repo, `apps/api-service/Dockerfile` | Bun + Hono + the BullMQ workers. Migrations run as a pre-deploy step; healthcheck `/health` |
+| `web` | this repo, `apps/frontend/Dockerfile` | Vite SPA built at image-build time, served by Caddy with an SPA fallback |
 
-Media bytes go to **Cloudflare R2** (zero egress — the RunPod pod pulls video
-from it): create a bucket + API token.
+Both Dockerfiles build from the **repo root** (Bun workspaces need the root
+lockfile), which is why each service sets `build.dockerfilePath` rather than a
+root directory.
 
-**api-service variables**
+Two things the config file deliberately does not contain:
 
-```
-API_SERVICE__ADMIN_PASSWORD=…               # REQUIRED in production: gates the whole app
-API_SERVICE__DATABASE_URL=postgres://…      # the db service
-API_SERVICE__REDIS_URL=redis://…
-API_SERVICE__CORS_ORIGINS=https://<frontend-domain>
-API_SERVICE__STORAGE_BACKEND=s3
-API_SERVICE__S3_ENDPOINT=https://<account>.r2.cloudflarestorage.com
-API_SERVICE__S3_BUCKET=luminary-videos
-API_SERVICE__S3_ACCESS_KEY=…  API_SERVICE__S3_SECRET_KEY=…
-API_SERVICE__DATA_DIR=/tmp/luminary-data    # ephemeral cache; S3 is the source of truth
-```
+- **Public domains.** They are generated per environment
+  (`railway domain --service api`), and referenced as
+  `${{api.RAILWAY_PUBLIC_DOMAIN}}` / `${{web.RAILWAY_PUBLIC_DOMAIN}}` so the
+  CORS origin and the SPA's API origin follow whatever Railway hands out.
+  Because Vite inlines `FRONTEND__API_URL` at **build** time, the api's domain
+  must exist before `web` builds — generate domains first, then redeploy `web`.
+- **Secrets.** `API_SERVICE__ADMIN_PASSWORD`, the queue-dashboard password and
+  the MinIO root password are declared as Railway `secret(…)` generators, so
+  they are created on the platform and never live in the repo. Read the admin
+  password back with `railway variables list --service api --kv`.
 
-**frontend variables** (Vite inlines env at BUILD time — set before deploying)
-
-```
-FRONTEND__API_URL=https://<api-service-domain>
-```
+No ML host is pinned here: the api resolves the ML service URL from app
+settings at call time (§3), so re-pointing at a fresh pod needs no redeploy.
 
 ## 2. RunPod pod (one-time)
 
@@ -55,7 +62,8 @@ FRONTEND__API_URL=https://<api-service-domain>
    image `ghcr.io/…/ml-service:latest`, expose HTTP port **8000**, volume
    **100 GB** at `/workspace` (holds the weight + TensorRT engine across
    restarts). Env: see `services/ml-service/.env.runpod.example` —
-   `MEDIA_URL_ALLOWLIST` must be the R2 host, `DATABASE_URL` the Railway db.
+   `MEDIA_URL_ALLOWLIST` must be the MinIO public host, `DATABASE_URL` the
+   Railway Timescale service's public URL.
 3. First boot exports the TensorRT engine (minutes, once per GPU type); watch
    for `warmup inference complete on cuda`.
 
@@ -79,19 +87,27 @@ backoff) and process when the pod starts.
 
 ## 4. CI/CD (automatic on push to main)
 
-| Workflow | Trigger | What it does |
+Application code deploys **itself**: `api` and `web` are connected to this
+repo, so Railway builds and releases each push to `main` that matches their
+watch patterns. Nothing in CI runs `railway up`.
+
+| Pipeline | Trigger | What it does |
 |---|---|---|
-| `.github/workflows/deploy-railway.yml` | changes under `apps/**`, `packages/**` | `railway up` for api-service and frontend |
+| Railway GitHub integration | push to `main` under `apps/api-service/**`, `packages/**`, `package.json`, `bun.lock` | builds and releases `api` (migrations run pre-deploy) |
+| Railway GitHub integration | push to `main` under `apps/frontend/**`, `packages/**`, `package.json`, `bun.lock` | builds and releases `web` |
+| `.github/workflows/ci.yml` | every push and PR | typecheck + build the workspaces, `pytest` the ML service |
+| `.github/workflows/deploy-railway.yml` | changes under `.railway/**` | `railway config plan` then `apply` — keeps the live project from drifting from the committed infrastructure |
 | `.github/workflows/deploy-ml-runpod.yml` | changes under `services/ml-service/**` | builds + pushes the GHCR image, then stop→start on the pod so it pulls `:latest` |
 
 **Repo configuration:**
 
-- Secrets: `RAILWAY_TOKEN`, `RUNPOD_API_KEY`, `RUNPOD_POD_ID`
-- Variables: `RAILWAY_DEPLOY_ENABLED=true`, `RAILWAY_API_SERVICE`,
-  `RAILWAY_FRONTEND`, `RUNPOD_DEPLOY_ENABLED=true`
+- Secrets: `RAILWAY_TOKEN` (a project token for `classroomcv`),
+  `RUNPOD_API_KEY`, `RUNPOD_POD_ID`
+- Variables: `RAILWAY_DEPLOY_ENABLED=true`, `RUNPOD_DEPLOY_ENABLED=true`
 
-Leave the `*_DEPLOY_ENABLED` variables unset to keep a workflow build-only —
-the pipeline never fails because deploy credentials are absent.
+Leave the `*_DEPLOY_ENABLED` variables unset to keep a workflow inert — the
+pipeline never fails because deploy credentials are absent. Code deploys are
+unaffected either way; they come from Railway's own GitHub integration.
 
 ## 5. Cost posture
 
@@ -99,5 +115,5 @@ the pipeline never fails because deploy credentials are absent.
   (~$1.15 on-demand). The Settings page's Stop button is the lever.
 - Gemini: hard-capped at `vlm_frames` (6) calls per lesson for teacher ID —
   ~$0.002/lesson, zero when `GEMINI_API_KEY` is unset.
-- Storage: R2 for media (no egress fees to RunPod), TimescaleDB rows slimmed
+- Storage: MinIO on a Railway volume for media, TimescaleDB rows slimmed
   to the three teacher KPIs; raw detections age out per the retention policy.
