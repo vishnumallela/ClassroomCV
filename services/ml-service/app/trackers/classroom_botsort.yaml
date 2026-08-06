@@ -15,21 +15,31 @@
 # - track_low_thresh 0.1 keeps the ByteTrack second pass alive: an occluded,
 #   half-visible person scores low but the box is spatially honest, and the
 #   second association is what carries her through the crowd.
-# - track_buffer 60: how many SAMPLED frames a lost track survives before
-#   deletion. ~12 s of occlusion bridged at the 5 fps sampling cap
-#   (30 frames = ~6 s was measured too short for a teacher crossing a front row).
-#   This is the single fragmentation knob, changed alone on purpose — the
-#   dead-end run below moved it together with association thresholds, and the
-#   damage came from those, not the buffer.
+# - track_buffer 100: how many SAMPLED frames a lost track survives before
+#   deletion, i.e. ~20 s of occlusion bridged at the 5 fps sampling cap
+#   (30 frames = ~6 s was measured too short for a teacher crossing a front
+#   row; 60 was the previous setting). This is the fragmentation knob.
+# - fuse_score false: with it true, ByteTrack's second association is
+#   mathematically dead — the gate is a fixed 0.5 while stage-2 detections
+#   have conf < 0.25 by construction, so the minimum achievable cost is 0.75.
+#   False restores the low-confidence recovery pass that carries a
+#   half-occluded person through a crowd.
 #
 # Measured dead ends, kept out deliberately (see docs/ml-improvement-plan.md):
 # - with_reid true + model auto: pose-head features ID-switched the walking
 #   teacher into temporally overlapping identities; teacher classification
 #   collapsed to zero.
-# - fuse_score false + track_low 0.05 + new_track 0.40 + buffer 60: cut
-#   stored detections 26% through under-association and fragmented the room
-#   (23 identities, max_students 23). Revisit only with offline scenario
-#   tooling, one knob at a time.
+# - fuse_score false TOGETHER WITH track_low 0.05 + new_track 0.40: cut stored
+#   detections 26% through under-association and fragmented the room. The
+#   damage was attributed to the association thresholds, not to fuse_score,
+#   which is why fuse_score alone is now false while those thresholds stay at
+#   0.1 / 0.25.
+#
+# NOTE: any change in this file changes the raw tracks, and therefore every
+# captured fixture under eval/fixtures/. Those are frozen detections, so the
+# harness keeps passing on them while telling you nothing about the new
+# settings. Re-run eval/capture.py after touching this file, or the identity
+# gates are measuring the previous tracker.
 tracker_type: botsort
 track_high_thresh: 0.25
 track_low_thresh: 0.1
