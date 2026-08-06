@@ -48,7 +48,31 @@
         }
       },
       "report_only": {
-        "note": "coverage/purity measured 89.9%/98.9% at the time of writing"
+        "note": "coverage/purity measured 89.9%/98.9% at the time of writing",
+        "teacher_raw_ids": [
+          13,
+          34,
+          53,
+          61,
+          81,
+          95,
+          107,
+          246,
+          311,
+          323,
+          1047,
+          1078,
+          1081,
+          1096
+        ]
+      },
+      "appearance_gates": {
+        "separation_hist": {
+          "min": 0.55
+        },
+        "gallery_span_p50": {
+          "min": 0.5
+        }
       }
     },
     "demo_teacher": {
@@ -63,6 +87,18 @@
         },
         "cold_start_ms": {
           "max": 30000
+        }
+      },
+      "report_only": {
+        "teacher_raw_ids": [
+          5,
+          7,
+          500
+        ]
+      },
+      "appearance_gates": {
+        "gallery_span_p50": {
+          "min": 0.5
         }
       }
     }

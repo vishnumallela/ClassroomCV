@@ -68,9 +68,28 @@ HIST_SAMPLE_SPACING_MS = 1_000
 # ONNX runtime.
 CLIP_CROP_UPPER_FRAC = 0.6
 REID_CROP_UPPER_FRAC = 1.0
-# OFF BY DEFAULT, pending a measurement that separates two confounded changes.
-# Set REID_MODEL=yolo26s-reid.onnx to enable (weights auto-download, 28 MB, no
-# new licence obligation beyond ultralytics itself).
+# OFF by default, because it MEASURED WORSE THAN CLIP on our own footage —
+# twice, and the second time with every objection to the first run addressed
+# (448 input on uncapped crops, batched, so the encoder was given its best
+# case rather than 224-square thumbnails one at a time).
+#
+# Separation of "two views of her" from "her vs a pupil", measured on clean
+# ground-truth-labelled tracklets:
+#     Khaitan:  CLIP 85.7%  ->  re-ID 58.6%     end-to-end coverage 91.4 -> 37.9%
+#     Demo:     CLIP 72.4%  ->  re-ID 58.1%     end-to-end coverage 76.5 -> 71.0%
+#
+# This is the opposite of the published expectation (raw CLIP scores ~0.10 mAP
+# on MSMT17, i.e. chance, while a purpose-built encoder scores 40-70), and the
+# reason appears to be the domain: MSMT17 crops are upright, street-level,
+# full-body pedestrians, while ours are 40-200 px, top-down, half-occluded and
+# framed on the upper body. A pedestrian metric trained on the former does not
+# transfer to the latter, whereas CLIP's broad semantic features — clothing,
+# texture, the bit of scene around the shoulders — happen to survive it.
+#
+# Kept wired up and one env var away (REID_MODEL=yolo26s-reid.onnx) because
+# the right experiment is still open: carry re-ID, CLIP and colour as three
+# modalities and let the fusion weigh them per video, rather than swapping one
+# for another. See docs/teacher-identification-research.md.
 #
 # Measured with the encoder enabled, against per-frame ground truth on two
 # lessons:
@@ -84,6 +103,11 @@ REID_CROP_UPPER_FRAC = 1.0
 # for another. Until that is measured, the default is the configuration whose
 # numbers we actually verified.
 REID_MODEL_DEFAULT = ""
+# The ONNX graph is fully dynamic in batch AND spatial dims, so the encoder is
+# not stuck at its default 224: identity lives in fine detail (a face at 15 px,
+# a collar, a lanyard) and downscaling a 200 px body to 224 square then feeding
+# it to a 224 network throws that away twice. 448 keeps it.
+REID_IMGSZ = 448
 CLIP_CROP_MAX_SIDE = 224
 CLIP_BATCH_SIZE = 64
 CLIP_MODEL_NAME = "ViT-B/32"
@@ -984,7 +1008,7 @@ def _get_reid():
 
             weights_dir = (get_settings().weights_dir or "").strip()
             path = str(Path(weights_dir) / name) if weights_dir else name
-            _reid_encoder = ReID(path, device=get_device())
+            _reid_encoder = ReID(path, imgsz=REID_IMGSZ, device=get_device())
             logger.info("re-ID encoder loaded: %s", path)
         except Exception:
             logger.warning(
@@ -1008,7 +1032,8 @@ def _upper_crop(frame: np.ndarray, bbox: dict) -> Optional[np.ndarray]:
     if px1 - px0 < 8 or py1 - py0 < 8:
         return None
     crop = frame[py0:py1, px0:px1]
-    scale = CLIP_CROP_MAX_SIDE / max(crop.shape[:2])
+    cap = REID_IMGSZ if _get_reid() is not None else CLIP_CROP_MAX_SIDE
+    scale = cap / max(crop.shape[:2])
     if scale < 1.0:
         return cv2.resize(
             crop,
@@ -1061,15 +1086,32 @@ def _embed_tracks(
     encoder = _get_reid()
     if encoder is not None:
         try:
+            import torch
+
             out: dict[int, list[tuple[int, list[float]]]] = {}
+            size = encoder.imgsz
             for i in range(0, len(flat), CLIP_BATCH_SIZE):
                 chunk = flat[i : i + CLIP_BATCH_SIZE]
-                for raw_id, ts, crop in chunk:
-                    h, w = crop.shape[:2]
-                    # The encoder crops from a frame given a box, so hand it the
-                    # crop itself as a full-frame box.
-                    box = np.array([[w / 2.0, h / 2.0, w, h]], dtype=np.float32)
-                    feat = np.asarray(encoder(crop, box)[0], dtype=np.float64).ravel()
+                # Preprocess exactly as ultralytics' own ReID path does — BGR to
+                # RGB, /255, bilinear to a square — but for the whole batch at
+                # once. Feeding crops one at a time made the encoder several
+                # times slower than the YOLO pass that produced them.
+                batch = torch.empty(len(chunk), 3, size, size, dtype=torch.float32)
+                for k, (_raw, _ts, crop) in enumerate(chunk):
+                    t = (
+                        torch.from_numpy(np.ascontiguousarray(crop[..., ::-1]))
+                        .permute(2, 0, 1)
+                        .unsqueeze(0)
+                        .float()
+                        / 255.0
+                    )
+                    batch[k] = torch.nn.functional.interpolate(
+                        t, size=(size, size), mode="bilinear", align_corners=False
+                    )[0]
+                feats = encoder.model(batch.to(encoder.device))
+                feats = feats.cpu().numpy() if hasattr(feats, "cpu") else np.asarray(feats)
+                for (raw_id, ts, _crop), feat in zip(chunk, feats):
+                    feat = np.asarray(feat, dtype=np.float64).ravel()
                     norm = float(np.linalg.norm(feat))
                     if norm > 0:
                         out.setdefault(raw_id, []).append(

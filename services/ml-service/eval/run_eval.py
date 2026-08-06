@@ -36,7 +36,7 @@ EVAL_DIR = Path(__file__).resolve().parent
 sys.path.insert(0, str(EVAL_DIR.parent))
 
 from app.models import VideoMeta  # noqa: E402
-from eval import fixture as fixture_mod, metrics, replay, scenarios  # noqa: E402
+from eval import appearance, fixture as fixture_mod, metrics, replay, scenarios  # noqa: E402
 
 GROUND_TRUTH = json.loads((EVAL_DIR / "ground_truth.json").read_text())
 GT_DIR = EVAL_DIR / "gt"
@@ -101,8 +101,16 @@ def run_fixture(name: str) -> bool:
     analytics = rp.analytics
     teacher = rp.teacher_track
 
+    # The evidence going IN, measured directly. Every other number here comes
+    # out of the assignment, so a change that destroys the appearance signal
+    # shows up only as a mysterious coverage drop several stages later — which
+    # is how a histogram change that halved the identity signal (separation AUC
+    # 0.625 -> 0.463) reached the working tree unnoticed.
     truth = _load_truth(name)
-    ok = True
+    app = appearance.measure(fx, truth)
+    print(f"    {appearance.summarize(app)}")
+    ok = _report(metrics.gate(app, spec.get("appearance_gates", {})))
+
     if truth:
         m = metrics.evaluate_teacher(truth, metrics.teacher_boxes(rp.tracks, fx.detections))
         print(f"    {metrics.summarize('', m).strip()}")

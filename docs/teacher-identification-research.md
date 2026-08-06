@@ -26,10 +26,32 @@ operating as designed, on a task it was never trained for.
 
 Two consequences, both acted on:
 
-- **We swapped the encoder** for the ultralytics-native person re-ID model
-  (`yolo26s-reid.onnx`, no new licence, 28 MB, ONNX). Measured on real crops
-  from this footage, it puts different people at cosine 0.12–0.23 and two
-  views of one person at ~0.64 — roughly three times the usable margin.
+- **We tried the encoder swap and it lost.** The ultralytics-native person
+  re-ID model (`yolo26s-reid.onnx`, 28 MB, no new licence) does separate raw
+  crops far better in absolute terms — different people at cosine 0.12–0.23
+  versus CLIP's 0.81–0.89. But absolute margin is not the question; ranking
+  is. Measured end to end, twice, the second time with 448-pixel input on
+  uncapped crops and batched inference so the encoder had its best case:
+
+  | | embedding separation | coverage | purity |
+  |---|---|---|---|
+  | CLIP, khaitan | **85.7%** | **91.4%** | **98.0%** |
+  | re-ID, khaitan | 58.6% | 37.9% | 75.1% |
+  | CLIP, demo | **72.4%** | 76.5% | 83.7% |
+  | re-ID, demo | 58.1% | 71.0% | 87.0% |
+
+  The likely reason is domain, and it cuts the opposite way to the benchmark:
+  MSMT17 crops are upright, street-level, full-body pedestrians; ours are
+  40–200 px, top-down, half-occluded, framed on the upper body. A metric
+  trained to tell pedestrians apart does not transfer to that, while CLIP's
+  broad semantic features — clothing, texture, the sliver of scene around the
+  shoulders — happen to. It stays wired up behind `REID_MODEL` for the
+  experiment that is still open (carry re-ID, CLIP and colour as three
+  modalities and let the fusion weigh them), but it is not the default.
+
+  Note the order of operations that made this measurable at all: before the
+  sampler was fixed, CLIP's own separation was far lower, and any encoder
+  comparison run then would have measured the sampler, not the encoder.
 - **A per-video metric-learning fix does not work.** We tried the obvious
   trick from the FACT line of work: mine negatives for free (two tracklets
   alive at the same instant are certainly different people), then whiten the
