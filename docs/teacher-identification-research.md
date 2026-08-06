@@ -52,6 +52,18 @@ Two consequences, both acted on:
   Note the order of operations that made this measurable at all: before the
   sampler was fixed, CLIP's own separation was far lower, and any encoder
   comparison run then would have measured the sampler, not the encoder.
+- **Self-calibrating modality weights do not rescue a weak encoder.** If the
+  system could measure per video which appearance modality actually works, the
+  encoder choice would stop being a gamble. The labels are free: two samples of
+  one tracklet are the same person, two tracklets alive at the same instant are
+  not. Implemented and measured — it changed nothing on either lesson, and it
+  did not stop the re-ID encoder collapsing khaitan from 91.4% to 37.9%
+  coverage. Those free labels only cover the EASY case, matching a person to
+  themselves seconds apart, at which the re-ID encoder is excellent; what it
+  cannot do is match her across minutes and a change of pose, and there is no
+  label-free way to measure that without already knowing the answer. Reverted
+  rather than kept as speculative complexity.
+
 - **A per-video metric-learning fix does not work.** We tried the obvious
   trick from the FACT line of work: mine negatives for free (two tracklets
   alive at the same instant are certainly different people), then whiten the
