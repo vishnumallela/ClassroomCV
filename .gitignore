@@ -15,3 +15,6 @@ routeTree.gen.ts
 
 # YOLOE open-vocab text encoder (auto-downloaded TorchScript)
 services/ml-service/mobileclip*.ts
+
+# Re-ID weights are downloadable assets, not source
+*.onnx
