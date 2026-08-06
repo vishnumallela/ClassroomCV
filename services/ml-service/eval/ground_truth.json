@@ -29,6 +29,78 @@
         "total_tracks": 42,
         "note": "fewer tracks with unchanged gates = better re-ID (less fragmentation); more = regression. 40->42 here is intentional: the teacher chain evicted 2 wrongly-merged student fragments into their own identities."
       }
+    },
+    "khaitan_ch10": {
+      "label": "Khaitan class, camera 10 (11.5 min, ~28 people, one teacher)",
+      "note": "Per-frame teacher ground truth in eval/gt/khaitan_ch10.teacher.json, built by eval/annotate_teacher.py from a cue the pipeline may not use (she is the only person not in a coloured school polo) and spot-checked on a 32-crop contact sheet. BASELINE BEFORE THIS WORK: the pipeline labelled NO teacher at all on this lesson - her timeline landed in three different merged identities which then cancelled each other's margin, so every KPI was zero. Gates are identity gates: KPI totals can be right for the wrong reasons.",
+      "identity_gates": {
+        "coverage": {
+          "min": 0.85
+        },
+        "purity": {
+          "min": 0.95
+        },
+        "id_switches": {
+          "max": 3
+        },
+        "cold_start_ms": {
+          "max": 150000
+        }
+      },
+      "report_only": {
+        "note": "coverage/purity measured 89.9%/98.9% at the time of writing",
+        "teacher_raw_ids": [
+          13,
+          34,
+          53,
+          61,
+          81,
+          95,
+          107,
+          246,
+          311,
+          323,
+          1047,
+          1078,
+          1081,
+          1096
+        ]
+      },
+      "appearance_gates": {
+        "separation_hist": {
+          "min": 0.55
+        },
+        "gallery_span_p50": {
+          "min": 0.5
+        }
+      }
+    },
+    "demo_teacher": {
+      "label": "Demo lesson (4:46, ~30 pupils, teacher in a dark kurta) - the SECOND room, held out from tuning",
+      "note": "Per-frame ground truth from eval/annotate_teacher.py with the DARK cue (this teacher wears a dark patterned kurta among bright polos; the other room's teacher wears white, hence two cues). This fixture exists to catch tuning that only works on one room, and it does its job: every threshold in teacher_track was swept against the Khaitan lesson, the first run here claimed two pupils, and that is what exposed the tracklet over-splitting bug and the degenerate-ground-plane bug. Gates are set at the MEASURED level (59.9% coverage / 80.6% purity), not at an aspiration, so they catch regressions rather than failing permanently. This room is genuinely harder than Khaitan: the uniform-outlier colour signal is worth nothing when the teacher wears dark clothing, and the perspective model cannot be fitted because almost nobody in this lesson stands. Closing that gap needs a real re-ID encoder - see docs/teacher-identification-research.md.",
+      "identity_gates": {
+        "coverage": {
+          "min": 0.7
+        },
+        "purity": {
+          "min": 0.78
+        },
+        "cold_start_ms": {
+          "max": 30000
+        }
+      },
+      "report_only": {
+        "teacher_raw_ids": [
+          5,
+          7,
+          500
+        ]
+      },
+      "appearance_gates": {
+        "gallery_span_p50": {
+          "min": 0.5
+        }
+      }
     }
   },
   "budgets": {

@@ -30,6 +30,19 @@ class Detection:
     standing: bool
     back_to_camera: bool
     track_no: Optional[int] = None  # merged identity, assigned post-merge
+    # 0 = fully visible, 1 = entirely hidden. Combines how much of the box
+    # nearer-to-camera people cover with how much of it the frame edge cuts
+    # off. A crowded classroom occludes constantly, and evidence read off an
+    # occluded box (appearance crops, bbox height, posture) is evidence about
+    # someone else — every consumer weights or skips samples by this.
+    occlusion: float = 0.0
+    # Scale-free body proportions from the pose keypoints, or None when the
+    # keypoints are too weak to measure: {"head", "leg", "vis"}. Ratios rather
+    # than sizes on purpose — an adult and a child differ in PROPORTION
+    # (children carry proportionally larger heads and shorter legs) at every
+    # distance from the camera, while raw height only separates them within
+    # one row of the room. See app/adult.py.
+    body: Optional[dict] = None
 
 
 @dataclass

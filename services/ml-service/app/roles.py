@@ -31,11 +31,14 @@ recording where the naive absolute-margin rule yielded all-unknown):
    scene where the whole crowd pans together), everyone stays 'unknown' and
    analytics degrade gracefully.
 
-4. FRAGMENT ABSORPTION: the walking teacher fragments (spatial merge cannot
-   bridge a 0.6-unit jump across a 30s absence), so short unassigned
-   fragments that fit inside the teacher's absence windows and sit near the
-   teacher's trajectory / the board are folded back into the teacher at the
-   role level (see absorbable_fragments; applied by jobs.derive_result).
+NOTE: choosing the teacher no longer happens here. assign_roles ranked whole
+merged IDENTITIES, and on real footage the teacher's timeline routinely lands
+in several of them, which then cancel each other's margin and leave a lesson
+with no teacher at all. app/teacher_track.py solves her timeline globally over
+tracklets instead; what survives in this module is the per-identity FEATURE
+computation (standing ratio, movement, presence, board proximity) that the
+result payload and the quality report still report, plus assign_roles for
+callers that want the old behaviour.
 """
 
 from __future__ import annotations
@@ -294,157 +297,3 @@ def assign_roles(
         conf = round(min(1.0, max(0.0, 0.5 + (best_score - score))), 4)
         roles[f.track_no] = ("student", conf)
     return roles
-
-
-# --------------------------------------------------------------------------- #
-# Teacher fragment absorption
-# --------------------------------------------------------------------------- #
-
-
-def _presence_windows(
-    ts_sorted: list[int], duration_ms: int, gap_ms: int
-) -> list[tuple[int, int, list[int]]]:
-    """Teacher ABSENCE windows: (start, end, [edge indices into ts_sorted]).
-
-    Windows are the gaps >= gap_ms between consecutive teacher samples, plus
-    the leading [0, first_ts] and trailing [last_ts, duration] stretches. The
-    edge indices point at the teacher samples bounding the window (used to
-    fetch the teacher's position when it vanished/reappeared).
-    """
-    if not ts_sorted:
-        return []
-    windows: list[tuple[int, int, list[int]]] = []
-    if ts_sorted[0] >= gap_ms:
-        windows.append((0, ts_sorted[0], [0]))
-    for i in range(1, len(ts_sorted)):
-        if ts_sorted[i] - ts_sorted[i - 1] >= gap_ms:
-            windows.append((ts_sorted[i - 1], ts_sorted[i], [i - 1, i]))
-    if duration_ms > 0 and duration_ms - ts_sorted[-1] >= gap_ms:
-        windows.append((ts_sorted[-1], duration_ms, [len(ts_sorted) - 1]))
-    return windows
-
-
-def absorbable_fragments(
-    teacher_no: int,
-    features: list[IdentityFeatures],
-    dets_by_track: dict[int, list[Detection]],
-    duration_ms: int,
-    board_polygon: Optional[list[list[float]]] = None,
-    door_polygons: Optional[list[list[list[float]]]] = None,
-) -> list[int]:
-    """track_nos of fragments to fold into the teacher identity.
-
-    Two kinds of fragment qualify:
-
-    BLIP: short (span below the teacher span gate) and entirely inside one
-    teacher ABSENCE window, near the board or the teacher's trajectory. This
-    recovers mid-absence tracker fragments.
-
-    CONTINUATION: STARTS inside an absence window and keeps going after it,
-    without temporally overlapping the teacher. This is the teacher walking
-    back in: the tracker gives her a fresh id at the door, the merge cannot
-    bridge the long spatial jump, and without this rule the returning teacher
-    is labelled a student for the rest of the lesson. Its START position must
-    be near a door, the board, or the teacher's trajectory; the whole-span
-    mean is useless because she then walks the room.
-
-    All fragments must not be frame-edge slivers, must be at least
-    ABSORB_MIN_AREA_RATIO of the teacher's area, and may not overlap an
-    already-absorbed fragment (two co-present fragments cannot both be her).
-    """
-    teacher_f = next((f for f in features if f.track_no == teacher_no), None)
-    teacher_dets = dets_by_track.get(teacher_no)
-    if teacher_f is None or not teacher_dets:
-        return []
-
-    teacher_dets = sorted(teacher_dets, key=lambda d: d.video_ts_ms)
-    ts_sorted = [d.video_ts_ms for d in teacher_dets]
-    centers = [_center(d) for d in teacher_dets]
-    windows = _presence_windows(ts_sorted, duration_ms, ABSORB_GAP_MS)
-    if not windows:
-        return []
-
-    board_box = None
-    if board_polygon is not None:
-        board_box = expand_bbox(polygon_bbox(board_polygon), BOARD_PROXIMITY_EXPAND)
-    door_boxes = [
-        expand_bbox(polygon_bbox(p), BOARD_PROXIMITY_EXPAND)
-        for p in (door_polygons or [])
-    ]
-
-    min_span = min_teacher_span_ms(duration_ms)
-
-    def in_box(box, cx: float, cy: float) -> bool:
-        return box[0] <= cx <= box[2] and box[1] <= cy <= box[3]
-
-    def near_board(cx: float, cy: float) -> bool:
-        return board_box is not None and in_box(board_box, cx, cy)
-
-    def near_door(cx: float, cy: float) -> bool:
-        return any(in_box(b, cx, cy) for b in door_boxes)
-
-    def near_trajectory(cx: float, cy: float) -> bool:
-        limit_sq = ABSORB_TRAJECTORY_DIST * ABSORB_TRAJECTORY_DIST
-        return any(
-            (tx - cx) ** 2 + (ty - cy) ** 2 <= limit_sq for tx, ty in centers
-        )
-
-    def teacher_overlap_samples(first_ms: int, last_ms: int) -> int:
-        return sum(1 for ts in ts_sorted if first_ms <= ts <= last_ms)
-
-    qualifying: list[IdentityFeatures] = []
-    for f in features:
-        if f.track_no == teacher_no:
-            continue
-        near_edge = (
-            f.mean_cx <= EDGE_MARGIN
-            or f.mean_cx >= 1.0 - EDGE_MARGIN
-            or f.mean_cy <= EDGE_MARGIN
-            or f.mean_cy >= 1.0 - EDGE_MARGIN
-        )
-        if near_edge:
-            continue
-        if teacher_f.mean_area > 0 and (
-            f.mean_area < ABSORB_MIN_AREA_RATIO * teacher_f.mean_area
-        ):
-            continue
-
-        contained = any(ws <= f.first_ms and f.last_ms <= we for ws, we, _ in windows)
-        starts_in_window = any(ws <= f.first_ms <= we for ws, we, _ in windows)
-
-        if contained and f.span_ms < min_span:
-            if near_board(f.mean_cx, f.mean_cy) or near_trajectory(
-                f.mean_cx, f.mean_cy
-            ):
-                qualifying.append(f)
-            continue
-
-        if starts_in_window:
-            # Continuation: she cannot be in two places, so any real temporal
-            # overlap with the teacher identity disqualifies the fragment.
-            if teacher_overlap_samples(f.first_ms, f.last_ms) > 5:
-                continue
-            frag_dets = sorted(
-                dets_by_track.get(f.track_no, []), key=lambda d: d.video_ts_ms
-            )
-            if not frag_dets:
-                continue
-            head = [_center(d) for d in frag_dets[:3]]
-            hx = sum(c[0] for c in head) / len(head)
-            hy = sum(c[1] for c in head) / len(head)
-            if near_door(hx, hy) or near_board(hx, hy) or near_trajectory(hx, hy):
-                qualifying.append(f)
-
-    # Two co-present fragments cannot both be the teacher: keep the earliest
-    # non-overlapping set (ties resolved by proximity to the teacher path via
-    # list order being start-sorted; overlap tolerance mirrors merge's 1s).
-    qualifying.sort(key=lambda f: (f.first_ms, f.last_ms))
-    absorbed: list[IdentityFeatures] = []
-    for f in qualifying:
-        overlaps = any(
-            min(f.last_ms, g.last_ms) - max(f.first_ms, g.first_ms) > 1_000
-            for g in absorbed
-        )
-        if not overlaps:
-            absorbed.append(f)
-    return [f.track_no for f in absorbed]
