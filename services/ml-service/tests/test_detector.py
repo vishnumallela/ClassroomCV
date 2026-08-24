@@ -399,3 +399,53 @@ class TestRecordPrecision:
             model = None
 
         D._record_precision(_Broken(), torch.float16)  # must not raise
+
+
+class TestRaggedLastBatch:
+    """A traced model accepts EXACTLY its compiled batch; videos end ragged.
+
+    150 frames at batch 16 leaves a remainder of 6, and rfdetr raises on the
+    mismatch rather than adapting — so every video died on its final flush.
+    This cannot reproduce off-GPU (the trace is built at batch 1 there, so every
+    batch is full), which is why it took a real pod to surface.
+    """
+
+    def _model(self, seen):
+        class _M:
+            def predict(self, images, threshold):
+                seen.append(len(images))
+                return [f"det{i}" for i in range(len(images))]
+
+        return _M()
+
+    def test_short_batch_is_padded_and_results_trimmed(self, monkeypatch):
+        from app import detector as D
+
+        monkeypatch.setattr(D, "_traced_batch", 16)
+        monkeypatch.setattr(D, "_trt", None)
+        seen: list[int] = []
+        frames = [np.zeros((4, 4, 3), dtype=np.uint8) for _ in range(6)]
+        out = D._predict_batch(self._model(seen), frames)
+        assert seen == [16], "short batch must be padded up to the traced size"
+        assert len(out) == 6, "padding must not leak into the results"
+
+    def test_full_batch_is_untouched(self, monkeypatch):
+        from app import detector as D
+
+        monkeypatch.setattr(D, "_traced_batch", 16)
+        monkeypatch.setattr(D, "_trt", None)
+        seen: list[int] = []
+        frames = [np.zeros((4, 4, 3), dtype=np.uint8) for _ in range(16)]
+        out = D._predict_batch(self._model(seen), frames)
+        assert seen == [16] and len(out) == 16
+
+    def test_eager_model_is_never_padded(self, monkeypatch):
+        """Off-GPU there is no trace, so a short batch must pass through as-is."""
+        from app import detector as D
+
+        monkeypatch.setattr(D, "_traced_batch", None)
+        monkeypatch.setattr(D, "_trt", None)
+        seen: list[int] = []
+        frames = [np.zeros((4, 4, 3), dtype=np.uint8) for _ in range(3)]
+        out = D._predict_batch(self._model(seen), frames)
+        assert seen == [3] and len(out) == 3

@@ -90,6 +90,9 @@ EXPECTED_CLASS_NAMES = ["Door", "Screen", "Teacher", "pointing", "writing"]
 DETECT_FLOOR = 0.15
 
 _model = None
+# Batch size the JIT trace was compiled for, when it was compiled at all.
+# None means the model is eager and accepts any batch.
+_traced_batch = None
 # The TensorRT backend, when one loaded. None = serving PyTorch.
 _trt = None
 
@@ -282,8 +285,10 @@ def _optimize(model, device: str) -> None:
     on_cuda = device.split(":", 1)[0] == "cuda"
     dtype = torch.float16 if on_cuda else torch.float32
     batch = max(1, int(settings.rfdetr_batch)) if on_cuda else 1
+    global _traced_batch
     try:
         model.inference(compile=True, batch_size=batch, dtype=dtype)
+        _traced_batch = batch if batch > 1 else None
         logger.info(
             "RF-DETR traced for inference: dtype=%s batch=%d device=%s", dtype, batch, device
         )
@@ -291,6 +296,7 @@ def _optimize(model, device: str) -> None:
     except Exception:
         # Purely a throughput step; a failure here costs speed, not
         # correctness, and must never sink a multi-minute analysis.
+        _traced_batch = None
         logger.warning(
             "RF-DETR inference optimization unavailable; serving the eager model",
             exc_info=True,
@@ -611,8 +617,22 @@ def _predict_batch(model, frames: list[np.ndarray]) -> list:
     rgb = [cv2.cvtColor(f, cv2.COLOR_BGR2RGB) for f in frames]
     if _trt is not None:
         return _trt.predict(rgb, threshold=DETECT_FLOOR)
+
+    # A JIT-traced model accepts EXACTLY the batch it was compiled for, and the
+    # last batch of a video is almost never full — 150 frames at batch 16 leaves
+    # a remainder of 6, and rfdetr raises rather than adapting. Pad the short
+    # batch out with a repeat of its final frame and drop the padding from the
+    # results: the alternatives are recompiling per ragged batch (slow) or not
+    # compiling at all (slower still).
+    #
+    # This cannot reproduce off-GPU, where the trace is built at batch 1 and
+    # every batch is therefore full. It took a real pod to surface it.
+    n = len(rgb)
+    if _traced_batch is not None and 0 < n < _traced_batch:
+        rgb = rgb + [rgb[-1]] * (_traced_batch - n)
     out = model.predict(rgb, threshold=DETECT_FLOOR)
-    return out if isinstance(out, list) else [out]
+    out = out if isinstance(out, list) else [out]
+    return out[:n]
 
 
 def _to_detections(det, ts_ms: int, width: int, height: int) -> list[Detection]:
