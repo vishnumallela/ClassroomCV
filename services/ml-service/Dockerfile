@@ -14,9 +14,12 @@ FROM pytorch/pytorch:2.12.1-cuda13.0-cudnn9-runtime
 # ffmpeg feeds cv2's decoder; libgl/libglib are opencv runtime deps.
 # libglib2.0-0 was renamed libglib2.0-0t64 in Ubuntu 24.04's time_t transition
 # (the base is 24.04) — the old name is not installable and fails the build.
+# openssh-server is here for one reason: the checkpoint is not baked into the
+# image, so the volume has to be populated from outside, and a service image
+# with no shell cannot be. rsync is what populates it.
 RUN apt-get update \
     && apt-get install -y --no-install-recommends \
-        ffmpeg libgl1 libglib2.0-0t64 \
+        ffmpeg libgl1 libglib2.0-0t64 openssh-server rsync \
     && rm -rf /var/lib/apt/lists/*
 
 # Pinned, not :latest — a uv release that changes `uv export` semantics would
@@ -35,6 +38,10 @@ RUN uv export --frozen --no-hashes --no-emit-package torch --no-emit-package tor
     && rm -rf /root/.cache
 
 COPY app ./app
+# run_one.py drives one video with write_db=False, which is how a lesson gets
+# measured on the pod without Postgres, MinIO or a tunnel back to the laptop.
+COPY run_one.py ./
+COPY docker-entrypoint.sh /usr/local/bin/docker-entrypoint.sh
 
 # Fail the BUILD, not the first request, if the wiring is wrong: import the app
 # and the heavy third-party stack that only loads lazily at runtime.
@@ -54,5 +61,6 @@ ENV DEVICE=cuda \
     RFDETR_BATCH=16 \
     RFDETR_TENSORRT=false
 
-EXPOSE 8000
+EXPOSE 8000 22
+ENTRYPOINT ["/usr/local/bin/docker-entrypoint.sh"]
 CMD ["uvicorn", "app.main:app", "--host", "0.0.0.0", "--port", "8000"]
