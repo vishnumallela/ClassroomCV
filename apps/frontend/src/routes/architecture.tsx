@@ -6,8 +6,9 @@ export const Route = createFileRoute("/architecture")({ component: Architecture 
 
 // --------------------------------------------------------------------------- //
 // Technical reference for the ML pipeline. Values are the real constants from
-// services/ml-service (detector.py, merge.py, roles.py, events.py, quality.py)
-// and apps/api-service/drizzle. Terse by intent: this is a spec, not a story.
+// services/ml-service (detector.py, zones.py, teacher.py, heuristics.py,
+// quality.py) and apps/api-service/drizzle. Terse by intent: this is a spec,
+// not a story. The measurements behind each number are in docs/rfdetr-pipeline.md.
 // --------------------------------------------------------------------------- //
 
 const SUMMARY: [string, string][] = [
@@ -20,8 +21,11 @@ const SUMMARY: [string, string][] = [
     "Sampling",
     "~5 fps (stride = round(native_fps / 5)); full frame rate is redundant for behaviour",
   ],
-  ["Compute", "NVIDIA GPU (CUDA fp16 / TensorRT); MPS for dev; one durable worker per video"],
-  ["Privacy", "no facial recognition; skeleton + ephemeral re-ID only; aggregate persistence"],
+  ["Compute", "NVIDIA GPU (CUDA); MPS for dev; one durable worker per video"],
+  [
+    "Privacy",
+    "no facial recognition, no appearance biometric, no student detected at all — the model looks for the teacher, the board and the door",
+  ],
 ];
 
 // Ordered data-flow. Each stage consumes the previous stage's output.
@@ -34,175 +38,134 @@ const PIPELINE: { n: string; stage: string; module: string; io: string }[] = [
   },
   {
     n: "1",
-    stage: "Detect + pose",
-    module: "YOLO26-pose",
-    io: "frame -> N x {bbox, conf, 17 keypoints}",
+    stage: "Detect",
+    module: "RF-DETR (fine-tuned, 5 classes)",
+    io: "frame batch -> N x { class, bbox, conf }",
   },
-  { n: "2", stage: "Track", module: "BoT-SORT", io: "per-frame boxes -> boxes + raw_track_id" },
+  {
+    n: "2",
+    stage: "Zone gate",
+    module: "zones.gate_static",
+    io: "drop board/door boxes outside their zone; the teacher is never gated",
+  },
   {
     n: "3",
-    stage: "Per-detection features",
-    module: "detector._extract_frame",
-    io: "box + keypoints -> standing, back_to_camera, torso HSV hist, CLIP crop",
+    stage: "Follow the teacher",
+    module: "teacher.build_teacher_track",
+    io: "teacher boxes -> one timeline (continuity first, confidence second)",
   },
   {
     n: "4",
-    stage: "Embed",
-    module: "detector._embed_tracks (CLIP ViT-B/32)",
-    io: "crops -> 512-d L2-normalised median embedding per raw track",
+    stage: "Event derivation",
+    module: "events.derive",
+    io: "her timeline + zones -> presence / board / entry-exit / heatmap",
   },
   {
     n: "5",
-    stage: "Merge (re-ID)",
-    module: "merge.merge_tracks",
-    io: "raw tracks + hists + embeds -> raw_id -> identity map (1..N)",
+    stage: "Data quality",
+    module: "quality.assess",
+    io: "her timeline -> coverage, timeline breaks, detection confidence, tiers",
   },
   {
     n: "6",
-    stage: "Teacher-chain stitch",
-    module: "teacher_chain.stitch_teacher",
-    io: "reclaim teacher spans stolen by student ids; evict bad merges",
-  },
-  {
-    n: "7",
-    stage: "Role assignment",
-    module: "roles.assign_roles",
-    io: "identity features -> teacher | student | unknown + confidence",
-  },
-  {
-    n: "8",
-    stage: "Event derivation",
-    module: "events.derive",
-    io: "roles + zones -> presence / board / entry-exit / teacher heatmap",
-  },
-  {
-    n: "9",
-    stage: "Data quality",
-    module: "quality.assess",
-    io: "detections + roles -> coverage, fragmentation, concurrent count, tiers",
-  },
-  {
-    n: "10",
     stage: "Persist",
     module: "db.replace_detections + API",
-    io: "TimescaleDB hypertable (tiered) + typed analytics tables",
+    io: "TimescaleDB hypertable (tiered) + typed analytics tables — HER rows only",
   },
 ];
 
 const MODELS = [
   {
-    name: "YOLO26-pose",
-    family: "Detection + 2D pose, single-stage",
-    task: "Per frame, locate every person and estimate their 17-keypoint skeleton in one forward pass.",
+    name: "RF-DETR (fine-tuned)",
+    family: "Detection transformer, single-stage, NMS-free",
+    task: "Per frame, locate the teacher, the board, the door, and board-interaction moments (pointing, writing).",
     mechanism:
-      "YOLO family: whole-image single pass, no region proposals. YOLO26 is NMS-free (one-to-one head, no duplicate-suppression step) and uses RLE keypoint regression for tighter joint localisation. +up to 7.2 pose AP over YOLO11.",
+      "A DETR-family transformer fine-tuned on this product's own five classes. Object queries attend over the whole frame and emit a set of boxes directly, with no region proposals and no duplicate-suppression step. Because 'teacher' is a trained class, the model NAMES her rather than leaving a downstream stage to infer which detected person is the adult.",
     solves:
-      "The only stage that reads raw pixels. The 17 keypoints are load-bearing: hip-above-knee geometry and box aspect drive the standing/seated signal, so teacher vs student is decided with no face and no name.",
-    input: "1 BGR frame, 2560x1440",
-    output: "<=100 detections x { bbox[x,y,w,h] norm, conf, keypoints[17][x,y,conf] }",
-    params: "imgsz 1280-1536 · fp16 · conf>=0.1 · max_det 100 · yolo26x (GPU) / yolo26m (dev)",
-  },
-  {
-    name: "BoT-SORT",
-    family: "Multi-object tracking (tracking-by-detection)",
-    task: "Assign a temporally stable id to each person by linking boxes across frames. Never reads pixels.",
-    mechanism:
-      "Kalman filter predicts each track's next state from motion; detections are matched to predictions by IoU via the Hungarian algorithm; a ByteTrack second pass associates low-confidence boxes. GMC (camera-motion comp.) disabled: static camera.",
-    solves:
-      "Same-person-over-time. Every temporal metric (presence, movement, entries, board time) needs a continuous trajectory, not disconnected boxes.",
-    input: "per-frame boxes",
-    output: "boxes + raw_track_id (trajectories)",
+      "The question every KPI hangs off. The previous pipeline detected people and then inferred the teacher from stature, limb proportions, uniform colour, CLIP appearance, a tracklet DP and a vision-model vote — about 2,750 lines of inference that a trained class replaces. Students are not a class, so no student is ever detected, stored or drawn.",
+    input: "batch of BGR frames, 2560x1440",
+    output: "N x { class_id, bbox[x,y,w,h] norm, conf }",
     params:
-      "gmc none · track_buffer 60 (~12 s) · new_track_thresh 0.40 · match_thresh 0.8 · fuse_score false",
+      "resolution 576 · teacher conf 0.4 · zone conf 0.5 · batch 16 (GPU) / 1 (dev)",
   },
   {
-    name: "CLIP ViT-B/32 + HSV hist + seat anchors",
-    family: "Re-identification (appearance + geometry scoring)",
-    task: "Merge track fragments (from occlusion / exit) back into stable identities.",
+    name: "Continuity tracking",
+    family: "Single-target association (no ByteTrack, no BoT-SORT, no Re-ID)",
+    task: "Decide which box is hers when the model offers more than one, and whether she is still here across a frame where it offered none.",
     mechanism:
-      "Per candidate pair: score = 0.35 appearance + 0.25 spatial + 0.20 size + 0.20 temporal. appearance = 0.5 cos(CLIP) + 0.5 HSV-hist corr. Hard vetoes: cos < 0.35 => different; two seated fragments (centre range < 0.02) with anchors > 0.10 apart => different. Greedy merge above 0.55.",
+      "The chain seeds on the first instant carrying exactly ONE teacher box, then grows forwards and backwards. A candidate is admitted only if a person could physically have moved there: allowed distance = 0.05 + 0.8 x gap_seconds, measured from her own ground-truth speed. Past a 5 s gap the position gate switches off — she may have left and re-entered by another door.",
     solves:
-      "Fragmentation. Under identical uniforms appearance is near-degenerate, so the discriminator is location: a seat is the one cue a uniform cannot fake. CLIP's high-value roles are the veto and re-linking the distinctly-dressed teacher. Embeddings are ephemeral (single lesson).",
-    input: "raw tracks + <=10 upper-body crops each + torso hists",
-    output: "raw_track_id -> identity (1..N by first appearance)",
-    params: "MERGE_THRESHOLD 0.55 · EMBED_VETO_COS 0.35 · MAX_GAP 10 min · overlap tol 1 s",
+      "Identity switching, without a tracker. At the configured threshold the model emits at most one teacher box per frame (0 frames with two, over 583 scored), and its longest unbroken miss is ~5.4 s. There is no second identity to confuse her with, so re-identification has nothing to re-identify.",
+    input: "teacher-class boxes per sampled instant",
+    output: "one timeline + a coverage/confidence reading",
+    params: "MAX_SPEED_PER_S 0.8 · JUMP_BASE 0.05 · FREE_GAP_MS 5000",
   },
   {
-    name: "YOLOE-26-seg",
-    family: "Open-vocabulary detection + segmentation, one model",
-    task: "Auto-detect the board and door polygons (run once, up front).",
+    name: "Zone proposal",
+    family: "Median over the lesson's own detections",
+    task: "Place the board and door polygons for a room, then hold later detections to them.",
     mechanism:
-      "An open-vocabulary model in the YOLO26 family that DETECTS and SEGMENTS in one pass: a text prompt ('chalkboard', 'classroom door') returns the region and a mask together, replacing the older YOLO-World + SAM 2 two-model chain. A geometric score (aspect, wall height, rectangularity, colour) picks the winner; a SAM 2 grid-probe fallback remains for when the text encoder is unavailable.",
+      "The board and door do not move, and the detector finds them in almost every frame — measured presence 96-100% (board) and 77-81% (door), with a centre spread of +/-0.002 over an entire lesson. So each edge is the median of its own detections across the video, which ignores the occasional stray box a single frame would enshrine.",
     solves:
-      "Turns 'standing at the front' into board time and 'vanished near a door' into a confirmed exit. Operator can redraw either zone.",
-    input: "representative frame + text prompts",
-    output: "board / door polygons (normalised points)",
-    params: "yoloe-26s-seg · score threshold 0.25 · +10-11 AP and ~1.4x faster than YOLO-World",
+      "A room configures itself on first upload and the operator only corrects it. Gating later detections to the zone stops a wall poster that reads as a screen for six frames from moving the board.",
+    input: "a sparse pass over the video (~0.1 fps)",
+    output: "board / door polygons (normalised points) + a confidence",
+    params: "MIN_PRESENCE 0.30 · MIN_SAMPLES 8 · GATE_TOLERANCE 0.05",
   },
 ];
 
-// Per-detection features (detector.py). Everything downstream is derived from these.
+// What the detector emits per box. Everything downstream is derived from these.
 const FEATURES: [string, string][] = [
+  ["class", "one of door · screen · teacher · pointing · writing"],
+  ["bbox", "{x, y, w, h} normalised 0-1, top-left based, clamped to the frame"],
+  ["conf", "the model's score; per-class thresholds are applied downstream so one pass serves every consumer"],
   [
-    "standing",
-    "bbox aspect h/w > 1.6, OR hip-above-knee keypoints (kpt conf > 0.4, box h >= 90/1440); smoothed by a 5-sample majority vote before use",
+    "track_no",
+    "set only on the teacher's accepted detections — everything else carries none and is never stored",
   ],
-  ["back_to_camera", "face keypoints (nose/eyes) conf < 0.3 while both shoulders conf > 0.5"],
-  [
-    "torso HSV histogram",
-    "cv2.calcHist over (H,S), 30x32 bins, ranges [0,180]x[0,256], L1-normalised; region from torso keypoints or bbox 0.2-0.8 w x 0.15-0.6 h",
-  ],
-  ["CLIP crop", "upper 60% of bbox, downscaled to <=224 px, <=10 samples/track >=1 s apart"],
 ];
 
-// Teacher/student signals (roles.py). Weighted, then an outlier decision rule.
+// How the teacher timeline is decided (teacher.py).
 const SIGNALS: { label: string; weight: string; def: string; teacher: string; student: string }[] =
   [
     {
-      label: "standing_ratio",
-      weight: "0.30",
-      def: "fraction of samples standing (see feature above)",
-      teacher: "0.74",
-      student: "0.05",
+      label: "class = teacher",
+      weight: "required",
+      def: "the model's own label; there is no student class to compete with",
+      teacher: "0.88 (p50 conf)",
+      student: "n/a",
     },
     {
-      label: "movement",
-      weight: "0.25",
-      def: "max(x_range, y_range) of bbox-centre trajectory / 0.40, clamped to 1",
-      teacher: "0.98",
-      student: "0.04",
+      label: "continuity",
+      weight: "first",
+      def: "reachable from the previous accepted box at <= 0.05 + 0.8 x gap_s",
+      teacher: "0.55 /s peak observed",
+      student: "n/a",
     },
     {
-      label: "presence_ratio",
-      weight: "0.25",
-      def: "(last_ms - first_ms) / duration_ms",
-      teacher: "0.98",
-      student: "0.90",
-    },
-    {
-      label: "board_proximity",
-      weight: "0.20",
-      def: "fraction standing, centre in board x-range, box bottom below board floor; dropped + re-weighted if no board zone",
-      teacher: "0.19",
-      student: "0.00",
+      label: "confidence",
+      weight: "second",
+      def: "breaks ties only AMONG reachable candidates, never overrides continuity",
+      teacher: "0.79 (p10)",
+      student: "n/a",
     },
   ];
 
 const GATES: { t: string; rule: string; d: string }[] = [
   {
-    t: "min span",
-    rule: "span >= 60 s",
-    d: "short fragments / passers-by cannot be teacher (scaled down for clips < 3 min)",
+    t: "teacher threshold",
+    rule: "conf >= 0.40",
+    d: "middle of a plateau: coverage is flat 0.15-0.60, and competing boxes vanish above 0.25",
   },
   {
-    t: "not frame-edge",
-    rule: "0.03 < mean cx,cy < 0.97",
-    d: "clipped edge boxes always read as tall/standing",
+    t: "plausible motion",
+    rule: "dist <= 0.05 + 0.8 x gap_s",
+    d: "a box that crosses the room between two samples is not her, however confident",
   },
   {
-    t: "not tiny",
-    rule: "mean_area >= 0.3 x median",
-    d: "a distant back-row head cannot outscore the adult",
+    t: "free after a gap",
+    rule: "gap >= 5 s",
+    d: "she may have left and re-entered elsewhere; position then carries no information",
   },
 ];
 
@@ -219,41 +182,39 @@ const EVENTS: [string, string][] = [
     "board",
     "hysteresis state machine: 2 s sustained ON to open, 3 s OFF to close; a >= 5 s sampling gap hard-closes; tolerates single-frame flicker (budget 600 ms)",
   ],
-  ["heatmap", "32x18 grid of the teacher's bbox-centre dwell counts (teacher-only since the KPI slimming)"],
+  ["heatmap", "32x18 grid of the teacher's bbox-centre dwell counts"],
 ];
 
 const QUALITY: [string, string][] = [
   [
-    "coverage",
-    "occupied 5 s buckets / span buckets over [first, last] detection; tiers >=0.9 / >=0.7",
-  ],
-  ["fragmentation", "raw_tracks / identities; tiers <=2 (clean) / <=4 (fair) / else low"],
-  [
-    "teacher ID",
-    "geometric ranker margin, confirmed/overridden by a hard-budgeted vision vote (<= 6 calls/lesson)",
+    "teacher coverage",
+    "sampled frames she was found in / frames sampled; tiers >=0.85 / >=0.6",
   ],
   [
-    "confidence tiers",
-    "per dimension (coverage, tracking, teacher) + overall = weakest link",
+    "continuity",
+    "how many times her timeline broke; entries/exits are counted from those breaks, so dozens means that KPI is an upper bound; tiers <=6 / <=20",
   ],
+  ["detection", "mean confidence of the detections behind her timeline; tiers >=0.7 / >=0.5"],
+  ["confidence tiers", "per dimension (coverage, continuity, detection) + overall = weakest link"],
 ];
 
 const STORAGE: { tier: string; contents: string; policy: string }[] = [
   {
     tier: "Hot",
-    contents: "raw per-frame detection_events (TimescaleDB hypertable, wall-clock ts, ~1 h chunks)",
+    contents:
+      "the teacher's per-frame detections (TimescaleDB hypertable, wall-clock ts, ~1 h chunks). No student, board or door rows exist",
     policy:
       "compress after 1 h (static post-write), drop after 2 days; only needed for cheap /rederive",
   },
   {
     tier: "Overlay",
     contents:
-      "per-track RDP centre polyline (eps 0.005) + bbox keyframes every 2 s, in tracks.meta",
+      "her RDP centre polyline (eps 0.005) + bbox keyframes every 2 s, in tracks.meta",
     policy: "permanent; ~2% of raw; serves playback after hot rows age out",
   },
   {
     tier: "Aggregate",
-    contents: "events, track summaries, video_analytics (three teacher KPIs)",
+    contents: "events, track summary, video_analytics (three teacher KPIs), zone polygons",
     policy: "permanent; negligible size; everything the dashboard reads",
   },
   {
@@ -266,24 +227,24 @@ const STORAGE: { tier: string; contents: string; policy: string }[] = [
 
 const BOUNDARIES: [string, string][] = [
   [
-    "Time-on-task via interval sampling; in-seat vs out-of-seat; presence / head-count",
+    "Teacher circulation, dwell spread, image-plane coverage, time at the board",
     "Student engagement / attention / focus / motivation as a validated construct or mental state (restricted in EU education under AI Act Art. 5(1)(f))",
   ],
   [
-    "Gross movement, teacher circulation, dwell spread, image-plane coverage",
+    "Her entries and exits, counted at a configured door zone",
     "Emotion / affect / mood from face or body (no validated mapping; Barrett et al. 2019)",
   ],
   [
-    "Standing vs seated posture with detector confidence attached",
+    "Board-interaction moments (pointing, writing) as detected events",
     "Head/body orientation as gaze or attention (orientation-toward-board proxy only)",
   ],
   [
-    "Detection/tracking accuracy (mAP, HOTA, quality tiers)",
+    "Detection accuracy against per-frame ground truth (coverage, purity, quality tiers)",
     "Demographic fairness for per-individual scoring (no subgroup validation)",
   ],
   [
-    "Aggregate, zone-level, teacher-facing reflection; ephemeral within-session re-ID",
-    "Per-student attendance register, longitudinal per-child profile, or persisted appearance biometric",
+    "Aggregate, zone-level, teacher-facing reflection",
+    "Anything about a student: none is detected, stored, or drawn, so there is no per-student register or profile to build",
   ],
   [
     "Proximity / dwell in metres AFTER a one-time camera homography, with error bars",
@@ -295,7 +256,7 @@ const STACK: [string, string][] = [
   ["Frontend", "Vite, TanStack Router + Query, shadcn, Tailwind"],
   ["API", "Bun, Hono, oRPC, Drizzle"],
   ["Queue", "BullMQ on Redis"],
-  ["ML service", "FastAPI, Ultralytics YOLO26-pose, BoT-SORT, CLIP, YOLOE-26-seg, ffmpeg"],
+  ["ML service", "FastAPI, RF-DETR (fine-tuned), PyTorch, ffmpeg"],
   ["Store", "TimescaleDB (hypertable + continuous aggregates + compression/retention)"],
   ["Media", "Local disk or MinIO / S3 / R2 for video + thumbnail blobs (Bun native S3 client)"],
 ];

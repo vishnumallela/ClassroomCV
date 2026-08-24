@@ -1,7 +1,15 @@
-# CI/CD for the GPU worker: build the ml-service image, push to GHCR, then
-# bounce the RunPod pod so its next start pulls :latest. The pod is ON-DEMAND
-# (not serverless): stop/start recreates the container from the image while
-# the volume (model weight + TensorRT engine cache) survives.
+# CI/CD for the GPU worker: build the ml-service image and push it to GHCR.
+#
+# TAGGING, and why it is conditional. `:latest` is what the production pod pulls
+# on every stop/start, so only main may write it — a branch build that moved
+# `:latest` would silently swap production to unreviewed code the next time the
+# pod bounced. Branches therefore publish under their own sanitized name
+# (feat/rfdetr-pipeline -> :feat-rfdetr-pipeline), which is a complete,
+# runnable image you can point a test pod at without touching the one main
+# publishes. Every build also gets an immutable :<sha> tag.
+#
+# The pod bounce is likewise main-only: a branch build must never restart the
+# production worker.
 #
 # Required repo secrets for the deploy job (build+push works without them):
 #   RUNPOD_API_KEY  — RunPod API key with pod control
@@ -10,7 +18,9 @@ name: deploy-ml-runpod
 
 on:
   push:
-    branches: [main]
+    branches:
+      - main
+      - "feat/**"
     paths:
       - "services/ml-service/**"
       - ".github/workflows/deploy-ml-runpod.yml"
@@ -25,6 +35,8 @@ jobs:
     runs-on: ubuntu-latest
     outputs:
       image: ${{ steps.meta.outputs.image }}
+      tag: ${{ steps.meta.outputs.tag }}
+      ref: ${{ steps.meta.outputs.ref }}
     steps:
       - uses: actions/checkout@v4
       - uses: docker/setup-buildx-action@v3
@@ -34,22 +46,43 @@ jobs:
           username: ${{ github.actor }}
           password: ${{ secrets.GITHUB_TOKEN }}
       - id: meta
-        run: echo "image=ghcr.io/${GITHUB_REPOSITORY,,}/ml-service" >> "$GITHUB_OUTPUT"
+        run: |
+          image="ghcr.io/${GITHUB_REPOSITORY,,}/ml-service"
+          # Docker tags cannot contain "/", and anything outside [A-Za-z0-9._-]
+          # is unsafe in a tag, so the branch name is sanitized rather than
+          # trusted.
+          branch="${GITHUB_REF_NAME}"
+          tag="$(printf '%s' "$branch" | tr -c 'A-Za-z0-9._-' '-' | sed 's/^-*//;s/-*$//')"
+          if [ "$branch" = "main" ]; then tag=latest; fi
+          {
+            echo "image=$image"
+            echo "tag=$tag"
+            echo "ref=$image:$tag"
+          } >> "$GITHUB_OUTPUT"
+          echo "publishing $image:$tag (branch $branch)"
       - uses: docker/build-push-action@v6
         with:
           context: services/ml-service
           push: true
           tags: |
-            ${{ steps.meta.outputs.image }}:latest
+            ${{ steps.meta.outputs.ref }}
             ${{ steps.meta.outputs.image }}:${{ github.sha }}
           cache-from: type=gha
           cache-to: type=gha,mode=max
+      - name: Summary
+        run: |
+          echo "### ml-service image published" >> "$GITHUB_STEP_SUMMARY"
+          echo '```' >> "$GITHUB_STEP_SUMMARY"
+          echo "${{ steps.meta.outputs.ref }}" >> "$GITHUB_STEP_SUMMARY"
+          echo "${{ steps.meta.outputs.image }}:${{ github.sha }}" >> "$GITHUB_STEP_SUMMARY"
+          echo '```' >> "$GITHUB_STEP_SUMMARY"
 
   restart-pod:
     needs: build-push
     runs-on: ubuntu-latest
-    # Skips cleanly when the RunPod secrets are not configured.
-    if: ${{ vars.RUNPOD_DEPLOY_ENABLED == 'true' }}
+    # main only: a branch build publishes an image but must never bounce the
+    # production pod. Also skips cleanly when the RunPod secrets are absent.
+    if: ${{ github.ref_name == 'main' && vars.RUNPOD_DEPLOY_ENABLED == 'true' }}
     steps:
       - name: Stop pod
         run: |

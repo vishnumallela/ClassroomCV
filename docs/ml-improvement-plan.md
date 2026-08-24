@@ -1,5 +1,13 @@
 # ML Pipeline Improvement Plan
 
+> [!IMPORTANT]
+> **Superseded.** This document describes the YOLO-pose + appearance-merge
+> pipeline that a fine-tuned RF-DETR replaced. It is kept because its measured
+> results and negative findings are the reasoning behind the current design —
+> in particular *why* the identity stack it describes could be deleted rather
+> than fixed. For the pipeline that actually runs, see
+> [docs/rfdetr-pipeline.md](rfdetr-pipeline.md).
+
 Scope: services/ml-service (detector.py, merge.py, roles.py, events.py, jobs.py, db.py, config.py) plus the TimescaleDB schema owned by apps/api-service/drizzle. Ultralytics pinned at 8.4.89; all cited line numbers verified against the installed venv.
 
 **Verified demo baseline** (68 min, 2560x1440 CCTV, ~30 uniformed students, 1 walking teacher): `teacher_present_ms=161800`, `teacher_board_ms=41200`, `entries=4`, `exits=4`, `max_students=30`, `avg_students=25.5`, 42 merged identities from ~31k detections, 156 raw BoT-SORT tracks. Every change below must be re-verified against these numbers, which is why the measurement harness (section 5) lands first.

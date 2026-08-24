@@ -30,4 +30,9 @@ jobs:
           enable-cache: true
           cache-dependency-glob: services/ml-service/uv.lock
       - run: uv sync --frozen
+      # tests/ covers the pipeline's decision rules (teacher continuity, zone
+      # gating, KPI heuristics) as pure functions, so it runs here in seconds
+      # without a GPU or a checkpoint. The accuracy harness (eval/run_eval.py)
+      # needs the real model and a real lesson and is a before-you-ship pass —
+      # see docs/rfdetr-pipeline.md.
       - run: uv run pytest tests/ -q

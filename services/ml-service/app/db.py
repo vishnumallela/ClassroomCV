@@ -5,12 +5,16 @@
   transaction so the swap is atomic: a mid-write failure rolls back to the
   previous full set, and concurrent readers (/rederive) see either the old
   complete rows or the new complete rows, never a partial prefix. bbox/meta
-  are passed as JSON strings (asyncpg encodes str for jsonb). track_no is the POST-merge
-  identity number; we also stash raw_track_id inside meta so /rederive can
-  reconstruct raw id lists without re-running YOLO.
+  are passed as JSON strings (asyncpg encodes str for jsonb).
 - fetch_detections: read rows back as Detection dataclasses for /rederive.
 - fetch_video_info: best-effort read of the dashboard's videos row (duration
   etc.) for the /rederive response; returns None when unavailable.
+
+ONLY THE TEACHER IS STORED. Every persisted row is one of her detections, so
+"students are never displayed" is a property of the data rather than of the
+renderer — there is no student box in the database to leak into an overlay by
+mistake. The board and door live in `zones` (one polygon each, not one row per
+frame) and their derived numbers in `video_analytics`, so nothing is lost.
 """
 
 from __future__ import annotations
@@ -21,7 +25,7 @@ from typing import Optional
 import asyncpg
 
 from app.config import get_settings
-from app.models import Detection
+from app.models import CLASS_TEACHER, Detection
 
 COPY_COLUMNS = ["video_ts_ms", "video_id", "track_no", "bbox", "confidence", "meta"]
 COPY_BATCH_SIZE = 5_000
@@ -59,8 +63,6 @@ async def replace_detections(
     dsn: Optional[str] = None,
     batch_size: int = COPY_BATCH_SIZE,
     run_tokens: Optional[list[str]] = None,
-    track_hists: Optional[dict[int, list[float]]] = None,
-    track_embeds: Optional[dict[int, list[float]]] = None,
 ) -> int:
     """Delete prior detection_events for video_id, COPY the new ones. Returns row count.
 
@@ -86,36 +88,20 @@ async def replace_detections(
     """
     conn = await _connect(dsn)
     try:
-        # Appearance persistence: the median torso histogram and CLIP embed of
-        # each raw track ride in the meta of that track's FIRST row (one
-        # ~960-float + one 512-float payload per raw track, not per
-        # detection), so /rederive can merge with the same appearance evidence
-        # /analyze had instead of degrading to spatial-only scoring.
-        hist_pending = dict(track_hists) if track_hists else {}
-        embed_pending = dict(track_embeds) if track_embeds else {}
-        records = []
-        for d in detections:
-            meta: dict = {
-                "standing": bool(d.standing),
-                "back_to_camera": bool(d.back_to_camera),
-                "raw_track_id": int(d.raw_track_id),
-            }
-            hist = hist_pending.pop(int(d.raw_track_id), None)
-            if hist is not None:
-                meta["hist"] = hist
-            embed = embed_pending.pop(int(d.raw_track_id), None)
-            if embed is not None:
-                meta["embed"] = embed
-            records.append(
-                (
-                    d.video_ts_ms,
-                    video_id,
-                    d.track_no,
-                    json.dumps(d.bbox),
-                    float(d.conf),
-                    json.dumps(meta),
-                )
+        # Only rows the teacher track claimed: track_no is NOT NULL in the
+        # schema, and an unclaimed detection is by definition not hers.
+        records = [
+            (
+                d.video_ts_ms,
+                video_id,
+                d.track_no,
+                json.dumps(d.bbox),
+                float(d.conf),
+                json.dumps({"cls": int(d.cls)}),
             )
+            for d in detections
+            if d.track_no is not None
+        ]
         async with conn.transaction():
             row = await conn.fetchrow(
                 "SELECT workflow_run_id FROM videos WHERE id = $1 FOR SHARE",
@@ -150,7 +136,11 @@ async def replace_detections(
 async def fetch_detections(
     video_id: str, dsn: Optional[str] = None
 ) -> list[Detection]:
-    """Read stored detections (track_no is already the merged identity)."""
+    """Read the teacher's stored detections back, for /rederive.
+
+    Rows written before this schema carry no 'cls' in meta; they are read as
+    teacher detections, which is what they were — the only rows ever stored.
+    """
     conn = await _connect(dsn)
     try:
         rows = await conn.fetch(
@@ -170,59 +160,13 @@ async def fetch_detections(
         detections.append(
             Detection(
                 video_ts_ms=int(r["video_ts_ms"]),
-                raw_track_id=int(meta.get("raw_track_id", r["track_no"])),
+                cls=int(meta.get("cls", CLASS_TEACHER)),
                 bbox=bbox,
                 conf=float(r["confidence"]),
-                standing=bool(meta.get("standing", False)),
-                back_to_camera=bool(meta.get("back_to_camera", False)),
                 track_no=int(r["track_no"]),
             )
         )
     return detections
-
-
-async def fetch_track_hists(
-    video_id: str, dsn: Optional[str] = None
-) -> dict[int, list[float]]:
-    """Median torso histogram per raw_track_id, from rows that carry one."""
-    conn = await _connect(dsn)
-    try:
-        rows = await conn.fetch(
-            "SELECT meta FROM detection_events "
-            "WHERE video_id = $1 AND meta ? 'hist'",
-            video_id,
-        )
-    finally:
-        await conn.close()
-    out: dict[int, list[float]] = {}
-    for r in rows:
-        meta = r["meta"]
-        meta = json.loads(meta) if isinstance(meta, str) else (meta or {})
-        if "hist" in meta and "raw_track_id" in meta:
-            out[int(meta["raw_track_id"])] = [float(v) for v in meta["hist"]]
-    return out
-
-
-async def fetch_track_embeds(
-    video_id: str, dsn: Optional[str] = None
-) -> dict[int, list[float]]:
-    """Median CLIP embedding per raw_track_id, from rows that carry one."""
-    conn = await _connect(dsn)
-    try:
-        rows = await conn.fetch(
-            "SELECT meta FROM detection_events "
-            "WHERE video_id = $1 AND meta ? 'embed'",
-            video_id,
-        )
-    finally:
-        await conn.close()
-    out: dict[int, list[float]] = {}
-    for r in rows:
-        meta = r["meta"]
-        meta = json.loads(meta) if isinstance(meta, str) else (meta or {})
-        if "embed" in meta and "raw_track_id" in meta:
-            out[int(meta["raw_track_id"])] = [float(v) for v in meta["embed"]]
-    return out
 
 
 async def fetch_video_info(

@@ -2,25 +2,40 @@
 name = "ml-service"
 version = "0.1.0"
 requires-python = ">=3.12"
+# One detector, and the little it needs around it. The pipeline this replaced
+# also carried ultralytics (YOLO + BoT-SORT), openai-clip (re-identification
+# and zero-shot age), lap (the tracker's assignment solver), onnxruntime (a
+# person re-ID encoder) and httpx (a Gemini vision-model vote). Every one of
+# those existed to work out which detected person was the teacher, which the
+# fine-tuned RF-DETR now answers directly.
 dependencies = [
   "asyncpg>=0.31.0",
   "fastapi>=0.139.0",
-  "httpx>=0.28.1",
-  "lap>=0.5.13",
   "numpy>=2.5.1",
-  "onnxruntime>=1.28.0",
-  "openai-clip>=1.0.1",
+  # cv2 used to arrive transitively via ultralytics; it decodes every frame, so
+  # it is a direct dependency now that ultralytics is gone. Headless: the
+  # service never opens a window, and the GUI build drags in system Qt.
+  "opencv-python-headless>=4.11.0",
   "pydantic>=2.13.4",
   "pydantic-settings>=2.14.2",
-  "python-multipart>=0.0.32",
+  "rfdetr>=1.9.3",
+  # Imported directly for device resolution (cuda/mps/cpu), so pinned here
+  # rather than left to rfdetr's transitive pull.
   "torch>=2.12.1",
-  "torchvision>=0.27.1",
-  "ultralytics>=8.4.89",
   "uvicorn[standard]>=0.50.0",
 ]
 
+[project.optional-dependencies]
+# CUDA-only, and heavy. Installed on the GPU pod when RFDETR_TENSORRT=true:
+#   uv sync --extra tensorrt
+# Deliberately NOT a base dependency — it does not install on a Mac, and CI has
+# no GPU, so baking it in would break both for a pod-only optimisation.
+tensorrt = ["rfdetr[tensorrt]>=1.9.3"]
+
 [dependency-groups]
-dev = ["pytest>=9.1.1", "pytest-asyncio>=1.4.0"]
+# httpx is starlette's TestClient transport — test-only since the Gemini vote
+# went away.
+dev = ["httpx>=0.28.1", "pytest>=9.1.1", "pytest-asyncio>=1.4.0"]
 
 [tool.pytest.ini_options]
 testpaths = ["tests"]

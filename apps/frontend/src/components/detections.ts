@@ -4,23 +4,10 @@ import { orpcClient } from "@/lib/orpc";
 export type DetectionData = RouterOutputs["videos"]["detections"];
 export type DetectionFrame = DetectionData["frames"][number];
 
-export const ROLE_COLORS = {
-  teacher: "#10b981",
-  student: "#60a5fa",
-  unknown: "#a1a1aa",
-} as const;
-
-export function colorFor(role: string): string {
-  if (role === "teacher") return ROLE_COLORS.teacher;
-  if (role === "student") return ROLE_COLORS.student;
-  return ROLE_COLORS.unknown;
-}
-
-export function roleLabel(role: string): string {
-  if (role === "teacher") return "Teacher";
-  if (role === "student") return "Student";
-  return "Person";
-}
+// The teacher is the only thing detected, stored and drawn. Students are never
+// detected by the model, never written to the database, and never rendered;
+// the board and door are zones rather than per-frame boxes.
+export const TEACHER_COLOR = "#10b981";
 
 export function fetchDetections(videoId: string, fps = 5): Promise<DetectionData> {
   return orpcClient.videos.detections({ id: videoId, fps });
@@ -42,12 +29,3 @@ export function findFrameIndex(frames: DetectionFrame[], t: number): number {
   return ans;
 }
 
-export function countRoles(roles: Record<string, string>) {
-  let teacher = 0;
-  let student = 0;
-  for (const role of Object.values(roles)) {
-    if (role === "teacher") teacher++;
-    else if (role === "student") student++;
-  }
-  return { teacher, student };
-}

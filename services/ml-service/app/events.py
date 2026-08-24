@@ -15,7 +15,6 @@ from __future__ import annotations
 
 from typing import Optional
 
-from app import quality
 from app.heuristics import (
     board_condition,
     board_intervals_from_samples,
@@ -98,18 +97,6 @@ def derive(
     # --- KPI 3: teacher heatmap -------------------------------------------- #
     heatmap = teacher_heatmap(teacher_dets)
 
-    # Additive, never mutates a derived number: an honest confidence report so
-    # the dashboard can say how much each figure can be trusted.
-    teacher_conf = (
-        roles_map.get(teacher_no, ("", None))[1] if teacher_no is not None else None
-    )
-    data_quality = quality.assess(
-        dets_by_track,
-        roles_map,
-        duration_ms,
-        teacher_confidence=teacher_conf,
-    )
-
     events.sort(key=lambda e: (e["video_ts_ms"], e["kind"]))
 
     analytics = {
@@ -121,6 +108,8 @@ def derive(
         "board_intervals": board_iv,
         "entry_exit": entry_exit,
         "heatmap": heatmap,
-        "data_quality": data_quality,
+        # Attached by the caller (jobs.derive_result), which holds the teacher
+        # track's own coverage/confidence signals.
+        "data_quality": None,
     }
     return events, analytics

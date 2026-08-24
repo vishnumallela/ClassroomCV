@@ -1,13 +1,10 @@
 import type * as React from "react";
 import { useCallback, useEffect, useRef, useState } from "react";
 import {
-  colorFor,
-  countRoles,
   type DetectionData,
   fetchDetections,
   findFrameIndex,
-  ROLE_COLORS,
-  roleLabel,
+  TEACHER_COLOR,
 } from "@/components/detections";
 import { cn } from "@/lib/utils";
 
@@ -151,21 +148,22 @@ export function VideoPlayer({
     const frameIdx = findFrameIndex(data.frames, video.currentTime * 1000);
     if (frameIdx < 0) return;
 
+    // Teacher boxes only. Nothing else is stored, but the guard stays so a
+    // legacy row from the old multi-person pipeline can never be drawn.
     for (const [trackNo, x, y, w, h] of data.frames[frameIdx]!.boxes) {
-      const role = data.roles[String(trackNo)] ?? "unknown";
-      const isTeacher = role === "teacher";
-      const color = colorFor(role);
+      if ((data.roles[String(trackNo)] ?? "unknown") !== "teacher") continue;
+      const color = TEACHER_COLOR;
       const px = ox + x * dw;
       const py = oy + y * dh;
       const pw = w * dw;
       const ph = h * dh;
 
-      ctx.globalAlpha = role === "unknown" ? 0.7 : 1;
-      ctx.lineWidth = isTeacher ? 3 : 1.75;
+      ctx.globalAlpha = 1;
+      ctx.lineWidth = 3;
       ctx.strokeStyle = color;
       ctx.strokeRect(px, py, pw, ph);
 
-      const label = `${roleLabel(role)} ${trackNo}`;
+      const label = `Teacher ${trackNo}`;
       const padX = 5;
       const labelH = 15;
       const tw = ctx.measureText(label).width + padX * 2;
@@ -230,8 +228,6 @@ export function VideoPlayer({
     };
   }, [draw, videoRef]);
 
-  const counts = data ? countRoles(data.roles) : null;
-
   return (
     <div className="space-y-3">
       <div className="hud-corners relative overflow-hidden rounded-xl border border-border bg-black">
@@ -273,24 +269,15 @@ export function VideoPlayer({
               </button>
             ))}
           </div>
-          {counts && (
-            <div className="flex items-center gap-4 text-xs text-muted-foreground">
-              <span className="flex items-center gap-1.5">
-                <span
-                  className="size-2.5 rounded-full"
-                  style={{ backgroundColor: ROLE_COLORS.teacher }}
-                />
-                {counts.teacher} teacher
-              </span>
-              <span className="flex items-center gap-1.5">
-                <span
-                  className="size-2.5 rounded-full"
-                  style={{ backgroundColor: ROLE_COLORS.student }}
-                />
-                {counts.student} students
-              </span>
-            </div>
-          )}
+          <div className="flex items-center gap-4 text-xs text-muted-foreground">
+            <span className="flex items-center gap-1.5">
+              <span
+                className="size-2.5 rounded-full"
+                style={{ backgroundColor: TEACHER_COLOR }}
+              />
+              Teacher only — students are never detected
+            </span>
+          </div>
         </div>
       )}
       {loadState === "empty" && (

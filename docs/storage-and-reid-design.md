@@ -1,5 +1,13 @@
 # Luminary — Storage, Re-ID, and Zone-Detection System Design
 
+> [!IMPORTANT]
+> **Superseded.** This document describes the YOLO-pose + appearance-merge
+> pipeline that a fine-tuned RF-DETR replaced. It is kept because its measured
+> results and negative findings are the reasoning behind the current design —
+> in particular *why* the identity stack it describes could be deleted rather
+> than fixed. For the pipeline that actually runs, see
+> [docs/rfdetr-pipeline.md](rfdetr-pipeline.md).
+
 **Status:** proposed · **Owner:** lead architect · **Scope:** `services/ml-service` + TimescaleDB (`apps/api-service` schema)
 
 This document synthesizes three system-design research lenses (data infrastructure,

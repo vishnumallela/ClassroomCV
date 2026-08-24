@@ -6,14 +6,12 @@ from app.config import get_settings
 def test_settings_load():
     s = get_settings()
     assert s.database_url.startswith("postgres://")
-    # device + model are now device-aware ('auto'); assert the RESOLVED values.
     from app import detector
 
     assert detector.get_device() in ("mps", "cpu", "cuda")
-    resolved = detector.resolve_model_name()
-    assert resolved.endswith((".pt", ".engine"))
-    # the 'auto' default is a YOLO pose weight
-    assert "pose" in resolved
+    # Thresholds must sit in the plateau the sweep measured, not at an edge.
+    assert 0.2 <= s.teacher_conf <= 0.6
+    assert 0.0 < s.zone_conf <= 1.0
 
 
 def test_app_importable():
@@ -22,20 +20,14 @@ def test_app_importable():
     assert app.title == "Classroom Surveillance ML Service"
 
 
-def test_lapjv_shim_matches_and_respects_cost_limit():
-    """The 'lap' shim used for BoT-SORT matching assigns like lapjv."""
-    import numpy as np
+def test_class_ids_are_the_documented_order():
+    """The class ids are the whole contract between the model and every KPI.
 
-    from app.detector import _lapjv_shim
+    detector._check_class_order enforces this against a real checkpoint at load
+    time; this catches an accidental edit of the constants themselves.
+    """
+    from app import models
 
-    cost = np.array([[0.1, 0.9, 0.9], [0.9, 0.2, 0.9]])
-    total, x, y = _lapjv_shim(cost, extend_cost=True, cost_limit=0.5)
-    assert x.tolist() == [0, 1]  # row assignments
-    assert y.tolist() == [0, 1, -1]  # column 2 unassigned
-    assert abs(total - 0.3) < 1e-9
-
-    # everything above the cost limit stays unmatched
-    total, x, y = _lapjv_shim(cost, extend_cost=True, cost_limit=0.05)
-    assert x.tolist() == [-1, -1]
-    assert y.tolist() == [-1, -1, -1]
-    assert total == 0.0
+    assert (models.CLASS_DOOR, models.CLASS_SCREEN, models.CLASS_TEACHER) == (0, 1, 2)
+    assert (models.CLASS_POINTING, models.CLASS_WRITING) == (3, 4)
+    assert models.CLASS_NAMES[models.CLASS_TEACHER] == "teacher"

@@ -15,34 +15,50 @@ from pydantic import BaseModel, Field
 
 
 # --------------------------------------------------------------------------- #
+# Detector classes
+# --------------------------------------------------------------------------- #
+
+# The five classes the RF-DETR checkpoint was fine-tuned on, in its own label
+# order. They live here rather than in app/detector.py so the light consumers
+# (db, tests) can name a class without importing torch. detector.py owns the
+# load-time check that a checkpoint really declares them in this order.
+CLASS_DOOR = 0
+CLASS_SCREEN = 1
+CLASS_TEACHER = 2
+CLASS_POINTING = 3
+CLASS_WRITING = 4
+CLASS_NAMES: dict[int, str] = {
+    CLASS_DOOR: "door",
+    CLASS_SCREEN: "screen",
+    CLASS_TEACHER: "teacher",
+    CLASS_POINTING: "pointing",
+    CLASS_WRITING: "writing",
+}
+
+
+# --------------------------------------------------------------------------- #
 # In-memory dataclasses
 # --------------------------------------------------------------------------- #
 
 
 @dataclass
 class Detection:
-    """One person detection on one sampled frame."""
+    """One RF-DETR detection on one sampled frame.
+
+    `cls` is the detector's class id (app/detector.py CLASS_*), which is what
+    made every other field on this dataclass unnecessary: posture, occlusion
+    and body proportions existed only to work out which detected person was the
+    adult, and the model now says so directly.
+
+    `track_no` is set only on the teacher's accepted detections (see
+    app/teacher.py); everything else carries None.
+    """
 
     video_ts_ms: int
-    raw_track_id: int
+    cls: int
     bbox: dict  # {x, y, w, h} normalized 0-1, top-left based
     conf: float
-    standing: bool
-    back_to_camera: bool
-    track_no: Optional[int] = None  # merged identity, assigned post-merge
-    # 0 = fully visible, 1 = entirely hidden. Combines how much of the box
-    # nearer-to-camera people cover with how much of it the frame edge cuts
-    # off. A crowded classroom occludes constantly, and evidence read off an
-    # occluded box (appearance crops, bbox height, posture) is evidence about
-    # someone else — every consumer weights or skips samples by this.
-    occlusion: float = 0.0
-    # Scale-free body proportions from the pose keypoints, or None when the
-    # keypoints are too weak to measure: {"head", "leg", "vis"}. Ratios rather
-    # than sizes on purpose — an adult and a child differ in PROPORTION
-    # (children carry proportionally larger heads and shorter legs) at every
-    # distance from the camera, while raw height only separates them within
-    # one row of the room. See app/adult.py.
-    body: Optional[dict] = None
+    track_no: Optional[int] = None
 
 
 @dataclass
@@ -113,7 +129,8 @@ class AnalyzeAccepted(BaseModel):
 class JobStatusOut(BaseModel):
     status: Literal["queued", "running", "done", "failed"]
     progress: float
-    stage: Literal["detecting", "merging", "deriving"]
+    # No 'merging' stage any more: there are no identity fragments to merge.
+    stage: Literal["detecting", "deriving"]
     error: Optional[str] = None
 
 
@@ -136,15 +153,23 @@ class TrackOverlayOut(BaseModel):
 
 
 class TrackMetaOut(BaseModel):
-    standing_ratio: float
+    """How far she ranged, how much of the lesson she was found in, and the
+    playback overlay. `coverage` and `mean_conf` are the two inputs behind
+    role_confidence, exposed so the dashboard can explain the tier it shows."""
+
     movement: float
-    raw_track_ids: list[int]
+    detections: int
+    coverage: float
+    mean_conf: float
     overlay: Optional[TrackOverlayOut] = None
 
 
 class TrackOut(BaseModel):
+    # Only the teacher is tracked and only she is stored, so this is the one
+    # role a track can carry. Students are never detected, never persisted and
+    # never drawn.
     track_no: int
-    role: Literal["teacher", "student", "unknown"]
+    role: Literal["teacher"]
     role_confidence: Optional[float]
     first_ms: int
     last_ms: int
@@ -177,25 +202,24 @@ class HeatmapOut(BaseModel):
 
 class QualityTiers(BaseModel):
     overall: Literal["high", "medium", "low"]
-    identity: Literal["high", "medium", "low"]
     coverage: Literal["high", "medium", "low"]
+    continuity: Literal["high", "medium", "low"]
     teacher: Literal["high", "medium", "low"]
 
 
 class DataQualityOut(BaseModel):
     """Additive per-run trust report (app/quality.py). Annotates, never alters,
-    the derived numbers: how well the camera covered the lesson, how much the
-    tracker fragmented, and how solid the teacher identification is — the
-    trust inputs behind the three teacher KPIs."""
+    the derived numbers: how much of the lesson the teacher was actually found
+    in, how broken her timeline is, and how sure the detector was — the trust
+    inputs behind the three teacher KPIs."""
 
     detections: int
     frames: int
-    identities: int
-    raw_tracks: int
-    fragmentation: float
+    sampled_frames: int
     coverage: float
-    occupied_buckets: int
-    span_buckets: int
+    mean_confidence: float
+    breaks: int
+    longest_gap_ms: int
     confidence: QualityTiers
     notes: list[str]
 

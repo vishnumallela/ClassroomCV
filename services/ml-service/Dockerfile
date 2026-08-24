@@ -8,11 +8,7 @@
 # that, would have re-downloaded ~2.9 GB of torch + CUDA 13 wheels on top of a
 # CUDA 12.6 image. Matching the base to the lock is what makes
 # --no-emit-package torch honest: torch/torchvision/triton/nvidia-* are then
-# already satisfied and only ~50 packages are installed.
-#
-# TensorRT engines are NOT built here — they are per-GPU-model artifacts, so
-# the service exports one on the pod at first load (TENSORRT_EXPORT=true) and
-# caches it on the volume.
+# already satisfied and only a short tail of packages is installed.
 FROM pytorch/pytorch:2.12.1-cuda13.0-cudnn9-runtime
 
 # ffmpeg feeds cv2's decoder; libgl/libglib are opencv runtime deps.
@@ -39,22 +35,24 @@ RUN uv export --frozen --no-hashes --no-emit-package torch --no-emit-package tor
     && rm -rf /root/.cache
 
 COPY app ./app
-COPY scripts ./scripts
 
 # Fail the BUILD, not the first request, if the wiring is wrong: import the app
 # and the heavy third-party stack that only loads lazily at runtime.
-RUN python -c "import cv2, torch, ultralytics, clip; from app.main import app; print('import OK')"
+RUN python -c "import cv2, torch, rfdetr; from app.main import app; print('import OK')"
 
-# Weights: MODEL_NAME=auto resolves to yolo26x-pose.pt on cuda; ultralytics
-# downloads it on first use into WEIGHTS_DIR. Mount the pod volume at
-# /workspace (NOT at the workdir — that would shadow the app code) so the
-# weight AND the exported .engine survive pod stop/start.
+# The fine-tuned checkpoint is NOT baked into the image — it is a 260 MB
+# artifact that changes on its own retraining cadence. Mount the pod volume at
+# /workspace (NOT at the workdir — that would shadow the app code) and put the
+# checkpoint on it, so it survives pod stop/start and can be swapped without a
+# rebuild.
+# TensorRT is NOT installed here: it is a heavyweight CUDA-only stack for an
+# optimisation that must be measured on the target GPU first (tools/trt_parity.py).
+# To enable it on a pod: `uv sync --extra tensorrt` and set RFDETR_TENSORRT=true.
 ENV DEVICE=cuda \
     REQUIRE_DEVICE=cuda \
-    TENSORRT_EXPORT=true \
-    IMGSZ=1536 \
-    MODEL_NAME=auto \
-    WEIGHTS_DIR=/workspace/weights
+    RFDETR_WEIGHTS=/workspace/weights/rfdetr-medium.pth \
+    RFDETR_BATCH=16 \
+    RFDETR_TENSORRT=false
 
 EXPOSE 8000
 CMD ["uvicorn", "app.main:app", "--host", "0.0.0.0", "--port", "8000"]

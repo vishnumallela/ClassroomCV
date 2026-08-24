@@ -1,5 +1,13 @@
 # Luminary — Prior Art & Best Practices
 
+> [!IMPORTANT]
+> **Superseded.** This document describes the YOLO-pose + appearance-merge
+> pipeline that a fine-tuned RF-DETR replaced. It is kept because its measured
+> results and negative findings are the reasoning behind the current design —
+> in particular *why* the identity stack it describes could be deleted rather
+> than fixed. For the pipeline that actually runs, see
+> [docs/rfdetr-pipeline.md](rfdetr-pipeline.md).
+
 **Status:** committable engineering + product guidance
 **Scope:** maps every recommendation from four prior-art research lenses onto our exact stack
 **Our stack (as of this doc):** static wide-angle CCTV → YOLO26-pose (17 kpts, NVIDIA GPU) → BoT-SORT (`gmc none`, `with_reid false`, `track_buffer` per `trackers/classroom_botsort.yaml`) → identity merge via CLIP ViT-B/32 median embeddings + HSV torso histograms + hard seat-anchor spatial veto + **greedy heap merge** (`merge.py`) → rule-based teacher classification from four hand-weighted signals (standing 0.30 / movement 0.25 / presence 0.25 / board 0.20, `roles.py`) with an outlier-margin rule → SAM2 + YOLO-World zone detection → TimescaleDB event store → additive data-quality confidence report (`quality.py`).

@@ -11,17 +11,15 @@ transaction committed or rolled back.
 import pytest
 
 from app import db
-from app.models import Detection
+from app.models import CLASS_TEACHER, Detection
 
 
 def _det(ts: int) -> Detection:
     return Detection(
         video_ts_ms=ts,
-        raw_track_id=1,
+        cls=CLASS_TEACHER,
         bbox={"x": 0.1, "y": 0.1, "w": 0.1, "h": 0.2},
         conf=0.9,
-        standing=False,
-        back_to_camera=False,
         track_no=1,
     )
 

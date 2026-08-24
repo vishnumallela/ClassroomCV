@@ -11,19 +11,20 @@ export type Heatmap = { grid_w: number; grid_h: number; teacher: number[] };
 const EMPTY_HEATMAP: Heatmap = { grid_w: 0, grid_h: 0, teacher: [] };
 export type QualityTier = "high" | "medium" | "low";
 // Additive per-run trust report from the ML service (services/ml-service/app/quality.py).
+// Rows written before the RF-DETR pipeline carry the older identity/fragmentation
+// shape; the dashboard renders whichever fields are present.
 export type DataQuality = {
   detections: number;
   frames: number;
-  identities: number;
-  raw_tracks: number;
-  fragmentation: number;
+  sampled_frames: number;
   coverage: number;
-  occupied_buckets: number;
-  span_buckets: number;
+  mean_confidence: number;
+  breaks: number;
+  longest_gap_ms: number;
   confidence: {
     overall: QualityTier;
-    identity: QualityTier;
     coverage: QualityTier;
+    continuity: QualityTier;
     teacher: QualityTier;
   };
   notes: string[];

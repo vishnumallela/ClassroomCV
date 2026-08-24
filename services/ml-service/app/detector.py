@@ -1,29 +1,30 @@
-"""YOLO pose detection + BoT-SORT tracking over sampled video frames.
+"""RF-DETR detection over sampled video frames — the pipeline's only detector.
 
 Reads the video with cv2.VideoCapture, samples frames at
-stride = max(1, round(native_fps / sample_fps)) and runs
-model.track(..., persist=True, tracker='botsort.yaml', classes=[0]).
+stride = max(1, round(native_fps / sample_fps)), and runs one fine-tuned
+RF-DETR over each batch. The model was trained on this product's own five
+classes:
 
-iter_frames is the frame-source seam (Kafka readiness, plan section 7 K1):
-it owns path validation plus the grab/retrieve/stride loop and yields
-(video_ts_ms, frame); detect_video consumes it, so a future KafkaSource only
-has to reproduce the same (ts_ms, frame) contract.
+    0 door   1 screen   2 teacher   3 pointing   4 writing
 
-Per kept frame, per person we emit a Detection with:
+which is the whole reason this module is a tenth of its former size. The
+pipeline it replaced ran a general person detector, then had to work out WHICH
+of thirty detected bodies was the teacher — by pose, stature, body
+proportions, clothing colour, CLIP appearance, a tracklet DP and a vision-model
+vote. The detector now answers that question directly, so all of it is gone.
+
+iter_frames is the frame-source seam (a future KafkaSource only has to
+reproduce the same (ts_ms, frame) contract); detect_video consumes it.
+
+Per kept frame, per detection we emit a Detection with:
+- cls: one of the five class ids above
 - bbox {x, y, w, h} normalized, top-left based
-- standing: bbox aspect h/w > 1.6 OR hip-above-knee keypoint geometry
-- back_to_camera: nose/eyes keypoints low-confidence while shoulders visible
-and collect up to 10 torso HSV histogram samples plus up to 10 upper-body
-crops per raw track (>= 1 s apart) for the identity merge stage. The crops
-are batch-embedded with CLIP ViT-B/32 AFTER the frame loop (plan M5) so the
-per-frame sampling cadence stays untouched.
+- conf: the model's score
 
-GPU serving (RunPod): device 'auto' resolves cuda > mps > cpu. On cuda the
-model is served as a TensorRT engine when one exists next to the weight (and
-TENSORRT_EXPORT=true builds it once at first load). REQUIRE_DEVICE=cuda makes
-a mis-provisioned pod fail loud instead of silently billing 20x the wall-clock
-on CPU. Engines never fall back to CPU (TensorRT is CUDA-only); .pt weights
-keep the dev-friendly MPS/CPU fallback.
+GPU serving: device 'auto' resolves cuda > mps > cpu, and REQUIRE_DEVICE=cuda
+makes a mis-provisioned pod fail loud instead of silently billing ~20x the
+wall-clock on CPU. Frames are batched (rfdetr_batch) because RF-DETR's predict
+takes a list, which is the main throughput lever on a GPU.
 
 Robustness: effective sample fps is capped at 5; the capture is always
 released; media downloads resume from the last byte written.
@@ -46,204 +47,65 @@ import cv2
 import numpy as np
 
 from app.config import get_settings
-from app.models import Detection, VideoMeta
+from app.models import (
+    CLASS_DOOR,
+    CLASS_NAMES,
+    CLASS_POINTING,
+    CLASS_SCREEN,
+    CLASS_TEACHER,
+    CLASS_WRITING,
+    Detection,
+    VideoMeta,
+)
 
 logger = logging.getLogger(__name__)
 
+__all__ = [
+    "CLASS_DOOR",
+    "CLASS_NAMES",
+    "CLASS_POINTING",
+    "CLASS_SCREEN",
+    "CLASS_TEACHER",
+    "CLASS_WRITING",
+    "detect_video",
+    "get_device",
+    "iter_frames",
+    "model_loaded",
+    "resolve_model_name",
+    "resolve_video_source",
+]
+
 MAX_SAMPLE_FPS = 5.0
 FALLBACK_NATIVE_FPS = 30.0
-MAX_HIST_SAMPLES_PER_TRACK = 10
-HIST_SAMPLE_SPACING_MS = 1_000
-# Appearance crops for re-identification. The upper 60% (head+shoulders+torso)
-# is what CLIP wanted; a purpose-built person re-ID encoder is trained on FULL
-# bodies, so REID_CROP_UPPER_FRAC = 1.0 when one is in use.
-#
-# Why the encoder changed: raw CLIP is at CHANCE for person re-identification
-# (published zero-shot mAP on MSMT17: CLIP-B/32 = 0.10, and scaling to L/14
-# only reaches 0.14), which is exactly what we measured on our own footage —
-# different people sat at cosine 0.82-0.89, leaving no dynamic range to
-# threshold. The ultralytics-native re-ID encoder puts different people at
-# 0.12-0.23 and two views of one person at ~0.64 on the same crops: roughly
-# three times the margin, no new licence, and no new dependency beyond the
-# ONNX runtime.
-CLIP_CROP_UPPER_FRAC = 0.6
-REID_CROP_UPPER_FRAC = 1.0
-# OFF by default, because it MEASURED WORSE THAN CLIP on our own footage —
-# twice, and the second time with every objection to the first run addressed
-# (448 input on uncapped crops, batched, so the encoder was given its best
-# case rather than 224-square thumbnails one at a time).
-#
-# Separation of "two views of her" from "her vs a pupil", measured on clean
-# ground-truth-labelled tracklets:
-#     Khaitan:  CLIP 85.7%  ->  re-ID 58.6%     end-to-end coverage 91.4 -> 37.9%
-#     Demo:     CLIP 72.4%  ->  re-ID 58.1%     end-to-end coverage 76.5 -> 71.0%
-#
-# This is the opposite of the published expectation (raw CLIP scores ~0.10 mAP
-# on MSMT17, i.e. chance, while a purpose-built encoder scores 40-70), and the
-# reason appears to be the domain: MSMT17 crops are upright, street-level,
-# full-body pedestrians, while ours are 40-200 px, top-down, half-occluded and
-# framed on the upper body. A pedestrian metric trained on the former does not
-# transfer to the latter, whereas CLIP's broad semantic features — clothing,
-# texture, the bit of scene around the shoulders — happen to survive it.
-#
-# Kept wired up and one env var away (REID_MODEL=yolo26s-reid.onnx) because
-# the right experiment is still open: carry re-ID, CLIP and colour as three
-# modalities and let the fusion weigh them per video, rather than swapping one
-# for another. See docs/teacher-identification-research.md.
-#
-# Measured with the encoder enabled, against per-frame ground truth on two
-# lessons:
-#     Khaitan (tuned on):  coverage 91.4 -> 78.9, purity 98.0 -> 81.6
-#     Demo    (held out):  coverage 59.9 -> 64.3, purity 80.6 -> 96.9
-# It clearly helps the room it was not tuned against and clearly hurts the one
-# it was. Neither configuration dominates, and the run that produced those
-# numbers ALSO changed the torso histogram, so the two effects are confounded.
-# The honest next experiment is to carry re-ID, CLIP and colour as three
-# separate modalities and let the fusion weigh them, rather than swapping one
-# for another. Until that is measured, the default is the configuration whose
-# numbers we actually verified.
-REID_MODEL_DEFAULT = ""
-# The ONNX graph is fully dynamic in batch AND spatial dims, so the encoder is
-# not stuck at its default 224: identity lives in fine detail (a face at 15 px,
-# a collar, a lanyard) and downscaling a 200 px body to 224 square then feeding
-# it to a 224 network throws that away twice. 448 keeps it.
-REID_IMGSZ = 448
-CLIP_CROP_MAX_SIDE = 224
-CLIP_BATCH_SIZE = 64
-CLIP_MODEL_NAME = "ViT-B/32"
-# Occlusion gate for appearance sampling (see _appearance_sample_ok): a crop
-# where a third of the body is behind someone else already contains more of the
-# occluder than of the subject.
-OCCLUSION_SAMPLE_MAX = 0.35
-# ...relaxed only while a track still has almost no appearance evidence, so a
-# permanently half-hidden back-row pupil is still represented (badly) rather
-# than not at all.
-OCCLUSION_SAMPLE_FALLBACK = 0.65
-OCCLUSION_FALLBACK_UNTIL = 3
-KPT_CONF_LOW = 0.3
-KPT_CONF_VISIBLE = 0.5
-STANDING_ASPECT = 1.6
-# The hip/knee standing fallback needs spatially meaningful keypoints: demand
-# higher keypoint confidence than the general 0.3 gate AND a box at least
-# ~90 px tall on a 1440p frame. Below that the geometry is noise and the
-# aspect-only result is more trustworthy.
-STANDING_KPT_CONF = 0.4
-STANDING_MIN_BOX_H = 90 / 1440
 
-# COCO keypoint indices
-NOSE, L_EYE, R_EYE = 0, 1, 2
-L_SHOULDER, R_SHOULDER = 5, 6
-L_HIP, R_HIP = 11, 12
-L_KNEE, R_KNEE = 13, 14
+# What the training run recorded, in label order. Checked at load so a
+# retrained checkpoint with reordered classes fails loudly instead of quietly
+# reporting the door as the teacher — the class ids in app/models.py are the
+# entire contract between the model and every KPI this product ships.
+EXPECTED_CLASS_NAMES = ["Door", "Screen", "Teacher", "pointing", "writing"]
+
+# Floor for what leaves the detector at all. Per-class thresholds
+# (settings.teacher_conf / zone_conf / action_conf) are applied downstream, so
+# one detection pass can serve every consumer without re-running the model.
+DETECT_FLOOR = 0.15
 
 _model = None
-_model_is_engine = False  # set at load; engines are CUDA-only (no CPU fallback)
-_fallback_cpu = False
-_clip_bundle = None  # (model, preprocess, device), lazy like _model
-_reid_encoder = None
-_reid_failed = False
-
-
-def _lapjv_shim(cost, extend_cost=False, cost_limit=None, return_cost=True):
-    """lap.lapjv-compatible solver built on ultralytics' NumPy linear_sum_assignment.
-
-    The real 'lap' package is a project dependency and is used whenever it is
-    importable; this shim is only a documented fallback (registered by
-    _ensure_lap_shim when "import lap" raises ImportError). It emulates lapjv
-    (same semantics as ultralytics' own use_lap=False branch): solve the
-    assignment, then treat pairs with cost > cost_limit as unassigned.
-    Returns (total_cost, x, y) where x[i] = assigned column or -1,
-    y[j] = assigned row or -1.
-    """
-    from ultralytics.utils.ops import linear_sum_assignment
-
-    cost = np.asarray(cost, dtype=np.float64)
-    n, m = cost.shape
-    x = np.full(n, -1, dtype=int)
-    y = np.full(m, -1, dtype=int)
-    if n == 0 or m == 0:
-        return 0.0, x, y
-
-    limit = None
-    if cost_limit is not None and np.isfinite(cost_limit):
-        limit = float(cost_limit)
-    finite = cost[np.isfinite(cost)]
-    big = (float(finite.max()) if finite.size else 1.0)
-    big = (max(big, limit or 0.0) + 1.0) * 10.0 + 1e6
-
-    size = max(n, m)
-    padded = np.full((size, size), big, dtype=np.float64)
-    padded[:n, :m] = np.where(np.isfinite(cost), cost, big)
-
-    rows, cols = linear_sum_assignment(padded)
-    total = 0.0
-    for r, c in zip(rows, cols):
-        if r < n and c < m and padded[r, c] < big and (limit is None or cost[r, c] <= limit):
-            x[r] = c
-            y[c] = r
-            total += float(cost[r, c])
-    return total, x, y
-
-
-def _ensure_lap_shim() -> None:
-    """Register a minimal 'lap' module ONLY if the real package is unavailable.
-
-    The real 'lap' package is installed as a primary dependency; the NumPy
-    shim below is a fallback kept for environments where it cannot be built.
-    """
-    try:
-        import lap  # noqa: F401  # real package present (primary path)
-
-        return
-    except ImportError:
-        pass
-    import sys
-    import types
-
-    shim = types.ModuleType("lap")
-    shim.__version__ = "0.0.0-ultralytics-numpy-shim"
-    shim.lapjv = _lapjv_shim
-    sys.modules["lap"] = shim
-    logger.warning(
-        "'lap' package not installed; using NumPy lapjv shim for BoT-SORT matching"
-    )
+# The TensorRT backend, when one loaded. None = serving PyTorch.
+_trt = None
 
 
 def model_loaded() -> bool:
     return _model is not None
 
 
-def clip_loaded() -> bool:
-    """True when the CLIP checkpoint is already resident in this process.
-
-    Callers use this to keep optional appearance work free: a path that has
-    not embedded anything must not pull a 350 MB checkpoint onto the box just
-    to add one more signal.
-    """
-    return _clip_bundle is not None
-
-
-# Best YOLO26 pose weight per resolved device when Settings.model_name is
-# 'auto'. YOLO26 is NMS-free and reports up to +7.2 pose AP over YOLO11; a GPU
-# affords the x variant, while mps/cpu stay on m for fast dev iteration. Any of
-# these is overridable via MODEL_NAME (a .pt weight or a TensorRT .engine).
-_DEVICE_MODEL_DEFAULT = {
-    "cuda": "yolo26x-pose.pt",
-    "mps": "yolo26m-pose.pt",
-    "cpu": "yolo26m-pose.pt",
-}
-
-
 def get_device() -> str:
     """Effective inference device: 'cuda', 'mps', or 'cpu'.
 
     Resolves Settings.device. 'auto' prefers cuda, then mps, then cpu; an
-    explicit device is honoured but degrades to cpu when unavailable so a
-    misconfigured box does not crash. Once a runtime failure trips
-    _fallback_cpu, cpu is pinned for the rest of the process.
+    explicit device is honoured but degrades to cpu when the hardware is
+    absent, so a misconfigured dev box does not crash. Production sets
+    REQUIRE_DEVICE to turn that degradation back into a loud failure.
     """
-    if _fallback_cpu:
-        return "cpu"
     configured = (get_settings().device or "auto").strip().lower()
     cuda_ok = mps_ok = False
     try:
@@ -278,222 +140,161 @@ def _assert_required_device(resolved: str) -> None:
 
 
 def resolve_model_name() -> str:
-    """The YOLO weight to load: Settings.model_name, or the best device default
-    when it is 'auto'/empty. Auto-resolved weights live under WEIGHTS_DIR when
-    set (the RunPod volume — the container layer is recreated on every pod
-    start, so a CWD cache would re-download and re-export each time). On cuda
-    an already-exported TensorRT engine next to the weight is preferred (built
-    by TENSORRT_EXPORT or scripts/export_tensorrt.py); an explicit MODEL_NAME
-    is always honoured verbatim."""
-    settings = get_settings()
-    configured = (settings.model_name or "").strip()
-    if configured and configured.lower() != "auto":
-        return configured
-    base = get_device().split(":", 1)[0]  # 'cuda:0' -> 'cuda'
-    name = _DEVICE_MODEL_DEFAULT.get(base, "yolo26m-pose.pt")
-    weights_dir = (settings.weights_dir or "").strip()
-    if weights_dir:
-        os.makedirs(weights_dir, exist_ok=True)
-        name = str(Path(weights_dir) / name)
-    if base == "cuda":
-        engine = Path(name).with_suffix(".engine")
-        if engine.is_file():
-            return str(engine)
-    return name
+    """Path of the RF-DETR checkpoint to serve (Settings.rfdetr_weights)."""
+    return (get_settings().rfdetr_weights or "").strip()
 
 
-def _export_engine(weight: str, device: str) -> Optional[str]:
-    """One-time TensorRT export of a .pt weight; returns the engine path.
+def _check_class_order(weights: str) -> None:
+    """Verify the checkpoint's own class order matches what this module assumes.
 
-    half=True is the ~free 2x; dynamic=True lets IMGSZ move between 1280 and
-    1536 without a rebuild. Engines are specific to the GPU model and TensorRT
-    version, so this runs on the pod itself (first load, several minutes) and
-    the result is cached on disk for every later start. Failure degrades to
-    the .pt weight — a batch job must not die because an export did.
-    """
-    from ultralytics import YOLO
-
-    try:
-        logger.info(
-            "TensorRT export of %s starting (one-time on this GPU, several minutes)",
-            weight,
-        )
-        exported = YOLO(weight).export(
-            format="engine",
-            half=True,
-            dynamic=True,
-            batch=1,
-            imgsz=get_settings().imgsz,
-            device=device,
-        )
-        logger.info("TensorRT export complete: %s", exported)
-        return str(exported)
-    except Exception:
-        logger.warning(
-            "TensorRT export failed; serving the PyTorch weight instead", exc_info=True
-        )
-        return None
-
-
-def _precision_kwargs(device: str) -> dict:
-    """The fp16 request for predict/track, or {} when it must not be asked for.
-
-    MUST be passed to the FIRST predict/track call of the process. ultralytics
-    builds its AutoBackend exactly once -- predictor.setup_model() runs only
-    `if not self.model`, and it computes `fp16=self.args.quantize == 16` at that
-    moment. Every later call merges args but never rebuilds the backend, so a
-    warmup that omits this pins the weights to fp32 for the whole run and the
-    fp16 asked for on the real frames is silently ignored.
-
-    'quantize' rather than the older 'half': half is a deprecated alias in the
-    pinned ultralytics (it is not even in DEFAULT_CFG_DICT any more) and warns
-    on every call. cpu stays fp32 -- fp16 on cpu is pathologically slow, not
-    faster. Engine precision is baked at export, so the flag is meaningless
-    there.
-    """
-    if _model_is_engine or device.split(":", 1)[0] == "cpu":
-        return {}
-    return {"quantize": 16}
-
-
-def _record_precision(model, device: str) -> None:
-    """Log the precision the backend ACTUALLY loaded, read back from the weights.
-
-    Deliberately not read from predictor.args.quantize: that reports the value
-    we asked for (16) even when the backend was already built fp32, so it shows
-    a green light on exactly the broken configuration this guards against. The
-    parameter dtype is the ground truth. Best-effort -- a diagnostic must never
-    be the thing that fails an analysis.
-    """
-    if _model_is_engine:
-        return
-    import torch  # lazy, like every other torch use here (module import is hot)
-
-    try:
-        backend = model.predictor.model
-        inner = getattr(backend, "backend", backend)
-        module = getattr(inner, "model", None)
-        dtype = next(module.parameters()).dtype if module is not None else None
-    except Exception:
-        logger.warning("could not read back inference precision", exc_info=True)
-        return
-    if dtype is None:
-        return
-    want_fp16 = bool(_precision_kwargs(device))
-    logger.info("inference precision on %s: %s", device, dtype)
-    if want_fp16 and dtype is not torch.float16:
-        # Not fatal: the run is correct, just about 2x slower than it should be
-        # and 2x the VRAM. Loud because it is otherwise invisible -- it was
-        # shipped this way and nothing in the product surfaced it.
-        logger.error(
-            "DEGRADED: asked for fp16 on %s but the backend loaded %s; "
-            "inference will run at roughly half speed",
-            device,
-            dtype,
-        )
-
-
-def _warmup(model, device: str) -> None:
-    """Run one dummy inference so engine deserialization / cuDNN autotune has
-    happened before the first billed frame. Best-effort: a warmup failure is
-    logged and the real frames decide.
-
-    This call also DECIDES the backend precision for the entire process (see
-    _precision_kwargs), so it must carry the same precision the real frames
-    will ask for.
+    The class ids are the entire contract between the model and the product:
+    every KPI hangs off 'which id is the teacher'. The order is recorded in the
+    checkpoint's training args, so it is cheap to assert and expensive to get
+    wrong silently.
     """
     try:
-        dummy = np.zeros((720, 1280, 3), dtype=np.uint8)
-        model.predict(
-            dummy,
-            imgsz=get_settings().imgsz,
-            device=device,
-            verbose=False,
-            **_precision_kwargs(device),
-        )
-        logger.info("warmup inference complete on %s", device)
+        import torch
+
+        ck = torch.load(weights, map_location="cpu", weights_only=False)
+        args = ck.get("args")
+        names = list((vars(args) if not isinstance(args, dict) else args).get("class_names") or [])
     except Exception:
-        logger.warning("warmup inference failed", exc_info=True)
+        logger.warning("could not read class_names from %s; assuming the default order", weights)
+        return
+    if names and names != EXPECTED_CLASS_NAMES:
+        raise RuntimeError(
+            f"checkpoint {weights} declares classes {names}, but this service maps "
+            f"{EXPECTED_CLASS_NAMES}. Fix app/detector.py's CLASS_* ids before serving it."
+        )
 
 
 def _get_model():
-    global _model, _model_is_engine
+    global _model
     if _model is None:
-        _ensure_lap_shim()  # must precede any ultralytics.trackers import
-        from ultralytics import YOLO
-
+        weights = resolve_model_name()
+        if not weights:
+            raise RuntimeError(
+                "RFDETR_WEIGHTS is not set: the ML service has no detector to run"
+            )
+        if not Path(weights).is_file():
+            raise RuntimeError(f"RF-DETR checkpoint not found: {weights}")
         device = get_device()
         _assert_required_device(device)
-        name = resolve_model_name()
-        if (
-            get_settings().tensorrt_export
-            and device.split(":", 1)[0] == "cuda"
-            and name.endswith(".pt")
-        ):
-            engine = Path(name).with_suffix(".engine")
-            if engine.is_file():
-                name = str(engine)
-            else:
-                name = _export_engine(name, device) or name
-        _model_is_engine = name.endswith(".engine")
-        logger.info(
-            "loading pose model %s on device %s%s",
-            name,
-            device,
-            " (TensorRT engine)" if _model_is_engine else "",
+        _check_class_order(weights)
+
+        from rfdetr import RFDETRMedium
+
+        settings = get_settings()
+        logger.info("loading RF-DETR %s on device %s", weights, device)
+        _model = RFDETRMedium(
+            pretrain_weights=weights,
+            num_classes=len(CLASS_NAMES),
+            resolution=settings.rfdetr_resolution,
+            device=device,
         )
-        # Engines carry no task metadata, so tell ultralytics this is pose.
-        _model = YOLO(name, task="pose") if _model_is_engine else YOLO(name)
-        # Every non-cpu device, not just cuda: the warmup is what fixes the
-        # backend precision, so skipping it on mps meant the dev Macs and the
-        # billed GPU pod ran DIFFERENT precisions (mps got fp16 because its
-        # first call was the real track(); cuda got fp32 from this warmup).
-        # Running it everywhere makes the pod's path testable on a laptop.
-        if device.split(":", 1)[0] != "cpu":
-            _warmup(_model, device)
-            _record_precision(_model, device)
+        # TensorRT FIRST, and only optimize the PyTorch model if it does not
+        # take over. Order matters both ways: export() wants the clean module
+        # rather than a JIT-traced one, and tracing a model that is about to be
+        # replaced by an engine is pure startup cost.
+        global _trt
+        if settings.rfdetr_tensorrt:
+            from app import tensorrt_backend
+
+            _trt = tensorrt_backend.try_load(
+                _model,
+                weights,
+                device,
+                settings.rfdetr_resolution,
+                max(1, int(settings.rfdetr_batch)),
+            )
+        if _trt is None:
+            _optimize(_model, device)
+        logger.info("RF-DETR serving backend: %s", serving_backend())
     return _model
 
 
-def _reset_tracker(model) -> None:
-    """Reset BoT-SORT state so raw ids do not bleed across videos."""
+def _record_precision(model, requested) -> None:
+    """Read the precision the model ACTUALLY carries back off its weights.
+
+    Restored, deliberately, from the pipeline this replaced. Its guard existed
+    because asking for fp16 and getting fp16 are different things, and the
+    request is what every convenient accessor reports back — so a check built
+    on the request shows a green light on precisely the broken configuration it
+    was meant to catch. The parameter dtype is the ground truth.
+
+    That is not a hypothetical here. The bug this file just fixed (rfdetr's
+    `inference()` defaulting to float32) is invisible from the outside: the run
+    is correct, merely half-speed at double the VRAM, and the unit tests around
+    _optimize can only prove which arguments were PASSED. This is the check
+    that proves what was loaded, and it is the one that will fire on the pod if
+    a future rfdetr silently ignores the dtype.
+
+    Best-effort: a diagnostic must never be the thing that fails an analysis.
+    """
+    import torch
+
     try:
-        predictor = getattr(model, "predictor", None)
-        for tracker in getattr(predictor, "trackers", None) or []:
-            tracker.reset()
-    except Exception:  # pragma: no cover - defensive
-        logger.warning("failed to reset tracker state", exc_info=True)
+        ctx = getattr(model, "model", None)
+        module = getattr(ctx, "inference_model", None) or getattr(ctx, "model", None)
+        actual = next(module.parameters()).dtype if module is not None else None
+    except Exception:
+        logger.warning("could not read back inference precision", exc_info=True)
+        return
+    if actual is None:
+        return
+    logger.info("inference precision (read back from weights): %s", actual)
+    if actual is not requested:
+        # Not fatal: the results are right, the throughput is not. Loud because
+        # it is otherwise completely invisible — the previous pipeline shipped
+        # this way and nothing in the product surfaced it.
+        logger.error(
+            "DEGRADED: asked for %s but the model loaded %s; inference will run "
+            "at roughly half speed and twice the VRAM",
+            requested,
+            actual,
+        )
 
 
-def _track_frame(model, frame: np.ndarray, device: str):
-    global _fallback_cpu
-    effective = "cpu" if _fallback_cpu else device
+def _optimize(model, device: str) -> None:
+    """JIT-trace the model at the precision and batch size it will actually run.
+
+    Both arguments are load-bearing and both default to the WRONG thing for a
+    GPU deployment:
+
+    dtype defaults to float32. On an L4 that is about half the throughput and
+    twice the VRAM for identical outputs. This project has already paid for
+    this exact mistake once: the previous pipeline's celebrated "~5x TensorRT
+    speedup" turned out, when measured, to be 1.05-1.25x — the real win was a
+    warmup call that had been silently pinning the backend to fp32.
+
+    batch_size defaults to 1, and it is what the trace is specialised for. We
+    feed batches of rfdetr_batch, so tracing at 1 either forces a retrace or
+    runs a graph built for the wrong shape — the throughput lever cancelling
+    itself out.
+
+    fp16 is CUDA-only here: it is not faster on cpu, and MPS support for
+    half-precision transformer ops is uneven enough that dev boxes are better
+    off in fp32.
+    """
+    import torch
+
     settings = get_settings()
-    kwargs = dict(
-        persist=True,
-        tracker=settings.tracker_cfg,
-        classes=[0],
-        imgsz=settings.imgsz,
-        conf=settings.det_conf,
-        max_det=settings.max_det,
-        verbose=False,
-    )
-    # Same helper the warmup used, so the request can never drift from the
-    # precision the backend was actually built with.
-    kwargs.update(_precision_kwargs(effective))
+    on_cuda = device.split(":", 1)[0] == "cuda"
+    dtype = torch.float16 if on_cuda else torch.float32
+    batch = max(1, int(settings.rfdetr_batch)) if on_cuda else 1
     try:
-        return model.track(frame, device=effective, **kwargs)
-    except Exception as exc:
-        if effective == "cpu":
-            raise
-        if _model_is_engine or (settings.require_device or "").strip():
-            # A TensorRT engine cannot run on CPU, and a REQUIRE_DEVICE box
-            # must fail loud rather than silently burn 20x the wall-clock.
-            raise
-        logger.warning("device %s failed (%s); falling back to cpu", effective, exc)
-        _fallback_cpu = True
-        kwargs.pop("quantize", None)  # cpu stays fp32
-        return model.track(frame, device="cpu", **kwargs)
+        model.inference(compile=True, batch_size=batch, dtype=dtype)
+        logger.info(
+            "RF-DETR traced for inference: dtype=%s batch=%d device=%s", dtype, batch, device
+        )
+        _record_precision(model, dtype)
+    except Exception:
+        # Purely a throughput step; a failure here costs speed, not
+        # correctness, and must never sink a multi-minute analysis.
+        logger.warning(
+            "RF-DETR inference optimization unavailable; serving the eager model",
+            exc_info=True,
+        )
 
 
 def _validate_video_path(video_path: str) -> str:
@@ -683,681 +484,22 @@ def resolve_video_source(video_path: str) -> tuple[str, bool]:
     return _validate_video_path(video_path), False
 
 
-def _is_standing(
-    w: float,
-    h: float,
-    kxy: Optional[np.ndarray],
-    kconf: Optional[np.ndarray],
-    frame_aspect: float = 1.0,
-) -> bool:
-    """Standing when the pixel-space bbox aspect h/w exceeds 1.6, else the
-    hip-above-knee keypoint fallback.
+def _clip_bbox(x0: float, y0: float, x1: float, y1: float) -> dict:
+    """Clamp a normalized corner-format box to the frame as an interval.
 
-    w and h are normalized by frame width/height (boxes.xywhn), so
-    h_norm/w_norm = (h_px/w_px) * (frame_w/frame_h). Divide by frame_aspect
-    (= frame_w/frame_h) to recover the pixel ratio the SPEC heuristic is
-    defined on — otherwise every seated person on a 16:9 frame counts as
-    standing (effective threshold 0.9) and true standing is missed on
-    portrait frames.
+    Clamping x/y alone would shift the stored origin and can leave x+w > 1;
+    clamp both edges instead so 0 <= x <= x+w <= 1 (same for y).
     """
-    if frame_aspect <= 0:
-        frame_aspect = 1.0
-    if w > 0 and (h / w) / frame_aspect > STANDING_ASPECT:
-        return True
-    if kxy is None or kconf is None or len(kconf) < 15:
-        return False
-    if h < STANDING_MIN_BOX_H:
-        return False
-    hip_ys = [float(kxy[i][1]) for i in (L_HIP, R_HIP) if kconf[i] > STANDING_KPT_CONF]
-    knee_ys = [float(kxy[i][1]) for i in (L_KNEE, R_KNEE) if kconf[i] > STANDING_KPT_CONF]
-    if not hip_ys or not knee_ys:
-        return False
-    hip_y = sum(hip_ys) / len(hip_ys)
-    knee_y = sum(knee_ys) / len(knee_ys)
-    return (knee_y - hip_y) > 0.25 * h
-
-
-def _back_to_camera(kconf: Optional[np.ndarray]) -> bool:
-    if kconf is None or len(kconf) < 7:
-        return False
-    face = max(float(kconf[NOSE]), float(kconf[L_EYE]), float(kconf[R_EYE]))
-    shoulders = min(float(kconf[L_SHOULDER]), float(kconf[R_SHOULDER]))
-    return face < KPT_CONF_LOW and shoulders > KPT_CONF_VISIBLE
-
-
-def _occlusions(
-    raw: list[tuple[float, float, float, float]]
-) -> list[float]:
-    """Per-box occlusion in 0..1 for one frame's boxes (center-format, normalized).
-
-    Two things hide a person in a classroom, and both corrupt every downstream
-    reading of that box (appearance crop, height, posture):
-
-    COVERED   a person BETWEEN them and the camera. On a fixed overhead camera
-              the ground-plane rule is reliable: whoever's feet are lower in
-              the frame is nearer, so only boxes with a lower bottom edge can
-              occlude. Contribution is summed (a back-row pupil is commonly
-              hidden by two people at once) and clamped at 1.
-    TRUNCATED the frame edge cuts the box off — the teacher half out of shot at
-              the door reads as a short, cropped person.
-
-    Combined as independent losses of visibility: 1 - (1-covered)(1-truncated).
-    O(n^2) over the ~30 boxes of one frame is a few microseconds.
-    """
-    n = len(raw)
-    out = [0.0] * n
-    boxes = []
-    for cx, cy, w, h in raw:
-        boxes.append((cx - w / 2.0, cy - h / 2.0, cx + w / 2.0, cy + h / 2.0))
-    for i, (x0, y0, x1, y1) in enumerate(boxes):
-        area = max(1e-9, (x1 - x0) * (y1 - y0))
-        covered = 0.0
-        for j, (a0, b0, a1, b1) in enumerate(boxes):
-            if i == j or b1 <= y1:  # only nearer-to-camera boxes occlude
-                continue
-            iw = min(x1, a1) - max(x0, a0)
-            ih = min(y1, b1) - max(y0, b0)
-            if iw > 0 and ih > 0:
-                covered += iw * ih / area
-        covered = min(1.0, covered)
-        visible_w = max(0.0, min(1.0, x1) - max(0.0, x0))
-        visible_h = max(0.0, min(1.0, y1) - max(0.0, y0))
-        truncated = max(0.0, 1.0 - (visible_w * visible_h) / area)
-        out[i] = round(1.0 - (1.0 - covered) * (1.0 - truncated), 4)
-    return out
-
-
-def _body_ratios(
-    kxy: Optional[np.ndarray],
-    kconf: Optional[np.ndarray],
-    frame_aspect: float,
-) -> Optional[dict]:
-    """Scale-free body proportions, or None when the keypoints cannot support them.
-
-    Adults and children differ in PROPORTION, not just size: a child's head is
-    roughly 1/6 of their stature and an adult's about 1/8, and adult legs are
-    longer relative to the torso. Ratios of keypoint distances are invariant to
-    how far the person is from the camera, which is exactly what raw bbox
-    height is not — the front-row pupil is the tallest box in the room.
-
-    - head: nose-to-shoulder-line distance over torso length (shoulders to
-      hips). Larger for children.
-    - leg: hip-to-ankle (falling back to twice hip-to-knee when the feet are
-      under a desk) over torso length. Larger for adults.
-    - vis: fraction of the 17 keypoints the model is confident about, so
-      consumers can discount a measurement taken through an occlusion.
-
-    xyn is normalized by frame width/height independently, so x is rescaled by
-    the frame aspect before any distance is taken; otherwise a 16:9 frame
-    stretches every horizontal component by 1.78.
-    """
-    if kxy is None or kconf is None or len(kconf) < 17:
-        return None
-    conf = np.asarray(kconf, dtype=np.float64)
-    pts = np.asarray(kxy, dtype=np.float64).copy()
-    if frame_aspect > 0:
-        pts[:, 0] *= frame_aspect
-
-    def ok(*idx: int) -> bool:
-        return all(conf[i] > STANDING_KPT_CONF for i in idx)
-
-    def mid(a: int, b: int) -> np.ndarray:
-        return (pts[a] + pts[b]) / 2.0
-
-    if not ok(L_SHOULDER, R_SHOULDER, L_HIP, R_HIP):
-        return None
-    shoulder = mid(L_SHOULDER, R_SHOULDER)
-    hip = mid(L_HIP, R_HIP)
-    torso = float(np.linalg.norm(shoulder - hip))
-    if torso < 1e-4:
-        return None
-
-    out: dict = {"vis": round(float((conf > STANDING_KPT_CONF).mean()), 3)}
-    if conf[NOSE] > STANDING_KPT_CONF:
-        out["head"] = round(float(np.linalg.norm(pts[NOSE] - shoulder)) / torso, 4)
-    ankles = [i for i in (15, 16) if conf[i] > STANDING_KPT_CONF]
-    knees = [i for i in (L_KNEE, R_KNEE) if conf[i] > STANDING_KPT_CONF]
-    if ankles:
-        foot = pts[ankles].mean(axis=0)
-        out["leg"] = round(float(np.linalg.norm(foot - hip)) / torso, 4)
-    elif knees:
-        # Feet under a desk: the knee is half the leg, doubled to estimate it.
-        knee = pts[knees].mean(axis=0)
-        out["leg"] = round(2.0 * float(np.linalg.norm(knee - hip)) / torso, 4)
-    return out if len(out) > 1 else None
-
-
-def _torso_hist(
-    frame: np.ndarray,
-    bbox: dict,
-    kxy: Optional[np.ndarray],
-    kconf: Optional[np.ndarray],
-) -> Optional[np.ndarray]:
-    """Coarse HSV histogram of the torso crop, L1-normalized, flattened.
-
-    All three channels, not hue and saturation only. Hue is meaningless where
-    there is no light: a teacher in a dark kurta among bright school polos
-    produced a diffuse, noisy H-S histogram that looked like everybody and
-    nobody, and the "who is not wearing the uniform" signal — the strongest
-    appearance cue in a uniformed classroom — collapsed to zero on that
-    lesson. Brightness is what makes dark clothing describable.
-
-    MEASURED, and kept at 30 hue x 32 saturation. Adding a brightness axis and
-    coarsening hue to 12x6x6 was tried, to describe a teacher in a dark kurta
-    whose hue is meaningless — and it was much worse on both lessons
-    (coverage 91.4 -> 77.6 and 59.9 -> 10.0), because hue resolution is exactly
-    what separates one uniform colour from another, and brightness mostly
-    encodes where in the room somebody is standing. The dark-clothing case
-    needs a better encoder, not a coarser histogram.
-    """
-    fh, fw = frame.shape[:2]
-    torso_pts = (L_SHOULDER, R_SHOULDER, L_HIP, R_HIP)
-    if (
-        kxy is not None
-        and kconf is not None
-        and len(kconf) >= 13
-        and all(kconf[i] > KPT_CONF_LOW for i in torso_pts)
-    ):
-        xs = [float(kxy[i][0]) for i in torso_pts]
-        ys = [float(kxy[i][1]) for i in torso_pts]
-        x0, x1, y0, y1 = min(xs), max(xs), min(ys), max(ys)
-    else:
-        x0 = bbox["x"] + 0.2 * bbox["w"]
-        x1 = bbox["x"] + 0.8 * bbox["w"]
-        y0 = bbox["y"] + 0.15 * bbox["h"]
-        y1 = bbox["y"] + 0.6 * bbox["h"]
-
-    px0 = max(0, min(fw - 1, int(x0 * fw)))
-    px1 = max(0, min(fw, int(x1 * fw)))
-    py0 = max(0, min(fh - 1, int(y0 * fh)))
-    py1 = max(0, min(fh, int(y1 * fh)))
-    if px1 - px0 < 4 or py1 - py0 < 4:
-        return None
-
-    crop = frame[py0:py1, px0:px1]
-    hsv = cv2.cvtColor(crop, cv2.COLOR_BGR2HSV)
-    hist = cv2.calcHist([hsv], [0, 1], None, [30, 32], [0, 180, 0, 256]).ravel()
-    total = hist.sum()
-    if total > 0:
-        hist /= total
-    return hist.astype(np.float32)
-
-
-@dataclass
-class _SampleState:
-    """Reservoir state for one track's appearance samples."""
-
-    spacing_ms: int
-    last_ms: int
-    last_occlusion: float
-
-
-def _due(
-    state: dict[int, _SampleState], raw_id: int, ts_ms: int, occlusion: float
-) -> bool:
-    """Is this frame worth cropping for track `raw_id`?
-
-    True either because the current interval has elapsed, or because this view
-    is cleaner than the one already held for the current interval.
-    """
-    st = state.get(raw_id)
-    if st is None:
-        return True
-    return ts_ms - st.last_ms >= st.spacing_ms or occlusion < st.last_occlusion
-
-
-def _offer(
-    store: dict[int, list],
-    state: dict[int, _SampleState],
-    raw_id: int,
-    ts_ms: int,
-    occlusion: float,
-    value,
-) -> None:
-    """Add a sample under a reservoir that stays spread over the WHOLE track.
-
-    The sampler this replaced took the first ten crops one second apart and
-    then stopped for good. Measured on a real lesson, that left each track's
-    appearance evidence covering a median of EIGHT PERCENT of its lifetime —
-    the teacher's 367-second track carried nine seconds of gallery. Everything
-    downstream inherited that: matching a tracklet from minute nine against a
-    prototype built entirely from minute one, and a change-of-clothing
-    detector that could only ever look inside the first ten seconds of an id,
-    which is precisely where a mid-track handoff never happens.
-
-    Halve-and-double keeps the same ten samples and the same memory, in one
-    streaming pass: when the buffer fills, drop every other sample and double
-    the interval. Within an interval the LEAST-OCCLUDED view wins, because
-    crop quality is what sets the re-identification ceiling.
-
-    Measured against per-frame ground truth on two lessons: teacher coverage
-    91.4 -> 98.0% and 59.9 -> 81.7%, re-acquisition after leaving frame 67% and
-    80% -> 100% on both.
-    """
-    samples = store.setdefault(raw_id, [])
-    st = state.get(raw_id)
-    if st is not None and samples and ts_ms - st.last_ms < st.spacing_ms:
-        # Same interval, cleaner view: replace rather than spend a slot.
-        if occlusion < st.last_occlusion:
-            samples[-1] = value
-            st.last_occlusion = occlusion
-        return
-
-    samples.append(value)
-    if st is None:
-        state[raw_id] = _SampleState(
-            spacing_ms=HIST_SAMPLE_SPACING_MS, last_ms=ts_ms, last_occlusion=occlusion
-        )
-        return
-    st.last_ms = ts_ms
-    st.last_occlusion = occlusion
-    if len(samples) > MAX_HIST_SAMPLES_PER_TRACK:
-        # Decimate to every other sample and stretch the interval to match, so
-        # the retained set stays evenly spread however long the track runs.
-        store[raw_id] = samples[::2]
-        st.spacing_ms *= 2
-
-
-def _appearance_sample_ok(occlusion: float, samples_so_far: int) -> bool:
-    """May this frame contribute appearance evidence for this track?
-
-    Clean views only, except while a track is still nearly evidence-free: then
-    a heavily occluded view is still better than none (it can only be vetoed
-    against, never used to claim a match).
-    """
-    if occlusion <= OCCLUSION_SAMPLE_MAX:
-        return True
-    return (
-        samples_so_far < OCCLUSION_FALLBACK_UNTIL
-        and occlusion <= OCCLUSION_SAMPLE_FALLBACK
-    )
-
-
-def _get_clip():
-    """Lazily load + cache CLIP ViT-B/32 on the detection device.
-
-    Loaded on first use only (the frame loop never touches it), so videos
-    processed before any re-ID work pay no startup cost, and tests that fake
-    detect_video never trigger the checkpoint load.
-    """
-    global _clip_bundle
-    if _clip_bundle is None:
-        import clip
-
-        device = get_device()
-        model, preprocess = clip.load(CLIP_MODEL_NAME, device=device)
-        model.eval()
-        _clip_bundle = (model, preprocess, device)
-    return _clip_bundle
-
-
-def _get_reid():
-    """Lazily load the person re-ID encoder, or None when unavailable.
-
-    Failure is remembered and degrades to CLIP rather than raising: losing the
-    better embedding must never cost a completed multi-minute detection pass.
-    """
-    global _reid_encoder, _reid_failed
-    if _reid_encoder is None and not _reid_failed:
-        name = (os.environ.get("REID_MODEL") or REID_MODEL_DEFAULT).strip()
-        if not name:
-            _reid_failed = True
-            return None
-        try:
-            from ultralytics.trackers.utils.reid import ReID
-
-            weights_dir = (get_settings().weights_dir or "").strip()
-            path = str(Path(weights_dir) / name) if weights_dir else name
-            _reid_encoder = ReID(path, imgsz=REID_IMGSZ, device=get_device())
-            logger.info("re-ID encoder loaded: %s", path)
-        except Exception:
-            logger.warning(
-                "person re-ID encoder unavailable; falling back to CLIP "
-                "(which is near-chance for re-identification)",
-                exc_info=True,
-            )
-            _reid_failed = True
-    return _reid_encoder
-
-
-def _upper_crop(frame: np.ndarray, bbox: dict) -> Optional[np.ndarray]:
-    """BGR crop of the body for appearance embedding, downscaled to <= 224 px."""
-    frac = REID_CROP_UPPER_FRAC if _get_reid() is not None else CLIP_CROP_UPPER_FRAC
-    fh, fw = frame.shape[:2]
-    px0 = max(0, min(fw - 1, int(bbox["x"] * fw)))
-    px1 = max(0, min(fw, int((bbox["x"] + bbox["w"]) * fw)))
-    py0 = max(0, min(fh - 1, int(bbox["y"] * fh)))
-    py1 = max(0, min(fh, int((bbox["y"] + bbox["h"] * frac) * fh)))
-    # Below ~8 px the crop is compression mush that embeds as noise.
-    if px1 - px0 < 8 or py1 - py0 < 8:
-        return None
-    crop = frame[py0:py1, px0:px1]
-    cap = REID_IMGSZ if _get_reid() is not None else CLIP_CROP_MAX_SIDE
-    scale = cap / max(crop.shape[:2])
-    if scale < 1.0:
-        return cv2.resize(
-            crop,
-            (
-                max(1, int(round(crop.shape[1] * scale))),
-                max(1, int(round(crop.shape[0] * scale))),
-            ),
-            interpolation=cv2.INTER_AREA,
-        )
-    # A slice is a VIEW: it keeps the whole decoded frame (6 MB at 1080p, 11 MB
-    # at 1440p) alive for as long as the crop is held, and crops are held until
-    # the post-loop CLIP embed. Most people in a classroom are smaller than the
-    # 224 px cap and skip the resize above, so a long lesson would pin thousands
-    # of full frames while the crops themselves measure a few MB. Copy the bytes.
-    return crop.copy()
-
-
-def _embed_tracks(
-    crops: dict[int, list[tuple[int, np.ndarray]]]
-) -> dict[int, list[tuple[int, list[float]]]]:
-    """Timestamped L2-normalized CLIP embedding GALLERY per raw track.
-
-    A gallery, not a single median, because a median collapses exactly the
-    information re-ID needs on this footage: one crop catches her from behind,
-    one against a blown-out doorway, one clean. Averaging them produces a
-    vector that matches nothing well, while keeping the samples lets a matcher
-    ask "did her BEST view match this track's BEST view" — the question that
-    survives a person walking out of frame and back in under different light.
-    Consumers that want one vector per track (the merge, DB persistence) take
-    the median themselves.
-
-    One batched post-pass over all sampled crops, so the 5 fps detection loop
-    stays untouched. Preprocessing happens INSIDE the batch loop, not up front:
-    a 1-hour video can accumulate tens of thousands of crops, and materializing
-    every 3x224x224 CLIP tensor at once (~600 KB each) would need >10 GB and OOM
-    the worker. Streaming keeps peak tensor memory at one batch (~40 MB) no
-    matter how long the video is; the output is identical to a single pass.
-    Failures degrade to {} instead of raising: losing re-ID evidence must never
-    discard a completed multi-minute YOLO pass — the merge falls back to
-    hist+spatial.
-    """
-    flat: list[tuple[int, int, np.ndarray]] = [
-        (raw_id, ts, crop)
-        for raw_id, samples in crops.items()
-        for ts, crop in samples
-    ]
-    if not flat:
-        return {}
-
-    encoder = _get_reid()
-    if encoder is not None:
-        try:
-            import torch
-
-            out: dict[int, list[tuple[int, list[float]]]] = {}
-            size = encoder.imgsz
-            for i in range(0, len(flat), CLIP_BATCH_SIZE):
-                chunk = flat[i : i + CLIP_BATCH_SIZE]
-                # Preprocess exactly as ultralytics' own ReID path does — BGR to
-                # RGB, /255, bilinear to a square — but for the whole batch at
-                # once. Feeding crops one at a time made the encoder several
-                # times slower than the YOLO pass that produced them.
-                batch = torch.empty(len(chunk), 3, size, size, dtype=torch.float32)
-                for k, (_raw, _ts, crop) in enumerate(chunk):
-                    t = (
-                        torch.from_numpy(np.ascontiguousarray(crop[..., ::-1]))
-                        .permute(2, 0, 1)
-                        .unsqueeze(0)
-                        .float()
-                        / 255.0
-                    )
-                    batch[k] = torch.nn.functional.interpolate(
-                        t, size=(size, size), mode="bilinear", align_corners=False
-                    )[0]
-                feats = encoder.model(batch.to(encoder.device))
-                feats = feats.cpu().numpy() if hasattr(feats, "cpu") else np.asarray(feats)
-                for (raw_id, ts, _crop), feat in zip(chunk, feats):
-                    feat = np.asarray(feat, dtype=np.float64).ravel()
-                    norm = float(np.linalg.norm(feat))
-                    if norm > 0:
-                        out.setdefault(raw_id, []).append(
-                            (ts, [float(v) for v in feat / norm])
-                        )
-            return out
-        except Exception:
-            logger.warning("re-ID embedding failed; falling back to CLIP", exc_info=True)
-
-    try:
-        import torch
-        from PIL import Image
-
-        model, preprocess, device = _get_clip()
-        feats: list[np.ndarray] = []
-        with torch.no_grad():
-            for i in range(0, len(flat), CLIP_BATCH_SIZE):
-                chunk = flat[i : i + CLIP_BATCH_SIZE]
-                tensors = [
-                    # cv2 frames are BGR; CLIP's preprocess expects an RGB PIL image.
-                    preprocess(Image.fromarray(cv2.cvtColor(crop, cv2.COLOR_BGR2RGB)))
-                    for _raw_id, _ts, crop in chunk
-                ]
-                batch = torch.stack(tensors).to(device)
-                feats.append(model.encode_image(batch).float().cpu().numpy())
-        all_feats = np.concatenate(feats, axis=0)
-    except Exception:
-        logger.warning("CLIP track embedding failed; merge will run without embeds", exc_info=True)
-        return {}
-
-    out: dict[int, list[tuple[int, list[float]]]] = {}
-    for (raw_id, ts, _crop), feat in zip(flat, all_feats):
-        norm = float(np.linalg.norm(feat))
-        if norm > 0:
-            # Normalize per sample so every later dot product is a true cosine
-            # (CLIP feature norms vary with crop content).
-            out.setdefault(raw_id, []).append((ts, [float(v) for v in feat / norm]))
-    return out
-
-
-def gallery_vectors(samples) -> list[list[float]]:
-    """Plain vectors from one track's appearance evidence, whatever shape it is in.
-
-    Three shapes are legitimately in circulation and callers that only want
-    appearance (the merge, DB persistence) should not have to tell them apart:
-    a single vector (what the database stores per track), a list of vectors,
-    and the list of (timestamp, vector) samples /analyze produces.
-    """
-    items = list(samples or [])
-    if not items:
-        return []
-    if np.isscalar(items[0]):  # one bare vector
-        return [[float(v) for v in items]]
-    out: list[list[float]] = []
-    for s in items:
-        if (
-            isinstance(s, (tuple, list))
-            and len(s) == 2
-            and np.isscalar(s[0])
-            and not np.isscalar(s[1])
-        ):
-            out.append([float(v) for v in s[1]])
-        else:
-            out.append([float(v) for v in s])
-    return out
-
-
-def median_embed(samples) -> Optional[list[float]]:
-    """One representative unit vector for a gallery (median, re-normalized)."""
-    vecs = gallery_vectors(samples)
-    if not vecs:
-        return None
-    med = np.median(np.stack([np.asarray(v, dtype=np.float64) for v in vecs]), axis=0)
-    norm = float(np.linalg.norm(med))
-    if norm <= 0:
-        return None
-    return [float(v) for v in med / norm]
-
-
-# Zero-shot age reading. Prompt pairs rather than single prompts: CLIP's
-# absolute image-text cosine is dominated by the scene ("classroom"), so what
-# carries signal is the DIFFERENCE between two prompts that hold the scene
-# fixed and vary only the age of the person.
-_ADULT_PROMPTS = (
-    "a photo of an adult teacher standing in a classroom",
-    "a photo of a grown woman in a classroom",
-    "a photo of a grown man in a classroom",
-)
-_CHILD_PROMPTS = (
-    "a photo of a school child sitting in a classroom",
-    "a photo of a young pupil in school uniform",
-    "a photo of a small boy or girl in a classroom",
-)
-_text_cache: Optional[tuple[np.ndarray, np.ndarray]] = None
-
-
-def _adult_child_text_features():
-    """(adult, child) mean unit text embeddings, cached for the process."""
-    global _text_cache
-    if _text_cache is None:
-        import clip
-        import torch
-
-        model, _preprocess, device = _get_clip()
-        with torch.no_grad():
-            def encode(prompts):
-                toks = clip.tokenize(list(prompts)).to(device)
-                feats = model.encode_text(toks).float().cpu().numpy()
-                feats /= np.maximum(np.linalg.norm(feats, axis=1, keepdims=True), 1e-9)
-                mean = feats.mean(axis=0)
-                return mean / max(float(np.linalg.norm(mean)), 1e-9)
-
-            _text_cache = (encode(_ADULT_PROMPTS), encode(_CHILD_PROMPTS))
-    return _text_cache
-
-
-def zero_shot_adult(galleries: dict) -> dict[int, float]:
-    """Per-track 0..1 adult-vs-child reading of the CLIP crops already embedded.
-
-    Uses the track's BEST (most adult-leaning) views rather than its average:
-    a walking adult is half-occluded in most frames, and the frames where she
-    is clearly visible are the ones that carry age information. Returns {} when
-    CLIP is unavailable — this is an optional signal, never a dependency.
-    """
-    if not galleries:
-        return {}
-    try:
-        adult_t, child_t = _adult_child_text_features()
-    except Exception:
-        logger.warning("zero-shot adult scoring unavailable", exc_info=True)
-        return {}
-
-    out: dict[int, float] = {}
-    for raw_id, samples in galleries.items():
-        vecs = gallery_vectors(samples)
-        if not vecs:
-            continue
-        mat = np.asarray(vecs, dtype=np.float64)
-        margins = mat @ adult_t - mat @ child_t
-        # Top third of views, minimum one: the cleanest evidence available.
-        keep = max(1, len(margins) // 3)
-        best = float(np.mean(np.sort(margins)[-keep:]))
-        # CLIP prompt margins land in roughly [-0.06, 0.06]; map to 0..1.
-        out[raw_id] = float(min(1.0, max(0.0, (best + 0.03) / 0.06)))
-    return out
-
-
-def _clip_bbox(cx: float, cy: float, w: float, h: float) -> dict:
-    """Clamp a normalized center-format box to the frame as an interval.
-
-    Tracker (Kalman-filtered) boxes are not re-clipped by ultralytics and can
-    extend past the frame. Clamping x/y alone shifts the stored center and
-    can leave x+w > 1; clamp both edges instead so 0 <= x <= x+w <= 1 (same
-    for y) and the stored center is the center of the visible region.
-    """
-    x0 = max(0.0, min(1.0, cx - w / 2.0))
-    x1 = max(0.0, min(1.0, cx + w / 2.0))
-    y0 = max(0.0, min(1.0, cy - h / 2.0))
-    y1 = max(0.0, min(1.0, cy + h / 2.0))
+    ax0 = max(0.0, min(1.0, x0))
+    ax1 = max(0.0, min(1.0, x1))
+    ay0 = max(0.0, min(1.0, y0))
+    ay1 = max(0.0, min(1.0, y1))
     return {
-        "x": round(x0, 5),
-        "y": round(y0, 5),
-        "w": round(x1 - x0, 5),
-        "h": round(y1 - y0, 5),
+        "x": round(ax0, 5),
+        "y": round(ay0, 5),
+        "w": round(max(0.0, ax1 - ax0), 5),
+        "h": round(max(0.0, ay1 - ay0), 5),
     }
-
-
-def _extract_frame(
-    results,
-    frame: np.ndarray,
-    ts_ms: int,
-    detections: list[Detection],
-    hists: dict[int, list[np.ndarray]],
-    hist_state: dict[int, "_SampleState"],
-    crops: dict[int, list[tuple[int, np.ndarray]]],
-    crop_state: dict[int, "_SampleState"],
-) -> None:
-    r = results[0]
-    boxes = r.boxes
-    if boxes is None or len(boxes) == 0:
-        return
-    ids = boxes.id
-    if ids is None:  # tracker produced no ids for this frame
-        return
-    ids = ids.int().cpu().tolist()
-    xywhn = boxes.xywhn.cpu().numpy()
-    confs = boxes.conf.cpu().numpy()
-
-    kpts_xy = kpts_conf = None
-    kpts = getattr(r, "keypoints", None)
-    if kpts is not None and len(kpts) == len(boxes):
-        try:
-            kpts_xy = kpts.xyn.cpu().numpy()
-            kc = kpts.conf
-            kpts_conf = kc.cpu().numpy() if kc is not None else None
-        except Exception:  # pragma: no cover - defensive
-            kpts_xy = kpts_conf = None
-
-    fh, fw = frame.shape[:2]
-    frame_aspect = (fw / fh) if fh > 0 else 1.0
-    occl = _occlusions([tuple(float(v) for v in xywhn[i]) for i in range(len(ids))])
-
-    for i, raw_id in enumerate(ids):
-        cx, cy, w, h = (float(v) for v in xywhn[i])
-        bbox = _clip_bbox(cx, cy, w, h)
-        kxy = kpts_xy[i] if kpts_xy is not None else None
-        kcf = kpts_conf[i] if kpts_conf is not None else None
-        occlusion = occl[i]
-        detections.append(
-            Detection(
-                video_ts_ms=ts_ms,
-                raw_track_id=int(raw_id),
-                bbox=bbox,
-                conf=float(confs[i]),
-                # raw (unclipped) w/h on purpose: the aspect of the full box
-                # is more faithful for the standing heuristic.
-                standing=_is_standing(w, h, kxy, kcf, frame_aspect),
-                back_to_camera=_back_to_camera(kcf),
-                occlusion=occlusion,
-                body=_body_ratios(kxy, kcf, frame_aspect),
-            )
-        )
-
-        # Appearance sampling is OCCLUSION-GATED. A crop taken while someone
-        # stands in front of this person embeds the OTHER person: in a packed
-        # classroom that quietly poisons re-ID for exactly the people who move
-        # (the teacher walking between rows is occluded most of the time). Only
-        # a clean view earns a sample; a track that never gets one falls back to
-        # its least-bad views rather than being left with no appearance at all.
-        if not _appearance_sample_ok(occlusion, len(hists.get(int(raw_id), []))):
-            continue
-
-        if _due(hist_state, int(raw_id), ts_ms, occlusion):
-            hist = _torso_hist(frame, bbox, kxy, kcf)
-            if hist is not None:
-                _offer(hists, hist_state, int(raw_id), ts_ms, occlusion, hist)
-
-        # Crop sampling mirrors the hist cadence but keeps its own state: a
-        # failed torso hist (tiny box) must not stall or accelerate crop
-        # collection, and vice versa. Crops are stamped with WHEN they were
-        # taken, because a raw id the tracker hands from one person to another
-        # is split downstream and each half must keep only its own crops.
-        if _due(crop_state, int(raw_id), ts_ms, occlusion):
-            crop = _upper_crop(frame, bbox)
-            if crop is not None:
-                _offer(crops, crop_state, int(raw_id), ts_ms, occlusion, (ts_ms, crop))
 
 
 def _effective_frame_count(metadata_count: int, frames_read: int) -> int:
@@ -1393,15 +535,15 @@ def iter_frames(
     sample_fps: float,
     info: Optional[FrameSourceInfo] = None,
 ) -> Iterator[tuple[int, np.ndarray]]:
-    """File-backed frame source (the Kafka seam, plan section 7 K1).
+    """File-backed frame source (the Kafka seam).
 
     Validates video_path via _validate_video_path, then yields
     (video_ts_ms, BGR frame) for every stride-th decodable frame, with
     stride = max(1, round(native_fps / effective_sample_fps)) and
-    ts_ms = round(frame_idx / native_fps * 1000): the exact math the
-    detect_video loop always ran. Any future source (Kafka/RTSP) only has to
-    reproduce this (ts_ms, frame) contract. The capture is released when the
-    generator is exhausted, closed, or unwound by an exception.
+    ts_ms = round(frame_idx / native_fps * 1000). Any future source
+    (Kafka/RTSP) only has to reproduce this (ts_ms, frame) contract. The
+    capture is released when the generator is exhausted, closed, or unwound by
+    an exception.
     """
     video_path = _validate_video_path(video_path)
     cap = cv2.VideoCapture(video_path)
@@ -1443,54 +585,105 @@ def iter_frames(
         cap.release()
 
 
+def serving_backend() -> str:
+    """Which backend is actually serving: 'tensorrt' or 'pytorch'.
+
+    Read back rather than inferred from config, because "TensorRT is enabled"
+    and "TensorRT is running" are different claims and only the second one is
+    worth anything. /health reports this.
+    """
+    return "tensorrt" if _trt is not None else "pytorch"
+
+
+def _predict_batch(model, frames: list[np.ndarray]) -> list:
+    """RF-DETR over a batch of BGR frames; returns one Detections per frame.
+
+    predict() takes a list, so one call covers the whole batch — the main
+    throughput lever on a GPU. cv2 decodes BGR and the model expects RGB.
+
+    A failure here propagates. The pipeline this replaced caught it and retried
+    on CPU, which was worth doing when the alternative was losing a completed
+    multi-minute pass; here it would mean finishing the job at roughly twenty
+    times the wall-clock while reporting success, which is the outcome
+    REQUIRE_DEVICE exists to prevent. A device that cannot run the model is a
+    misconfiguration, and it should say so on the first batch.
+    """
+    rgb = [cv2.cvtColor(f, cv2.COLOR_BGR2RGB) for f in frames]
+    if _trt is not None:
+        return _trt.predict(rgb, threshold=DETECT_FLOOR)
+    out = model.predict(rgb, threshold=DETECT_FLOOR)
+    return out if isinstance(out, list) else [out]
+
+
+def _to_detections(det, ts_ms: int, width: int, height: int) -> list[Detection]:
+    """One frame's supervision Detections -> our normalized Detection rows."""
+    out: list[Detection] = []
+    if det is None or len(det) == 0:
+        return out
+    for cid, conf, box in zip(det.class_id, det.confidence, det.xyxy):
+        cls = int(cid)
+        if cls not in CLASS_NAMES:
+            continue  # a class this build does not know about
+        x0, y0, x1, y1 = (float(v) for v in box)
+        out.append(
+            Detection(
+                video_ts_ms=ts_ms,
+                cls=cls,
+                bbox=_clip_bbox(x0 / width, y0 / height, x1 / width, y1 / height),
+                conf=float(conf),
+            )
+        )
+    return out
+
+
 def detect_video(
     video_path: str,
     sample_fps: float = 5.0,
     progress_cb: Optional[Callable[[float], None]] = None,
-) -> tuple[
-    VideoMeta,
-    list[Detection],
-    dict[int, list[np.ndarray]],
-    dict[int, list[tuple[int, list[float]]]],
-]:
-    """Run detection+tracking over the video.
+) -> tuple[VideoMeta, list[Detection]]:
+    """Run RF-DETR over the sampled frames of a video.
 
     video_path must be an absolute path to an existing file (inside DATA_DIR
-    when that env var is set); see _validate_video_path.
-    Returns (video_meta, detections, torso_hist_samples_by_raw_track_id,
-    clip_embed_gallery_by_raw_track_id) where each gallery is the list of
-    L2-normalized CLIP ViT-B/32 vectors of that track's sampled upper-body
-    crops (see _embed_tracks on why the samples are kept, not averaged).
-    progress_cb receives the 0..1 fraction of sampled frames processed.
+    when that env var is set); see _validate_video_path. Returns
+    (video_meta, detections) with every detection above DETECT_FLOOR, of every
+    class — per-class thresholds are applied downstream so one pass serves
+    every consumer. progress_cb receives the 0..1 fraction of frames processed.
     """
     detections: list[Detection] = []
-    hists: dict[int, list[np.ndarray]] = {}
-    hist_state: dict[int, _SampleState] = {}
-    crops: dict[int, list[tuple[int, np.ndarray]]] = {}
-    crop_state: dict[int, _SampleState] = {}
     last_ts_ms = 0
 
     model = _get_model()
-    _reset_tracker(model)
-    device = get_device()
+    settings = get_settings()
+    batch_size = max(1, int(settings.rfdetr_batch))
+    if get_device().split(":", 1)[0] != "cuda":
+        batch_size = 1  # batching only pays on a GPU
 
     info = FrameSourceInfo()
     frames = iter_frames(video_path, sample_fps, info=info)
     processed = 0
+    pending: list[tuple[int, np.ndarray]] = []
+
+    def flush() -> None:
+        nonlocal processed
+        if not pending:
+            return
+        results = _predict_batch(model, [f for _ts, f in pending])
+        for (ts, _f), det in zip(pending, results):
+            detections.extend(_to_detections(det, ts, info.width, info.height))
+        processed += len(pending)
+        pending.clear()
+        if progress_cb and info.frames_to_process:
+            progress_cb(min(1.0, processed / info.frames_to_process))
+
     try:
         for ts_ms, frame in frames:
             last_ts_ms = ts_ms
-            results = _track_frame(model, frame, device)
-            _extract_frame(
-                results, frame, ts_ms, detections, hists, hist_state, crops, crop_state
-            )
-            processed += 1
-            if progress_cb and info.frames_to_process:
-                progress_cb(min(1.0, processed / info.frames_to_process))
+            pending.append((ts_ms, frame))
+            if len(pending) >= batch_size:
+                flush()
+        flush()
     finally:
         frames.close()
-
-    embeds = _embed_tracks(crops)
 
     frame_count = _effective_frame_count(info.metadata_frame_count, info.frames_read)
     duration_ms = (
@@ -1505,4 +698,10 @@ def detect_video(
 
     if progress_cb:
         progress_cb(1.0)
-    return meta, detections, hists, embeds
+    logger.info(
+        "detected %d boxes over %d frames of %s",
+        len(detections),
+        processed,
+        Path(video_path).name,
+    )
+    return meta, detections

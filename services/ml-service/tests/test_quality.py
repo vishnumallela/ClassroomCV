@@ -1,91 +1,79 @@
 """Unit tests for the additive data-quality assessment (app/quality.py)."""
 
 from app import quality
-from app.models import Detection
+from app.models import CLASS_TEACHER, Detection
 
 
-def _det(ts, track, raw=None, x=0.5, y=0.5, w=0.05, h=0.1):
+def _det(ts, conf=0.9, x=0.5, y=0.5, w=0.05, h=0.1):
     return Detection(
         video_ts_ms=ts,
-        raw_track_id=raw if raw is not None else track,
+        cls=CLASS_TEACHER,
         bbox={"x": x, "y": y, "w": w, "h": h},
-        conf=0.9,
-        standing=False,
-        back_to_camera=False,
-        track_no=track,
+        conf=conf,
+        track_no=1,
     )
 
 
-def _clean_room(n_students=10, frames=60, step=1000):
-    """n students, each one clean identity (raw_id == track_no), plus a teacher."""
-    dets_by_track: dict[int, list[Detection]] = {}
-    for s in range(1, n_students + 1):
-        dets_by_track[s] = [_det(t * step, s, x=0.1 + 0.05 * s) for t in range(frames)]
-    dets_by_track[999] = [_det(t * step, 999, x=0.9) for t in range(frames)]
-    roles = {s: ("student", 0.7) for s in range(1, n_students + 1)}
-    roles[999] = ("teacher", 0.8)
-    return dets_by_track, roles
+def _lesson(frames=120, step=1000, conf=0.9):
+    """The teacher found in every sampled frame of a clean lesson."""
+    return [_det(t * step, conf=conf) for t in range(frames)]
 
 
-def test_clean_room_is_high_confidence():
-    dets_by_track, roles = _clean_room(n_students=10, frames=60)
-    q = quality.assess(dets_by_track, roles, duration_ms=60_000, teacher_confidence=0.8)
-    assert q["fragmentation"] == 1.0
-    assert q["coverage"] == 1.0
-    assert q["confidence"]["identity"] == "high"
-    assert q["confidence"]["coverage"] == "high"
-    assert q["confidence"]["teacher"] == "high"
-    assert q["confidence"]["overall"] == "high"
-    assert q["notes"] == []
+def test_clean_lesson_is_high_confidence():
+    dets = _lesson()
+    r = quality.assess(dets, sampled_frames=len(dets), duration_ms=120_000,
+                       teacher_confidence=0.9)
+    assert r["coverage"] == 1.0
+    assert r["breaks"] == 0
+    assert r["confidence"]["overall"] == "high"
+    assert r["confidence"]["coverage"] == "high"
+    assert r["confidence"]["continuity"] == "high"
+    assert r["confidence"]["teacher"] == "high"
+    assert r["notes"] == []
 
 
-def test_fragmentation_downgrades_identity_confidence():
-    # Two final identities, but the merge absorbed many raw tracker ids into
-    # each (10 raw ids across 2 identities -> fragmentation 5.0 -> low).
-    dets_by_track: dict[int, list[Detection]] = {1: [], 2: []}
-    raw = 0
-    for identity in (1, 2):
-        for _chunk in range(5):  # 5 raw fragments per identity
-            for t in range(4):
-                dets_by_track[identity].append(_det(raw * 100 + t * 1000, identity, raw=raw))
-            raw += 1
-    roles = {1: ("student", 0.6), 2: ("student", 0.6)}
-    q = quality.assess(dets_by_track, roles, duration_ms=20_000, teacher_confidence=None)
-    assert q["raw_tracks"] == 10
-    assert q["identities"] == 2
-    assert q["fragmentation"] == 5.0
-    assert q["confidence"]["identity"] == "low"
-    assert any("fragment" in n.lower() for n in q["notes"])
+def test_low_coverage_is_flagged():
+    """She is found in a third of the frames: durations become a floor."""
+    dets = _lesson(frames=40)
+    r = quality.assess(dets, sampled_frames=120, duration_ms=120_000,
+                       teacher_confidence=0.9)
+    assert r["coverage"] < quality.COVERAGE_LOW
+    assert r["confidence"]["coverage"] == "low"
+    assert r["confidence"]["overall"] == "low"
+    assert any("undercount" in n for n in r["notes"])
 
 
-def test_low_coverage_flagged():
-    # One student present only in the first and last of a long span (big gap).
-    dets_by_track = {
-        1: [_det(0, 1), _det(60_000, 1)],
-    }
-    roles = {1: ("student", None)}
-    q = quality.assess(dets_by_track, roles, duration_ms=60_000, teacher_confidence=None)
-    assert q["coverage"] < quality.COVERAGE_LOW
-    assert q["confidence"]["coverage"] == "low"
-    assert any("coverage" in n.lower() or "floor" in n.lower() for n in q["notes"])
+def test_broken_timeline_downgrades_continuity():
+    """Many gaps means the entry/exit count is inflated by dropouts."""
+    dets = []
+    for block in range(25):
+        base = block * 60_000
+        dets += [_det(base + i * 1000) for i in range(10)]
+    r = quality.assess(dets, sampled_frames=len(dets), duration_ms=1_500_000,
+                       teacher_confidence=0.9)
+    assert r["breaks"] > quality.BREAKS_NOISY
+    assert r["confidence"]["continuity"] == "low"
+    assert any("upper bound" in n for n in r["notes"])
 
 
-def test_no_teacher_is_low_teacher_tier():
-    dets_by_track, roles = _clean_room(n_students=6, frames=30)
-    roles = {k: ("student", None) for k in dets_by_track}  # nobody is the teacher
-    q = quality.assess(dets_by_track, roles, duration_ms=30_000, teacher_confidence=None)
-    assert q["confidence"]["teacher"] == "low"
-    assert q["confidence"]["overall"] == "low"  # weakest link
+def test_low_detection_confidence_is_tentative():
+    dets = _lesson(conf=0.3)
+    r = quality.assess(dets, sampled_frames=len(dets), duration_ms=120_000,
+                       teacher_confidence=0.4)
+    assert r["confidence"]["teacher"] == "low"
+    assert any("tentative" in n for n in r["notes"])
 
 
-def test_narrow_teacher_margin_is_low_tier_with_note():
-    dets_by_track, roles = _clean_room(n_students=4, frames=30)
-    q = quality.assess(dets_by_track, roles, duration_ms=30_000, teacher_confidence=0.51)
-    assert q["confidence"]["teacher"] == "low"
-    assert any("margin" in n.lower() or "tentative" in n.lower() for n in q["notes"])
+def test_no_teacher_is_low_and_does_not_crash():
+    r = quality.assess([], sampled_frames=100, duration_ms=120_000,
+                       teacher_confidence=None)
+    assert r["detections"] == 0
+    assert r["coverage"] == 0.0
+    assert r["confidence"]["overall"] == "low"
+    assert any("never detected" in n for n in r["notes"])
 
 
-def test_empty_room_does_not_crash():
-    q = quality.assess({}, {}, duration_ms=0, teacher_confidence=None)
-    assert q["detections"] == 0
-    assert q["confidence"]["overall"] == "low"
+def test_empty_lesson_does_not_divide_by_zero():
+    r = quality.assess([], sampled_frames=0, duration_ms=0, teacher_confidence=None)
+    assert r["coverage"] == 0.0
+    assert r["breaks"] == 0

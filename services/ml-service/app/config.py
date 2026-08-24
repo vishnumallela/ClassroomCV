@@ -17,79 +17,64 @@ class Settings(BaseSettings):
 
     database_url: str = "postgres://postgres:postgres@localhost:5433/classroom"
 
-    # Model + device are device-aware and env-overridable, so the SAME code runs
-    # on a Mac (MPS) for development and on an NVIDIA GPU in production.
+    # --- RF-DETR ------------------------------------------------------------
+    # The one detector. A fine-tuned RF-DETR (Medium) trained on this product's
+    # own five classes — door, screen, teacher, pointing, writing — which is
+    # what let the whole identity stack go away: the model NAMES the teacher,
+    # so nothing downstream has to infer who she is from age, behaviour or
+    # appearance. Measured against the held-out room's per-frame ground truth,
+    # it puts a correct box (IoU >= 0.5) on her in 95.5% of scored frames and
+    # emits at most ONE teacher box per frame.
     #
-    #   device="auto"     -> cuda if available, else mps, else cpu.
-    #   model_name="auto" -> the best YOLO26 pose model for the resolved device:
-    #                        yolo26x-pose on cuda (a GPU has the headroom),
-    #                        yolo26m-pose on mps/cpu (keeps dev iteration fast).
+    # Empty path = the service starts but /analyze fails loudly; there is no
+    # second detector to silently degrade to any more, and that is deliberate.
+    rfdetr_weights: str = ""
+    # Inference resolution. 576 is what the checkpoint was trained at; changing
+    # it re-scales every box the model learned and is not a free recall knob.
+    rfdetr_resolution: int = 576
+    # Frames per predict() call. RF-DETR takes a list, so batching is the main
+    # GPU throughput lever; 1 on cpu/mps where it buys nothing.
+    rfdetr_batch: int = 8
+    # Serve the model as a TensorRT engine (cuda only, needs the `tensorrt`
+    # extra). The engine is compiled for the exact GPU and TensorRT version
+    # present, so it is built ON THE POD at first load and cached beside the
+    # weight on the volume — never baked into the image.
     #
-    # YOLO26 is NMS-free and reports up to +7.2 pose AP over YOLO11 (COCO
-    # m-pose 68.8, l-pose 70.4). NMS-free matters here specifically: NMS merges
-    # overlapping boxes, which is how a half-visible teacher standing behind a
-    # student silently disappears from a crowded frame.
-    #
-    # Production (RunPod L4) profile — see docs/runpod-gpu-deployment.md:
-    #   DEVICE=cuda REQUIRE_DEVICE=cuda TENSORRT_EXPORT=true IMGSZ=1536
-    # The engine is exported once on the pod (cached on the volume) and served
-    # automatically on every later start. For a large live fleet prefer
-    # yolo26l-pose (batched) over x (see docs).
-    model_name: str = "auto"
-    device: str = "auto"
-    # Directory for auto-resolved weights AND their exported TensorRT engines.
-    # On RunPod point it at the volume (WEIGHTS_DIR=/workspace/weights): pod
-    # stop/start recreates the container layer, so a CWD-relative cache would
-    # re-download the weight and re-run the multi-minute engine export on
-    # billed GPU time at every start. Empty = current directory (dev).
-    # An explicit MODEL_NAME path is always used verbatim.
-    weights_dir: str = ""
+    # OFF by default, and the default should not change without a measurement.
+    # The last time this project adopted TensorRT on a "~5x" claim, the honest
+    # figure was 1.05-1.25x and the real win was an fp16 bug that had nothing
+    # to do with TensorRT. Turning fp16 on (which _optimize now does on cuda)
+    # is free; TensorRT costs a non-portable artifact, a heavyweight CUDA-only
+    # dependency, and a post-processing path that must be parity-checked.
+    rfdetr_tensorrt: bool = False
+
+    device: str = "auto"  # auto -> cuda, else mps, else cpu
     # Refuse to run when the resolved device is not this one (e.g. "cuda").
     # Empty disables the guard (dev boxes float between mps/cpu freely). A GPU
     # pod that silently degrades to CPU bills ~20x the wall-clock for the same
     # job, so production must die loudly instead.
     require_device: str = ""
-    # On cuda: export MODEL_NAME's .pt to a TensorRT engine at first load
-    # (one-time, minutes, cached next to the weight) and serve the engine.
-    # fp16 engine on an L4 is the ~5x throughput lever that turns a 12-camera
-    # class-day into ~3 GPU-hours. Engines are per-GPU-model, which is why the
-    # export runs on the pod itself rather than in the image build.
-    tensorrt_export: bool = False
-    # 1280 halves a 2560px CCTV frame so small back-row people survive letterbox
-    # downscale; on a GPU with headroom raise to 1536 (env IMGSZ) for more recall
-    # on distant, partially occluded people. The dynamic engine export covers
-    # both sizes without a rebuild.
-    imgsz: int = 1280
-    # 0.1 keeps the low-confidence boxes an occluded, half-visible person
-    # produces; BoT-SORT's second association pass (track_low_thresh) is what
-    # turns them into continued tracks instead of noise.
-    det_conf: float = 0.1
-    max_det: int = 100
+
+    # --- thresholds ---------------------------------------------------------
+    # Set from the sweep in docs/rfdetr-pipeline.md, not by taste. The teacher
+    # score is strongly bimodal on real footage (p10 = 0.79 on true positives),
+    # so anything in 0.25..0.6 gives the same coverage; 0.4 sits in the middle
+    # of that plateau, far from both edges.
+    teacher_conf: float = 0.4
+    # Door and screen are static furniture detected once per lesson, where a
+    # false positive is more expensive than a miss (it would move the zone), so
+    # they are held to a higher bar than the teacher.
+    zone_conf: float = 0.5
+    # Board-interaction classes. Reported as evidence alongside board time, so
+    # they need to be right rather than plentiful.
+    action_conf: float = 0.5
+
     # Comma-separated host[:port] allowlist for presigned media URLs. Empty
     # (default) rejects ALL URLs, so /analyze only reads local files (the SSRF
     # guard). Set to the object-store host (e.g. "minio:9000,localhost:9000")
     # to let the service fetch a video directly from MinIO/S3 by presigned URL,
     # instead of the API node downloading it to a shared filesystem.
     media_url_allowlist: str = ""
-    tracker_cfg: str = str(
-        Path(__file__).resolve().parent / "trackers" / "classroom_botsort.yaml"
-    )
-
-    # Teacher identification: bounded vision-model vote (app/teacher_id.py).
-    # Getting "who is the teacher" right decides every KPI, so the geometric
-    # ranker gets a second opinion of AT MOST vlm_frames Gemini calls per
-    # analysis (~$0.002/lesson) — never per-claim, never unbounded. Empty
-    # GEMINI_API_KEY disables it entirely (zero calls, geometric-only).
-    # vlm_model pins the "-latest" alias: dated 2.5-flash versions 404 on new
-    # API keys while still listed in the catalog.
-    gemini_api_key: str = ""
-    vlm_model: str = "gemini-flash-latest"
-    vlm_frames: int = 6  # hard per-analysis call cap
-    vlm_min_votes: int = 2  # pooled votes needed to crown/override
-    # REJECT the geometric pick only on positive evidence: the model answered
-    # at least this many frames and never once pointed at it. A network
-    # failure (0 answered) must keep the geometric pick.
-    vlm_reject_min_answered: int = 4
 
 
 @lru_cache

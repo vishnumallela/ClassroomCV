@@ -1,23 +1,24 @@
 """Classroom Surveillance ML service (FastAPI).
 
-Routes per SPEC.md "ML service API":
+Routes:
 - GET  /health
 - POST /analyze            -> 202 {job_id}, runs in the single worker thread
 - GET  /jobs/{job_id}      -> status/progress/stage/error
 - GET  /jobs/{job_id}/result -> AnalysisResult (404 until done)
-- POST /rederive           -> synchronous re-derive (roles+events) from stored
-                              detection_events, WITHOUT re-running YOLO
-- POST /detect-board       -> board zone proposal (YOLO-World / SAM 2 chain);
-                              400 on bad/missing video_path
+- POST /rederive           -> synchronous re-derive from stored detections,
+                              WITHOUT re-running the detector
+- POST /detect-board       -> board zone proposal from RF-DETR screen boxes
+- POST /detect-door        -> door zone proposal from RF-DETR door boxes
 """
 
 from __future__ import annotations
 
+import logging
 import os
 
 from fastapi import FastAPI, HTTPException
 
-from app import board_detect, db, detector, jobs
+from app import db, detector, jobs, zones as zones_mod
 from app.config import get_settings
 from app.models import (
     AnalysisResult,
@@ -30,7 +31,23 @@ from app.models import (
     VideoMeta,
 )
 
+logger = logging.getLogger(__name__)
+
 app = FastAPI(title="Classroom Surveillance ML Service")
+
+# Frames sampled for a zone proposal. The board and door do not move, so this
+# is about beating occasional false positives with a median, not about
+# catching a moment — measured presence is 96-100% (screen) and 77-81% (door),
+# and their centres vary by +/-0.002 over a whole lesson.
+#
+# 0.5 is the sparsest rate iter_frames actually honours (it floors there), so
+# asking for less would quietly get this anyway. A 5-minute lesson gives ~140
+# frames to take a median over, which is far more than the estimate needs.
+ZONE_SAMPLE_FPS = 0.5
+# Below this many sampled frames a median is not worth the name, so a short
+# clip gets a denser second pass rather than no zone at all.
+ZONE_MIN_FRAMES = 12
+ZONE_DENSE_FPS = 2.0
 
 
 @app.get("/health")
@@ -41,6 +58,9 @@ def health() -> dict:
         "device": detector.get_device(),
         "model": detector.resolve_model_name(),
         "model_loaded": detector.model_loaded(),
+        # What is ACTUALLY serving, read back rather than inferred from config:
+        # "TensorRT is enabled" and "TensorRT is running" are different claims.
+        "backend": detector.serving_backend(),
     }
 
 
@@ -77,70 +97,60 @@ def job_result(job_id: str) -> dict:
     return job.result
 
 
-@app.post("/detect-board", response_model=DetectBoardResponse)
-def detect_board(req: DetectBoardRequest) -> DetectBoardResponse:
-    """Propose a board zone polygon for a stored video.
+def _propose(video_path: str, kind: str) -> dict:
+    """Sample a video sparsely and place `kind`'s zone from the detections.
 
-    Sync def route: FastAPI runs it in the threadpool, so the seconds-long
-    SAM 2 inference does not block the event loop. Path validation reuses
-    detector._validate_video_path (same SSRF/arbitrary-read guard as
-    /analyze) and maps its rejection to 400 per the feature contract.
+    Sync path: FastAPI runs these routes in the threadpool, so the seconds of
+    inference do not block the event loop. Path validation reuses the same
+    SSRF/arbitrary-read guard /analyze uses.
     """
     try:
-        video_path, is_temp = detector.resolve_video_source(req.video_path)
+        local_path, is_temp = detector.resolve_video_source(video_path)
     except ValueError as exc:
         raise HTTPException(status_code=400, detail=str(exc))
     try:
-        result = board_detect.detect_board(req.video_id, video_path)
+        _meta, detections = detector.detect_video(local_path, sample_fps=ZONE_SAMPLE_FPS)
+        frames = len({d.video_ts_ms for d in detections})
+        if frames < ZONE_MIN_FRAMES:
+            # A short clip yields too few sparse samples to median over; take a
+            # denser pass rather than refusing to place a zone.
+            _meta, detections = detector.detect_video(local_path, sample_fps=ZONE_DENSE_FPS)
+            frames = len({d.video_ts_ms for d in detections})
+        return zones_mod.propose_zone(detections, kind, frames_seen=frames)
     finally:
         if is_temp:
             try:
-                os.unlink(video_path)
+                os.unlink(local_path)
             except OSError:
                 pass
-    return DetectBoardResponse(**result)
+
+
+@app.post("/detect-board", response_model=DetectBoardResponse)
+def detect_board(req: DetectBoardRequest) -> DetectBoardResponse:
+    """Propose a board zone from the lesson's own screen detections."""
+    return DetectBoardResponse(**_propose(req.video_path, "board"))
 
 
 @app.post("/detect-door", response_model=DetectBoardResponse)
 def detect_door(req: DetectBoardRequest) -> DetectBoardResponse:
-    """Propose a door zone polygon for a stored video.
-
-    Same SAM 2 / YOLO-World chain and response contract as /detect-board, with
-    door-shaped geometric scoring (tall, narrow, reaching toward the floor).
-    """
-    try:
-        video_path, is_temp = detector.resolve_video_source(req.video_path)
-    except ValueError as exc:
-        raise HTTPException(status_code=400, detail=str(exc))
-    try:
-        result = board_detect.detect_door(req.video_id, video_path)
-    finally:
-        if is_temp:
-            try:
-                os.unlink(video_path)
-            except OSError:
-                pass
-    return DetectBoardResponse(**result)
+    """Propose a door zone from the lesson's own door detections."""
+    return DetectBoardResponse(**_propose(req.video_path, "door"))
 
 
 @app.post("/rederive", response_model=AnalysisResult)
 async def rederive(req: RederiveRequest) -> dict:
-    """Re-derive identities + roles + events from stored detection_events.
+    """Re-derive the teacher timeline + events from stored detections.
 
-    Identities are REBUILT from meta.raw_track_id (remerge_from_raw): the
-    stored track_no may come from an older merge (e.g. histogram-driven
-    chimeras), so /rederive is the cheap way to apply merge/role fixes
-    without a 30-40 min YOLO re-run. The refreshed track_no assignment is
-    written back to detection_events through the same transactional replace
-    machinery /analyze uses, keeping stored rows consistent with the
-    returned tracks/events/analytics.
+    The cheap way to apply a zone edit: board time and entry/exit both depend
+    on the zone polygons, and recomputing them from stored rows takes
+    milliseconds against the minutes a detection re-run would cost.
     """
     try:
         detections = await db.fetch_detections(req.video_id)
     except Exception as exc:
         raise HTTPException(status_code=503, detail=f"database unavailable: {exc}")
     # Zero stored detections is a legitimate outcome of a successful analysis
-    # (e.g. a short clip with no detectable people): derive an empty-but-valid
+    # (a lesson where the teacher was never found): derive an empty-but-valid
     # result instead of erroring, so zone edits on such videos keep working.
 
     info = await db.fetch_video_info(req.video_id) or {}
@@ -151,37 +161,14 @@ async def rederive(req: RederiveRequest) -> dict:
         width=int(info.get("width") or 0),
         height=int(info.get("height") or 0),
     )
-    identities: list[dict] = []
-    track_hists: dict[int, list[float]] = {}
-    track_embeds: dict[int, list[float]] = {}
-    if detections:
-        try:
-            track_hists = await db.fetch_track_hists(req.video_id)
-        except Exception:
-            track_hists = {}
-        try:
-            track_embeds = await db.fetch_track_embeds(req.video_id)
-        except Exception:
-            track_embeds = {}
-        identities = jobs.remerge_from_raw(detections, track_hists, track_embeds)
     result = jobs.derive_result(
-        meta,
-        detections,
-        identities,
-        [z.model_dump() for z in req.zones],
-        track_embeds=track_embeds,
+        meta, detections, [z.model_dump() for z in req.zones]
     )
     if detections:
-        # Persist the rebuilt identity numbers (including teacher-fragment
-        # absorption applied by derive_result) so detection_events.track_no
-        # matches the tracks/analytics we return.
+        # Persist the refreshed teacher assignment so detection_events matches
+        # the tracks/analytics we just returned.
         try:
-            await db.replace_detections(
-                req.video_id,
-                detections,
-                track_hists=track_hists,
-                track_embeds=track_embeds,
-            )
+            await db.replace_detections(req.video_id, detections)
         except db.VideoDeletedError:
             raise HTTPException(
                 status_code=409, detail="video was deleted during rederive"

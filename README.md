@@ -8,18 +8,26 @@ lessons to get trustworthy teaching analytics — exactly three teacher KPIs:
 an honest confidence level, never a falsely precise number. No facial
 recognition, no named students, aggregate teacher insights only.
 
-The detection pipeline (YOLO26-pose + TensorRT, BoT-SORT, CLIP
-re-identification, YOLOE zone detection) runs on an on-demand RunPod GPU
-controlled from the app's Settings page; the dashboard reads the results over
-a typed API. Every analysed lesson also carries a **data-quality
-report** (`services/ml-service/app/quality.py`) — coverage, tracker
-fragmentation, and a re-identification-independent concurrent head count — so
-the dashboard can say how much each figure can be trusted.
+A single fine-tuned **RF-DETR** does the detection — five classes (`door`,
+`screen`, `teacher`, `pointing`, `writing`) — running on an on-demand RunPod GPU
+controlled from the app's Settings page; the dashboard reads the results over a
+typed API. Because the model names the teacher directly, there is no person
+re-identification, no multi-object tracker and no vision-model tiebreak: what
+follows detection is a plausible-motion check and a gap bridge
+(`services/ml-service/app/teacher.py`). **Students are never detected, never
+stored and never drawn** — only the teacher's boxes reach the database.
 
-The **How it works** page (`/architecture`) explains the whole pipeline in plain
-language, and [`docs/architecture-decision.md`](docs/architecture-decision.md)
-is the SOTA + scalability decision record (detection/tracking upgrades, the
-80-camera streaming path, and the TimescaleDB tiering for high-volume ingest).
+Every analysed lesson carries a **data-quality report**
+(`services/ml-service/app/quality.py`) — how much of the lesson she was visible
+for, how often her timeline broke, and how confident the detector was — so the
+dashboard can say how much each figure can be trusted.
+
+[`docs/rfdetr-pipeline.md`](docs/rfdetr-pipeline.md) is the design record: what
+the model measures, the sweeps behind each threshold, and why ~5,000 lines of
+identity inference could be deleted rather than fixed. The **How it works** page
+(`/architecture`) is the same story in plain language, and
+[`docs/architecture-decision.md`](docs/architecture-decision.md) covers
+scalability (the 80-camera streaming path, TimescaleDB tiering).
 
 ## Layout
 
@@ -27,7 +35,7 @@ is the SOTA + scalability decision record (detection/tracking upgrades, the
 apps/frontend/       Vite + TanStack Router SPA, shadcn UI, oRPC client
 apps/api-service/    Bun + Hono + oRPC, BullMQ pipeline, Drizzle + postgres.js
 packages/api-contracts/  Shared, type-only oRPC router types
-services/ml-service/     Python FastAPI, YOLO26-pose + SAM 2 (uv-managed, GPU-ready)
+services/ml-service/     Python FastAPI, RF-DETR (uv-managed, GPU-ready)
 data/                    Uploaded videos, thumbnails
 docker-compose.yml       TimescaleDB (5433) and Redis (6379)
 ```
@@ -45,7 +53,8 @@ docker-compose.yml       TimescaleDB (5433) and Redis (6379)
 # 1. Infrastructure (TimescaleDB on :5433, Redis on :6379)
 docker compose up -d
 
-# 2. ML service on :8000
+# 2. ML service on :8000. RFDETR_WEIGHTS must point at the fine-tuned
+#    checkpoint (see services/ml-service/.env) — there is no fallback detector.
 cd services/ml-service && uv run uvicorn app.main:app --port 8000
 
 # 3. JS dependencies and dev servers (from the repo root)

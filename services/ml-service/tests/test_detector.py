@@ -1,110 +1,101 @@
 """Regression tests for detector helpers (pure functions, no GPU/model).
 
 Covers:
-- _is_standing frame-aspect correction (normalized h/w must be converted back
-  to pixel aspect before the 1.6 threshold);
 - _clip_bbox interval clamping (stored bboxes must satisfy 0<=x<=x+w<=1);
+- _to_detections class filtering and normalization;
 - _effective_frame_count (frames actually decoded win over container metadata);
-- _validate_video_path (SSRF / arbitrary-path guard in front of cv2).
+- _validate_video_path (SSRF / arbitrary-path guard in front of cv2);
+- resolve_video_source's allowlist, redirect and size guards.
 """
 
 from pathlib import Path
+
 
 import numpy as np
 import pytest
 
 from app.detector import (
-    L_HIP,
-    L_KNEE,
-    R_HIP,
-    R_KNEE,
     _clip_bbox,
     _effective_frame_count,
-    _is_standing,
+    _to_detections,
     _validate_video_path,
 )
+from app.models import CLASS_SCREEN, CLASS_TEACHER
 
 
 # --------------------------------------------------------------------------- #
-# _is_standing
-# --------------------------------------------------------------------------- #
-
-
-class TestIsStandingFrameAspect:
-    def test_seated_person_on_16_9_frame_is_not_standing(self):
-        # 120x140 px bbox on 1920x1080 (pixel aspect 1.167, clearly seated).
-        # Normalized h/w = 2.07 used to trip the 1.6 threshold unconditionally.
-        w, h = 120 / 1920, 140 / 1080
-        assert _is_standing(w, h, None, None, frame_aspect=1920 / 1080) is False
-
-    def test_square_bbox_on_16_9_frame_is_not_standing(self):
-        # A perfectly square pixel bbox used to count as standing on 16:9.
-        w, h = 150 / 1920, 150 / 1080
-        assert _is_standing(w, h, None, None, frame_aspect=1920 / 1080) is False
-
-    def test_standing_person_on_16_9_frame_is_standing(self):
-        # 100x200 px bbox: pixel aspect 2.0 > 1.6.
-        w, h = 100 / 1920, 200 / 1080
-        assert _is_standing(w, h, None, None, frame_aspect=1920 / 1080) is True
-
-    def test_standing_person_on_portrait_frame_is_standing(self):
-        # 200x560 px on 1080x1920 (pixel aspect 2.8): normalized h/w = 1.575
-        # used to fall below the threshold and miss true standing.
-        w, h = 200 / 1080, 560 / 1920
-        assert _is_standing(w, h, None, None, frame_aspect=1080 / 1920) is True
-
-    def test_default_frame_aspect_is_neutral(self):
-        # Square frames (aspect 1.0) behave exactly as before the fix.
-        assert _is_standing(0.1, 0.2, None, None) is True
-        assert _is_standing(0.2, 0.2, None, None) is False
-
-    def test_keypoint_fallback_still_consulted_when_aspect_fails(self):
-        # Seated-shaped bbox but knees well below hips -> standing via
-        # keypoint geometry (branch order regression guard).
-        h = 0.4
-        kxy = np.zeros((17, 2), dtype=np.float32)
-        kconf = np.zeros(17, dtype=np.float32)
-        for i in (L_HIP, R_HIP):
-            kxy[i] = [0.5, 0.5]
-            kconf[i] = 0.9
-        for i in (L_KNEE, R_KNEE):
-            kxy[i] = [0.5, 0.5 + 0.3 * h]
-            kconf[i] = 0.9
-        assert _is_standing(0.3, h, kxy, kconf, frame_aspect=16 / 9) is True
-
-
-# --------------------------------------------------------------------------- #
-# _clip_bbox
+# _clip_bbox — corner-format clamping
 # --------------------------------------------------------------------------- #
 
 
 class TestClipBbox:
-    def test_box_inside_frame_is_unchanged(self):
-        bbox = _clip_bbox(0.5, 0.5, 0.2, 0.4)
-        assert bbox == {"x": 0.4, "y": 0.3, "w": 0.2, "h": 0.4}
+    def test_inside_frame_is_unchanged(self):
+        bbox = _clip_bbox(0.2, 0.3, 0.5, 0.9)
+        assert bbox == {"x": 0.2, "y": 0.3, "w": 0.3, "h": 0.6}
 
-    def test_right_edge_overflow_is_clamped_to_frame(self):
-        # cx=0.95, w=0.20 -> raw box spans 0.85..1.05; stored bbox used to
-        # keep w=0.20 so x+w=1.05, violating the SPEC 0-1 contract.
-        bbox = _clip_bbox(0.95, 0.5, 0.20, 0.4)
-        assert bbox["x"] == pytest.approx(0.85)
-        assert bbox["w"] == pytest.approx(0.15)
-        assert bbox["x"] + bbox["w"] <= 1.0 + 1e-9
-
-    def test_left_edge_overflow_keeps_center_of_visible_region(self):
-        # cx - w/2 = -0.08: clamping x alone used to shift the center right
-        # by 0.04 while keeping the full width.
-        bbox = _clip_bbox(0.02, 0.5, 0.2, 0.4)
-        assert bbox["x"] == 0.0
-        assert bbox["w"] == pytest.approx(0.12)
-        # Center of the stored box is the center of the visible region.
-        assert bbox["x"] + bbox["w"] / 2 == pytest.approx(0.06)
+    def test_left_overflow_clamps_both_edges(self):
+        # A box starting off the left edge keeps only its visible part, and the
+        # stored origin must not go negative.
+        bbox = _clip_bbox(-0.1, 0.2, 0.4, 0.5)
+        assert bbox["x"] == pytest.approx(0.0)
+        assert bbox["w"] == pytest.approx(0.4)
 
     def test_vertical_overflow_is_clamped(self):
-        bbox = _clip_bbox(0.5, 0.98, 0.2, 0.3)
-        assert bbox["y"] == pytest.approx(0.83)
-        assert bbox["h"] == pytest.approx(0.17)
+        bbox = _clip_bbox(0.5, 0.9, 0.7, 1.4)
+        assert bbox["y"] == pytest.approx(0.9)
+        assert bbox["h"] == pytest.approx(0.1)
         assert bbox["y"] + bbox["h"] <= 1.0 + 1e-9
+
+    def test_fully_offscreen_box_has_zero_extent(self):
+        bbox = _clip_bbox(1.2, 1.3, 1.5, 1.6)
+        assert bbox["w"] == 0.0
+        assert bbox["h"] == 0.0
+
+
+# --------------------------------------------------------------------------- #
+# _to_detections
+# --------------------------------------------------------------------------- #
+
+
+class _FakeDetections:
+    """Stand-in for supervision.Detections: the three arrays we read, plus len."""
+
+    def __init__(self, class_ids, confs, boxes):
+        self.class_id = np.array(class_ids)
+        self.confidence = np.array(confs)
+        self.xyxy = np.array(boxes, dtype=float)
+
+    def __len__(self):
+        return len(self.class_id)
+
+
+def _fake_det(class_ids, confs, boxes):
+    return _FakeDetections(class_ids, confs, boxes)
+
+
+class TestToDetections:
+    def test_pixels_are_normalized_by_frame_size(self):
+        det = _fake_det([CLASS_TEACHER], [0.9], [[256, 144, 512, 720]])
+        out = _to_detections(det, ts_ms=1000, width=2560, height=1440)
+        assert len(out) == 1
+        d = out[0]
+        assert d.cls == CLASS_TEACHER
+        assert d.video_ts_ms == 1000
+        assert d.conf == pytest.approx(0.9)
+        assert d.bbox["x"] == pytest.approx(0.1)
+        assert d.bbox["y"] == pytest.approx(0.1)
+        assert d.bbox["w"] == pytest.approx(0.1)
+        assert d.bbox["h"] == pytest.approx(0.4)
+
+    def test_unknown_class_ids_are_dropped(self):
+        """A checkpoint emitting a class this build does not map must not
+        produce a detection with a meaningless class id."""
+        det = _fake_det([CLASS_SCREEN, 99], [0.8, 0.8], [[0, 0, 10, 10], [0, 0, 10, 10]])
+        out = _to_detections(det, ts_ms=0, width=100, height=100)
+        assert [d.cls for d in out] == [CLASS_SCREEN]
+
+    def test_empty_frame_yields_nothing(self):
+        assert _to_detections(None, 0, 100, 100) == []
 
 
 # --------------------------------------------------------------------------- #
@@ -176,67 +167,6 @@ class TestValidateVideoPath:
         monkeypatch.setenv("DATA_DIR", str(data_dir))
         with pytest.raises(ValueError):
             _validate_video_path(str(data_dir / ".." / "secret.mp4"))
-
-
-# --------------------------------------------------------------------------- #
-# _embed_tracks streams crops in batches (bounded memory for long videos)
-# --------------------------------------------------------------------------- #
-
-
-def test_embed_tracks_streams_and_normalizes(monkeypatch):
-    """CLIP embedding must batch INSIDE the loop (not materialize every tensor
-    up front) so a 1-hour video's tens of thousands of crops cannot OOM, and it
-    must return a timestamped gallery of unit-norm vectors per raw track.
-
-    A gallery rather than one averaged vector: re-identification needs to ask
-    whether her BEST view of one stretch matches her BEST view of another, and
-    the timestamps are what let a raw id that changed person be split with each
-    half keeping its own crops."""
-    import numpy as np
-    import torch
-
-    from app import detector as D
-
-    # Force multiple batches: 5 crops across 2 tracks with batch size 2.
-    monkeypatch.setattr(D, "CLIP_BATCH_SIZE", 2)
-
-    seen_batch_sizes: list[int] = []
-
-    class FakeModel:
-        def encode_image(self, batch):
-            seen_batch_sizes.append(int(batch.shape[0]))
-            # flatten each fake CxHxW crop tensor into a feature vector
-            return batch.reshape(batch.shape[0], -1)
-
-    def fake_preprocess(img):
-        m = float(np.asarray(img).mean())
-        return torch.full((3, 2, 2), m)  # a fake 3x2x2 "image" tensor
-
-    monkeypatch.setattr(D, "_get_clip", lambda: (FakeModel(), fake_preprocess, "cpu"))
-    # Exercise the CLIP fallback path specifically: the person re-ID encoder is
-    # preferred in production but needs a 28 MB ONNX weight this test must not
-    # download.
-    monkeypatch.setattr(D, "_get_reid", lambda: None)
-
-    crops = {
-        7: [(ts, np.full((8, 8, 3), v, np.uint8)) for ts, v in ((0, 10), (1000, 20), (2000, 30))],
-        9: [(ts, np.full((8, 8, 3), v, np.uint8)) for ts, v in ((500, 40), (1500, 50))],
-    }
-    out = D._embed_tracks(crops)
-
-    assert set(out.keys()) == {7, 9}
-    assert [ts for ts, _v in out[7]] == [0, 1000, 2000]
-    assert [ts for ts, _v in out[9]] == [500, 1500]
-    for gallery in out.values():
-        for _ts, vec in gallery:
-            assert len(vec) == 12  # 3*2*2 flattened
-            assert abs(float(np.linalg.norm(vec)) - 1.0) < 1e-5  # unit-normalized
-    # gallery_vectors strips the stamps for consumers that only want appearance
-    assert len(D.gallery_vectors(out[7])) == 3
-    assert len(D.gallery_vectors(D.median_embed(out[7]))) == 1
-    # 5 crops at batch size 2 -> batches of [2, 2, 1]; never all 5 at once.
-    assert seen_batch_sizes == [2, 2, 1]
-    assert max(seen_batch_sizes) <= 2
 
 
 # --------------------------------------------------------------------------- #
@@ -343,7 +273,129 @@ def test_resolve_local_path_passthrough(monkeypatch):
     from app import detector as D
 
     monkeypatch.delenv("DATA_DIR", raising=False)
-    asset = str((Path(__file__).resolve().parent / "assets" / "bus.jpg"))
+    asset = str((Path(__file__).resolve().parent / "assets" / "synthetic.mp4"))
     path, is_temp = D.resolve_video_source(asset)
     assert is_temp is False
     assert path == str(Path(asset).resolve())
+
+
+# --------------------------------------------------------------------------- #
+# _optimize: precision and trace batch size
+# --------------------------------------------------------------------------- #
+
+
+class TestOptimize:
+    """The JIT trace must be built for the precision and batch it will run.
+
+    Both rfdetr defaults are wrong for a GPU deployment (fp32, batch 1), and
+    getting this wrong is invisible: the run is correct, just half the speed
+    and twice the VRAM. That is exactly how the previous pipeline's "~5x
+    TensorRT speedup" turned out to be an fp16 bug.
+    """
+
+    def _capture(self, monkeypatch, device, batch=8):
+        import torch
+
+        from app import detector as D
+        from app.config import get_settings
+
+        monkeypatch.setenv("RFDETR_BATCH", str(batch))
+        get_settings.cache_clear()
+        seen = {}
+
+        class _M:
+            def inference(self, compile, batch_size, dtype):
+                seen.update(compile=compile, batch_size=batch_size, dtype=dtype)
+
+        D._optimize(_M(), device)
+        get_settings.cache_clear()
+        return seen, torch
+
+    def test_cuda_traces_fp16_at_the_real_batch_size(self, monkeypatch):
+        seen, torch = self._capture(monkeypatch, "cuda", batch=16)
+        assert seen["dtype"] is torch.float16
+        assert seen["batch_size"] == 16
+        assert seen["compile"] is True
+
+    def test_specific_cuda_device_still_gets_fp16(self, monkeypatch):
+        seen, torch = self._capture(monkeypatch, "cuda:1")
+        assert seen["dtype"] is torch.float16
+
+    def test_mps_stays_fp32_batch_one(self, monkeypatch):
+        """Half precision on MPS is uneven and batching buys nothing off-GPU."""
+        seen, torch = self._capture(monkeypatch, "mps", batch=16)
+        assert seen["dtype"] is torch.float32
+        assert seen["batch_size"] == 1
+
+    def test_cpu_stays_fp32_batch_one(self, monkeypatch):
+        seen, torch = self._capture(monkeypatch, "cpu", batch=16)
+        assert seen["dtype"] is torch.float32
+        assert seen["batch_size"] == 1
+
+    def test_a_tracing_failure_degrades_instead_of_raising(self, monkeypatch):
+        """Optimization is throughput, not correctness: losing it must not sink
+        a multi-minute analysis."""
+        from app import detector as D
+
+        class _Boom:
+            def inference(self, **kw):
+                raise RuntimeError("no compiler")
+
+        D._optimize(_Boom(), "cuda")  # must not raise
+
+
+class TestRecordPrecision:
+    """The read-back must report what the MODEL carries, not what we asked for.
+
+    This is the guard the previous pipeline had and this rewrite briefly lost.
+    Its whole point is that a check built on the request shows a green light on
+    exactly the broken configuration it exists to catch — so these tests drive
+    it with a module whose dtype disagrees with the request.
+    """
+
+    def _model_with(self, dtype):
+        import torch
+
+        class _Mod(torch.nn.Module):
+            def __init__(self):
+                super().__init__()
+                self.lin = torch.nn.Linear(2, 2).to(dtype)
+
+        class _Ctx:
+            inference_model = _Mod()
+
+        class _M:
+            model = _Ctx()
+
+        return _M()
+
+    def test_reports_error_when_the_model_is_not_the_dtype_we_asked_for(self, caplog):
+        import torch
+
+        from app import detector as D
+
+        m = self._model_with(torch.float32)
+        with caplog.at_level("ERROR"):
+            D._record_precision(m, torch.float16)
+        assert any("DEGRADED" in r.message for r in caplog.records)
+
+    def test_silent_when_the_model_matches(self, caplog):
+        import torch
+
+        from app import detector as D
+
+        m = self._model_with(torch.float32)
+        with caplog.at_level("ERROR"):
+            D._record_precision(m, torch.float32)
+        assert not [r for r in caplog.records if "DEGRADED" in r.message]
+
+    def test_unreadable_model_does_not_raise(self):
+        """A diagnostic must never be the thing that fails an analysis."""
+        import torch
+
+        from app import detector as D
+
+        class _Broken:
+            model = None
+
+        D._record_precision(_Broken(), torch.float16)  # must not raise

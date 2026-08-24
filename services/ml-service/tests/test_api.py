@@ -4,7 +4,7 @@ from fastapi.testclient import TestClient
 
 from app import db
 from app.main import app
-from app.models import AnalysisResult, Detection
+from app.models import CLASS_TEACHER, AnalysisResult, Detection
 
 client = TestClient(app)
 
@@ -145,38 +145,22 @@ def test_rederive_with_zero_detections_and_no_video_info(monkeypatch):
     assert parsed.video.duration_ms == 0
 
 
-def test_rederive_reruns_roles_and_events_only(monkeypatch):
-    """Rederive REBUILDS identities from stored meta.raw_track_id (histograms
-    are never persisted, so the merge falls back to spatial continuity) and
-    persists the rebuilt track_no back through replace_detections — no
-    histograms, no YOLO re-run."""
-    teacher = [
+def test_rederive_recomputes_kpis_from_stored_rows(monkeypatch):
+    """Rederive replays the teacher timeline and the zone-dependent KPIs from
+    stored rows — no model re-run — and persists the refreshed assignment."""
+    stored = [
         Detection(
             video_ts_ms=ts,
-            raw_track_id=5,
+            cls=CLASS_TEACHER,
             bbox={"x": 0.15, "y": 0.15, "w": 0.1, "h": 0.4},
             conf=0.9,
-            standing=True,
-            back_to_camera=True,
             track_no=1,
-        )
-        for ts in range(0, 30_001, 500)
-    ]
-    student = [
-        Detection(
-            video_ts_ms=ts,
-            raw_track_id=8,
-            bbox={"x": 0.7, "y": 0.6, "w": 0.1, "h": 0.2},
-            conf=0.8,
-            standing=False,
-            back_to_camera=False,
-            track_no=2,
         )
         for ts in range(0, 30_001, 500)
     ]
 
     async def fake_fetch(video_id, dsn=None):
-        return teacher + student
+        return stored
 
     async def fake_info(video_id, dsn=None):
         return {"duration_ms": 60_000, "fps": 30.0, "width": 1280, "height": 720}
@@ -184,8 +168,8 @@ def test_rederive_reruns_roles_and_events_only(monkeypatch):
     persisted: dict = {}
 
     async def fake_replace(video_id, detections, **kwargs):
-        persisted["rows"] = list(detections)
-        return len(detections)
+        persisted["rows"] = [d for d in detections if d.track_no is not None]
+        return len(persisted["rows"])
 
     monkeypatch.setattr(db, "fetch_detections", fake_fetch)
     monkeypatch.setattr(db, "fetch_video_info", fake_info)
@@ -206,14 +190,13 @@ def test_rederive_reruns_roles_and_events_only(monkeypatch):
     assert r.status_code == 200
     parsed = AnalysisResult.model_validate(r.json())
     assert parsed.video.duration_ms == 60_000
-    assert len(parsed.tracks) == 2
-    roles = {t.track_no: t.role for t in parsed.tracks}
-    assert roles[1] == "teacher" and roles[2] == "student"
-    # raw ids reconstructed from stored meta
-    assert [t for t in parsed.tracks if t.track_no == 1][0].meta.raw_track_ids == [5]
+    # One track, and it is hers: nothing else is stored or derived.
+    assert len(parsed.tracks) == 1
+    assert parsed.tracks[0].role == "teacher"
+    assert parsed.tracks[0].track_no == 1
+    # The zone-dependent KPIs are what rederive exists to recompute.
     assert parsed.analytics.teacher_board_ms is not None
     assert parsed.analytics.teacher_board_ms > 0
     assert parsed.analytics.presence_intervals == [[0, 30_000]]
-    # rebuilt identity numbers were persisted back to detection_events
-    assert persisted["rows"], "rederive must persist the rebuilt identities"
-    assert {r.track_no for r in persisted["rows"]} == {1, 2}
+    assert persisted["rows"], "rederive must persist the refreshed assignment"
+    assert {row.track_no for row in persisted["rows"]} == {1}

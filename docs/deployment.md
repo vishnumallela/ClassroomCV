@@ -168,7 +168,9 @@ unaffected either way; they come from Railway's own GitHub integration.
 
 - GPU: start for the batch, stop after — ~3 GPU-hours per 12-camera class-day
   (~$1.15 on-demand). The Settings page's Stop button is the lever.
-- Gemini: hard-capped at `vlm_frames` (6) calls per lesson for teacher ID —
-  ~$0.002/lesson, zero when `GEMINI_API_KEY` is unset.
+- No per-lesson API cost. One detector runs on the pod and nothing calls out;
+  the small hard-capped Gemini vote that used to break ties on who the teacher
+  was went away with the rest of the identity stack.
 - Storage: MinIO on a Railway volume for media, TimescaleDB rows slimmed
-  to the three teacher KPIs; raw detections age out per the retention policy.
+  to the three teacher KPIs; only the teacher's raw detections are stored at
+  all, and they age out per the retention policy.

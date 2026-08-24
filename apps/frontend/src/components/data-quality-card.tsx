@@ -14,8 +14,20 @@ const TIER_META: Record<Tier, { label: string; dot: string }> = {
   low: { label: "Tentative", dot: "bg-tier-low" },
 };
 
-function TierPill({ tier, size = "sm" }: { tier: Tier; size?: "sm" | "lg" }) {
-  const m = TIER_META[tier];
+// `data_quality` is stored jsonb, so rows outlive the code that wrote them.
+// Videos analysed by the previous pipeline carry a different shape (identities /
+// raw_tracks / fragmentation, and no `continuity` tier), and reading a missing
+// field off one of those used to throw and blank the whole page. Every accessor
+// below therefore tolerates absence and renders an em dash.
+function TierPill({ tier, size = "sm" }: { tier?: Tier; size?: "sm" | "lg" }) {
+  const m = tier ? TIER_META[tier] : undefined;
+  if (!m || !tier) {
+    return (
+      <Badge variant="low" className={size === "lg" ? "px-2.5 py-1 text-xs" : "text-[0.7rem]"}>
+        —
+      </Badge>
+    );
+  }
   return (
     <Badge variant={tier} className={size === "lg" ? "px-2.5 py-1 text-xs" : "text-[0.7rem]"}>
       <span className={cn("size-1.5 rounded-full", m.dot)} />
@@ -27,21 +39,29 @@ function TierPill({ tier, size = "sm" }: { tier: Tier; size?: "sm" | "lg" }) {
 const DIMENSIONS: { key: keyof DataQuality["confidence"]; label: string; help: string }[] = [
   {
     key: "coverage",
-    label: "Camera coverage",
-    help: "How much of the lesson the camera actually saw people.",
+    label: "Teacher coverage",
+    help: "How much of the lesson the teacher was actually visible for.",
   },
   {
-    key: "identity",
-    label: "Tracking",
-    help: "How cleanly the teacher was followed without fragmenting.",
+    key: "continuity",
+    label: "Continuity",
+    help: "How often her timeline broke. Entries and exits are counted from those breaks.",
   },
-  { key: "teacher", label: "Teacher ID", help: "How confidently the teacher was identified." },
+  {
+    key: "teacher",
+    label: "Detection",
+    help: "How confident the detector was when it found her.",
+  },
 ];
 
 export function DataQualityCard({ analytics }: { analytics: Analytics }) {
   const dq = analytics.dataQuality;
   if (!dq) return null;
-  const overall = dq.confidence.overall as Tier;
+  const overall = dq.confidence?.overall as Tier | undefined;
+  const num = (v: unknown, digits = 0): string =>
+    typeof v === "number" && Number.isFinite(v) ? v.toFixed(digits) : "—";
+  const pct = (v: unknown): string =>
+    typeof v === "number" && Number.isFinite(v) ? `${Math.round(v * 100)}%` : "—";
 
   return (
     <Card className="p-5">
@@ -62,7 +82,7 @@ export function DataQualityCard({ analytics }: { analytics: Analytics }) {
           >
             <div className="text-xs text-muted-foreground">{d.label}</div>
             <div className="mt-1.5">
-              <TierPill tier={dq.confidence[d.key] as Tier} />
+              <TierPill tier={dq.confidence?.[d.key] as Tier | undefined} />
             </div>
           </div>
         ))}
@@ -70,25 +90,25 @@ export function DataQualityCard({ analytics }: { analytics: Analytics }) {
 
       <div className="mt-4 flex flex-wrap items-center gap-x-6 gap-y-2 rounded-lg bg-muted/50 px-4 py-3 text-sm">
         <CrossCheck
-          label="Distinct identities"
-          value={dq.identities}
-          hint="How many separate people the tracker resolved."
+          label="Teacher coverage"
+          value={pct(dq.coverage)}
+          hint="Share of sampled frames the teacher was found in."
         />
         <CrossCheck
-          label="Camera coverage"
-          value={`${Math.round(dq.coverage * 100)}%`}
-          hint="Share of the active lesson with a person in view."
+          label="Timeline breaks"
+          value={num(dq.breaks)}
+          hint="Gaps in her timeline. Entries and exits are counted from these."
         />
         <CrossCheck
-          label="Fragments / person"
-          value={dq.fragmentation.toFixed(1)}
-          hint="Tracker ids merged into each identity (1.0 is perfect)."
+          label="Detection confidence"
+          value={num(dq.mean_confidence, 2)}
+          hint="Average score of the detections behind her timeline."
         />
       </div>
 
-      {dq.notes.length > 0 && (
+      {(dq.notes ?? []).length > 0 && (
         <ul className="mt-4 space-y-1.5">
-          {dq.notes.map((note) => (
+          {(dq.notes ?? []).map((note) => (
             <li key={note} className="flex gap-2 text-xs leading-relaxed text-muted-foreground">
               <CircleAlert className="mt-0.5 size-3.5 shrink-0 text-tier-medium" />
               <span>{note}</span>
@@ -100,7 +120,8 @@ export function DataQualityCard({ analytics }: { analytics: Analytics }) {
       <p className="mt-4 flex items-start gap-1.5 border-t border-border pt-3 text-[0.7rem] leading-relaxed text-muted-foreground">
         <Info className="mt-px size-3 shrink-0" />
         Aggregate estimates from video sampled at 5 frames per second. No faces are recognized and
-        no student is named; only the teacher's movement is analyzed.
+        no student is detected at all — the model looks only for the teacher, the board and the
+        door.
       </p>
     </Card>
   );

@@ -31,19 +31,22 @@ export interface AnalysisResultEvent {
 
 export type QualityTier = "high" | "medium" | "low";
 
+// Mirrors services/ml-service/app/quality.py. The old identity/fragmentation
+// signals described how hard an appearance merge had to work to reassemble one
+// person out of tracker fragments; the detector now names the teacher, so what
+// can go wrong is coverage, continuity and detection confidence.
 export interface DataQuality {
   detections: number;
   frames: number;
-  identities: number;
-  raw_tracks: number;
-  fragmentation: number;
+  sampled_frames: number;
   coverage: number;
-  occupied_buckets: number;
-  span_buckets: number;
+  mean_confidence: number;
+  breaks: number;
+  longest_gap_ms: number;
   confidence: {
     overall: QualityTier;
-    identity: QualityTier;
     coverage: QualityTier;
+    continuity: QualityTier;
     teacher: QualityTier;
   };
   notes: string[];
@@ -71,7 +74,8 @@ export interface AnalysisResult {
 export interface MlJobStatus {
   status: "queued" | "running" | "done" | "failed";
   progress: number;
-  stage: "detecting" | "merging" | "deriving" | null;
+  // No 'merging' stage: there are no identity fragments to merge.
+  stage: "detecting" | "deriving" | null;
   error: string | null;
 }
 

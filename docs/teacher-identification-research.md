@@ -1,5 +1,13 @@
 # What the literature says about the problem we are solving
 
+> [!IMPORTANT]
+> **Superseded.** This document describes the YOLO-pose + appearance-merge
+> pipeline that a fine-tuned RF-DETR replaced. It is kept because its measured
+> results and negative findings are the reasoning behind the current design —
+> in particular *why* the identity stack it describes could be deleted rather
+> than fixed. For the pipeline that actually runs, see
+> [docs/rfdetr-pipeline.md](rfdetr-pipeline.md).
+
 A 2026 research pass over six areas — classroom video analytics, multi-object
 tracking, person re-identification, age estimation, global data association,
 and evaluation — read against the seven weaknesses measured in

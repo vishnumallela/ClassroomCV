@@ -10,17 +10,15 @@ from app.events import (
     presence_intervals,
     teacher_heatmap,
 )
-from app.models import Detection
+from app.models import CLASS_TEACHER, Detection
 
 
-def _det(ts, track, x=0.5, y=0.5, w=0.1, h=0.3, standing=False, btc=False, raw=None):
+def _det(ts, track, x=0.5, y=0.5, w=0.1, h=0.3):
     return Detection(
         video_ts_ms=ts,
-        raw_track_id=raw if raw is not None else track,
+        cls=CLASS_TEACHER,
         bbox={"x": x, "y": y, "w": w, "h": h},
         conf=0.9,
-        standing=standing,
-        back_to_camera=btc,
         track_no=track,
     )
 
@@ -148,7 +146,7 @@ def test_board_condition_geometry():
     near = _det(0, 1, x=0.15, y=0.2, w=0.1, h=0.3)  # center x=0.2 inside x-range
     far = _det(0, 1, x=0.8, y=0.6, w=0.1, h=0.3)
     side = _det(0, 1, x=0.45, y=0.1, w=0.2, h=0.3)  # intersects expanded box only
-    side_btc = _det(0, 1, x=0.45, y=0.1, w=0.2, h=0.3, btc=True)
+    side_btc = _det(0, 1, x=0.45, y=0.1, w=0.2, h=0.3)
     assert board_condition(near, poly) is True
     assert board_condition(far, poly) is False
     assert board_condition(side, poly) is False  # center outside x-range
@@ -177,7 +175,7 @@ _ANALYTICS_KEYS = {
 def test_derive_full_teacher_at_board():
     poly = [[0.1, 0.1], [0.4, 0.1], [0.4, 0.3], [0.1, 0.3]]
     teacher = [
-        _det(t, 1, x=0.15, y=0.15, w=0.1, h=0.4, standing=True, btc=True)
+        _det(t, 1, x=0.15, y=0.15, w=0.1, h=0.4)
         for t in range(0, 30_001, 200)
     ]
     student = [_det(t, 2, x=0.7, y=0.6) for t in range(0, 60_000, 500)]
@@ -229,7 +227,7 @@ def test_derive_no_teacher_degrades_gracefully():
 
 
 def test_derive_no_board_zone_means_null_board_ms():
-    dets = {1: [_det(t, 1, standing=True) for t in range(0, 30_000, 500)]}
+    dets = {1: [_det(t, 1) for t in range(0, 30_000, 500)]}
     roles = {1: ("teacher", 0.9)}
     _, analytics = derive(dets, roles, duration_ms=30_000, zones=[])
     assert analytics["teacher_board_ms"] is None
@@ -332,8 +330,8 @@ def test_bridge_short_gaps_merges_brief_and_keeps_long():
 def test_derive_no_door_bridges_blind_spot_no_phantom_crossing():
     # Teacher present 0-10s, 6s blind-spot gap, present 16-58s. With no door,
     # the brief gap must NOT become an exit+enter and presence must include it.
-    dets = [_det(t, 1, standing=True) for t in range(0, 10_001, 500)]
-    dets += [_det(t, 1, standing=True) for t in range(16_000, 58_001, 500)]
+    dets = [_det(t, 1) for t in range(0, 10_001, 500)]
+    dets += [_det(t, 1) for t in range(16_000, 58_001, 500)]
     _events, analytics = derive(
         {1: dets}, {1: ("teacher", 0.9)}, duration_ms=60_000, zones=[]
     )

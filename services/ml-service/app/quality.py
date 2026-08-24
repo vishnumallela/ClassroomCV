@@ -2,28 +2,29 @@
 
 Every dashboard number is an estimate over sampled, occluded CCTV. A school
 leader reading "42 minutes at the board" deserves to know whether that figure
-came from a clean, well-covered lesson or from a half-occluded camera whose
-tracker fragmented the teacher into a dozen identities. This module turns the
-pipeline's own internal signals into an honest, additive confidence report.
-It NEVER changes a derived number — it only annotates them.
+came from a clean, well-covered lesson or from a camera that lost the teacher
+for a third of it. This module turns the pipeline's own signals into an honest,
+additive confidence report. It NEVER changes a derived number — it only
+annotates them.
 
-Three signals drive the report, each one a direct trust input for the three
-teacher KPIs (entry/exit, board time, heatmap):
+The three signals changed with the detector, because two of the old ones stopped
+meaning anything. "Distinct identities" and "tracker ids merged per identity"
+measured how hard the old appearance merge had to work to reassemble one person
+out of fragments; with the teacher detected as a named class there is no merge,
+no fragments and no rival identity, so reporting a fragmentation of 1.0 every
+time would be theatre. What can still go wrong is different, and this is it:
 
-1. Coverage: over the lesson's active span (first to last detection), what
-   fraction of time buckets actually contained a detected person. Low coverage
-   means the camera went dark, the frame was occluded, or the model dropped
-   out — presence-derived numbers are then a floor, not a measurement.
+1. COVERAGE: of the frames sampled across the lesson, in how many was she
+   actually found? This is the honest denominator behind every duration: at 80%
+   coverage, "time at the board" is a floor rather than a measurement.
 
-2. Fragmentation: raw tracker ids per final identity. The tracker mints a new
-   id every time a person is occluded or leaves frame; the merge stage reunites
-   them. A ratio near 1 means clean tracking; a high ratio means the merge did
-   heavy lifting and the teacher's timeline (entries/exits, board sessions,
-   heatmap path) carries more stitching error.
+2. CONTINUITY: how many times did her timeline break, and what was the longest
+   break? Entries and exits are counted from those breaks, so a lesson full of
+   short dropouts is one where that KPI specifically should be distrusted —
+   even when total coverage looks healthy.
 
-3. Teacher identification: the margin behind the "who is the teacher" decision
-   (roles.assign_roles' role_confidence, raised by the teacher_id vote when it
-   confirms). Every KPI hangs off this one label.
+3. DETECTION CONFIDENCE: how sure the model was when it did find her. A lesson
+   held together by 0.3-confidence boxes is a lesson to be careful with.
 """
 
 from __future__ import annotations
@@ -32,39 +33,26 @@ from typing import Optional
 
 from app.models import Detection
 
-BUCKET_MS = 5_000
+# A gap in her detections at least this long is a break in the timeline rather
+# than a sampling wobble. Matches heuristics.PRESENCE_GAP_MS, so the breaks
+# counted here are exactly the ones entry/exit is derived from.
+BREAK_GAP_MS = 5_000
 
-# Fragmentation (raw tracks / identity): <=2 is clean tracking, 2..4 means the
-# merge stage did real work, >4 means identity-derived counts are estimates.
-FRAG_CLEAN = 2.0
-FRAG_NOISY = 4.0
+# Coverage of the lesson (fraction of sampled frames she was found in). Below
+# these, duration-based metrics undercount.
+COVERAGE_HIGH = 0.85
+COVERAGE_LOW = 0.6
 
-# Coverage of the active span (fraction of buckets with any detection). Below
-# these, the camera dropped out often enough that time-based metrics undercount.
-COVERAGE_HIGH = 0.9
-COVERAGE_LOW = 0.7
+# Timeline breaks per lesson. A handful is normal (she leaves the room); dozens
+# means the detector kept losing her and the entry/exit count is inflated.
+BREAKS_CLEAN = 6
+BREAKS_NOISY = 20
 
-# Teacher-identification margin tiers (roles emits 0.5 + lead, capped at 1.0).
-TEACHER_CONF_HIGH = 0.65
-TEACHER_CONF_MED = 0.55
+# Mean detection confidence tiers.
+CONF_HIGH = 0.7
+CONF_LOW = 0.5
 
 Tier = str  # "high" | "medium" | "low"
-
-
-def _coverage(dets_by_track: dict[int, list[Detection]], bucket_ms: int) -> tuple[float, int, int]:
-    """(fraction, occupied_buckets, span_buckets) over the active detection span.
-
-    Measures dropout WITHIN the lesson (first to last detection), not the idle
-    bookends before/after class, so a genuinely empty pre-lesson stretch does
-    not read as poor data.
-    """
-    all_ts = [d.video_ts_ms for dets in dets_by_track.values() for d in dets]
-    if not all_ts:
-        return 0.0, 0, 0
-    first, last = min(all_ts), max(all_ts)
-    span_buckets = max(1, (last - first) // bucket_ms + 1)
-    occupied = {(ts - first) // bucket_ms for ts in all_ts}
-    return len(occupied) / span_buckets, len(occupied), span_buckets
 
 
 def _worst(*tiers: Tier) -> Tier:
@@ -76,96 +64,110 @@ def _worst(*tiers: Tier) -> Tier:
     return min(present, key=lambda t: order[t])
 
 
+def _breaks(ts_sorted: list[int], gap_ms: int) -> tuple[int, int]:
+    """(number of breaks, longest break in ms) in a sorted timestamp list."""
+    breaks = 0
+    longest = 0
+    for prev, cur in zip(ts_sorted, ts_sorted[1:]):
+        gap = cur - prev
+        if gap >= gap_ms:
+            breaks += 1
+            longest = max(longest, gap)
+    return breaks, longest
+
+
 def assess(
-    dets_by_track: dict[int, list[Detection]],
-    roles_map: dict[int, tuple[str, Optional[float]]],
+    teacher_dets: list[Detection],
+    sampled_frames: int,
     duration_ms: int,
     teacher_confidence: Optional[float] = None,
-    bucket_ms: int = BUCKET_MS,
+    mean_conf: Optional[float] = None,
+    gap_ms: int = BREAK_GAP_MS,
 ) -> dict:
     """Additive data-quality report for one analysed video.
 
-    Pure function of the same merged, role-labelled detections the analytics are
-    derived from, so it is exact and free to compute. Returns a JSON-friendly
-    dict; callers attach it to the analytics payload untouched.
+    Pure function of the same teacher detections the analytics are derived
+    from, so it is exact and free to compute. Returns a JSON-friendly dict;
+    callers attach it to the analytics payload untouched.
     """
-    detections = sum(len(d) for d in dets_by_track.values())
-    identities = len(dets_by_track)
-    raw_tracks = len(
-        {d.raw_track_id for dets in dets_by_track.values() for d in dets}
-    )
-    frames = len({d.video_ts_ms for dets in dets_by_track.values() for d in dets})
-    fragmentation = raw_tracks / identities if identities else 0.0
-
-    coverage, occupied_buckets, span_buckets = _coverage(dets_by_track, bucket_ms)
+    dets = sorted(teacher_dets, key=lambda d: d.video_ts_ms)
+    ts = [d.video_ts_ms for d in dets]
+    frames = len(set(ts))
+    coverage = frames / sampled_frames if sampled_frames > 0 else 0.0
+    breaks, longest_gap = _breaks(ts, gap_ms)
+    if mean_conf is None:
+        mean_conf = (sum(d.conf for d in dets) / len(dets)) if dets else 0.0
 
     notes: list[str] = []
 
-    # --- identity-tracking confidence (fragmentation) ---------------------- #
-    if fragmentation <= FRAG_CLEAN:
-        identity_tier = "high"
-    elif fragmentation <= FRAG_NOISY:
-        identity_tier = "medium"
+    # --- coverage ---------------------------------------------------------- #
+    if not dets:
+        coverage_tier: Tier = "low"
         notes.append(
-            f"Tracker fragmented people into ~{fragmentation:.1f} ids each; "
-            "the teacher's timeline is a re-id estimate."
+            "The teacher was never detected in this lesson; teacher metrics are "
+            "unavailable."
         )
-    else:
-        identity_tier = "low"
-        notes.append(
-            f"Heavy fragmentation (~{fragmentation:.1f} ids per person): treat "
-            "the teacher's entry/exit and board sessions as approximate."
-        )
-
-    # --- coverage contribution --------------------------------------------- #
-    if coverage >= COVERAGE_HIGH:
+    elif coverage >= COVERAGE_HIGH:
         coverage_tier = "high"
     elif coverage >= COVERAGE_LOW:
         coverage_tier = "medium"
         notes.append(
-            f"The camera saw people in only {coverage * 100:.0f}% of the lesson's "
-            "active span; presence and occupancy may undercount."
+            f"The teacher was visible in {coverage * 100:.0f}% of sampled frames; "
+            "durations are a floor rather than an exact measurement."
         )
     else:
         coverage_tier = "low"
         notes.append(
-            f"Low coverage ({coverage * 100:.0f}% of the active span): frequent "
-            "dropout or occlusion, so time-based numbers are a floor."
+            f"The teacher was found in only {coverage * 100:.0f}% of sampled frames "
+            "(heavy occlusion or dropout), so time-based numbers undercount."
         )
 
-    # --- teacher-identification confidence --------------------------------- #
-    if teacher_confidence is None:
-        teacher_tier: Tier = "low"
+    # --- continuity -------------------------------------------------------- #
+    if not dets:
+        continuity_tier: Tier = "low"
+    elif breaks <= BREAKS_CLEAN:
+        continuity_tier = "high"
+    elif breaks <= BREAKS_NOISY:
+        continuity_tier = "medium"
         notes.append(
-            "No identity was a clear behavioural outlier, so no teacher was "
-            "labelled; teacher metrics are unavailable."
+            f"Her timeline breaks {breaks} times; some entries and exits may be "
+            "tracking dropouts rather than real door crossings."
         )
-    elif teacher_confidence >= TEACHER_CONF_HIGH:
+    else:
+        continuity_tier = "low"
+        notes.append(
+            f"Her timeline breaks {breaks} times (longest {longest_gap / 1000:.0f}s): "
+            "treat the entry/exit count as an upper bound."
+        )
+
+    # --- teacher identification -------------------------------------------- #
+    if teacher_confidence is None or not dets:
+        teacher_tier: Tier = "low"
+    elif mean_conf >= CONF_HIGH:
         teacher_tier = "high"
-    elif teacher_confidence >= TEACHER_CONF_MED:
+    elif mean_conf >= CONF_LOW:
         teacher_tier = "medium"
     else:
         teacher_tier = "low"
         notes.append(
-            "The teacher led the runner-up by a narrow margin; the teacher "
-            "labelling is tentative."
+            "The teacher was detected at low confidence throughout; the labelling "
+            "is tentative."
         )
 
-    overall = _worst(identity_tier, teacher_tier, coverage_tier)
+    overall = _worst(coverage_tier, continuity_tier, teacher_tier)
 
     return {
-        "detections": detections,
+        "detections": len(dets),
         "frames": frames,
-        "identities": identities,
-        "raw_tracks": raw_tracks,
-        "fragmentation": round(fragmentation, 2),
+        "sampled_frames": sampled_frames,
         "coverage": round(coverage, 3),
-        "occupied_buckets": occupied_buckets,
-        "span_buckets": span_buckets,
+        "mean_confidence": round(float(mean_conf), 3),
+        "breaks": breaks,
+        "longest_gap_ms": longest_gap,
         "confidence": {
             "overall": overall,
-            "identity": identity_tier,
             "coverage": coverage_tier,
+            "continuity": continuity_tier,
             "teacher": teacher_tier,
         },
         "notes": notes,
