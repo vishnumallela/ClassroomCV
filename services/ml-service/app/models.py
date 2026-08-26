@@ -225,16 +225,26 @@ class DataQualityOut(BaseModel):
 
 
 class AnalyticsOut(BaseModel):
-    """The three teacher KPIs (entry/exit, board time, heatmap) plus their
-    supporting intervals for the timeline. Per-student occupancy analytics
-    were removed in the 2026-08 KPI slimming."""
+    """The four teacher KPIs (entry/exit, board time, heatmap, pointing and
+    writing) plus their supporting intervals for the timeline. Per-student
+    occupancy analytics were removed in the 2026-08 KPI slimming.
+
+    The three Optional ms fields carry a three-state answer: a number is a
+    measurement, and None means the input for it was absent — no board zone
+    configured, or (for the actions) a /rederive replaying teacher-only stored
+    rows. 0 would claim it was measured and found to be zero.
+    """
 
     teacher_present_ms: int
     teacher_board_ms: Optional[int]
+    teacher_pointing_ms: Optional[int] = None
+    teacher_writing_ms: Optional[int] = None
     entries: int
     exits: int
     presence_intervals: list[list[int]]
     board_intervals: list[list[int]]
+    pointing_intervals: list[list[int]] = []
+    writing_intervals: list[list[int]] = []
     entry_exit: list[EntryExitOut]
     heatmap: HeatmapOut
     # Optional so rows/tests predating the quality report still validate.

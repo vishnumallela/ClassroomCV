@@ -71,6 +71,20 @@
       "when": 1785753346506,
       "tag": "0009_bizarre_rocket_racer",
       "breakpoints": true
+    },
+    {
+      "idx": 10,
+      "version": "7",
+      "when": 1785753346507,
+      "tag": "0010_teacher_actions",
+      "breakpoints": true
+    },
+    {
+      "idx": 11,
+      "version": "7",
+      "when": 1785753346508,
+      "tag": "0011_clear_stale_action_ms",
+      "breakpoints": true
     }
   ]
 }

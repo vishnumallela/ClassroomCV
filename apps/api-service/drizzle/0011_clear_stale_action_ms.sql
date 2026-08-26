@@ -1,0 +1,18 @@
+-- Retire pre-RF-DETR action numbers.
+--
+-- teacher_pointing_ms / teacher_writing_ms are NOT new columns: they already
+-- existed and hold values written by the pose-based pipeline that the 2026-08
+-- RF-DETR migration deleted (it inferred gestures from keypoint geometry; the
+-- detector now has trained `pointing` and `writing` classes instead). So
+-- 0010's ADD COLUMN IF NOT EXISTS was a no-op for them, and the classroom
+-- rollup began summing two incompatible methods into one percentage.
+--
+-- NULL them. NULL is exactly the right claim: these lessons were never scored
+-- BY THIS KPI, and the rollup's denominator already excludes NULL rows, so they
+-- read as "not scored yet" rather than diluting the average with a number
+-- produced by code that no longer exists. Re-analyse a lesson to get a real
+-- figure. Nothing else about those rows is touched.
+--
+-- Unconditional is safe: a migration runs once, so only rows that exist now are
+-- affected, and every row written after this point comes from the new path.
+UPDATE "video_analytics" SET "teacher_pointing_ms" = NULL, "teacher_writing_ms" = NULL;

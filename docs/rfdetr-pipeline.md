@@ -16,8 +16,8 @@ Video
   ▼  follow the teacher                      app/teacher.py
   │     continuity first, confidence second
   │
-  ▼  the three KPIs                          app/heuristics.py → app/events.py
-  │     entries/exits · board time · heatmap
+  ▼  the four KPIs                           app/heuristics.py → app/events.py
+  │     entries/exits · board time · heatmap · pointing/writing
   │
   ▼  store HER detections only                app/db.py
 ```
@@ -147,6 +147,37 @@ derivation. So "students are never displayed" is a property of the stored data,
 not a filter in the renderer — there is no student box in the database that a
 future overlay change could leak.
 
+## The action KPIs (pointing / writing)
+
+The detector emits `pointing` and `writing` as their own classes, not as an
+attribute of the teacher box, so two rules turn them into a KPI
+(`heuristics.action_samples`):
+
+**Attribution.** An action box is hers when its centre lies inside her box for
+that frame, grown by `ACTION_EXPAND` (5% of frame). Centre-in-box rather than
+IoU because it is correct whether the annotator drew the action on her whole
+body or on the hand alone, and there is no per-frame ground truth for these two
+classes yet to choose between those on evidence.
+
+**Sampling.** One sample per TEACHER detection, not per action box. That makes
+the series the same shape as the board's, so the same hysteresis machine
+(`intervals_from_samples`) applies, and action time is a subset of presence time
+by construction — `writing_ms` can never exceed `present_ms`.
+
+Because only her boxes are persisted, `/rederive` cannot recompute these: it
+replays `detection_events`, which never contained an action box. It therefore
+returns `None`, and `replaceDerived` carries the previously measured value
+forward rather than overwriting it — correct, because the action KPIs do not
+depend on zones and a zone edit is the only reason to rederive.
+
+`None` and `0` are kept distinct all the way to the tile: `None` renders as
+"not scored yet", `0` as a measured zero.
+
+**Not yet calibrated.** `ACTION_ON_MS` / `ACTION_OFF_MS` / `ACTION_FLICKER_SAMPLES`
+are the only knobs in `heuristics.py` not set from a measurement — the action
+classes have no annotated spans in `eval/gt`. Annotate a lesson and sweep them
+the way `BOARD_ON_MS` was before trusting the absolute numbers.
+
 ## Testing
 
 - `tests/test_teacher.py`, `tests/test_zones.py` — the per-rule behaviour
@@ -175,6 +206,7 @@ variable:
 | `RFDETR_TENSORRT` | false | Serve as a TensorRT engine (cuda + `--extra tensorrt`). Off until parity-checked on the target GPU — see below. |
 | `TEACHER_CONF` | 0.4 | See the sweep above. |
 | `ZONE_CONF` | 0.5 | Door/screen. Held higher than the teacher: a false positive would move a zone. |
+| `ACTION_CONF` | 0.5 | `pointing`/`writing`. Held above the 0.15 detect floor: a KPI measured in seconds must not be built from boxes the model barely believes. |
 | `DEVICE` / `REQUIRE_DEVICE` | auto / *(unset)* | `REQUIRE_DEVICE=cuda` makes a mis-provisioned pod die at load rather than bill ~20× the wall-clock on CPU. |
 
 Zone polygons are **not** configured here. They live per classroom in the

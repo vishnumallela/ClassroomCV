@@ -348,8 +348,11 @@ def derive_result(
         roles_map[teacher_mod.TEACHER_TRACK_NO] = ("teacher", track.confidence)
         dets_by_track[teacher_mod.TEACHER_TRACK_NO] = teacher_dets
 
+    # `detections` (not just hers) so the action classes reach the KPI layer —
+    # pointing/writing are separate classes, and only her boxes are persisted,
+    # so this is the one point where they are still available.
     events, analytics = events_mod.derive(
-        dets_by_track, roles_map, meta.duration_ms, zones
+        dets_by_track, roles_map, meta.duration_ms, zones, all_detections=detections
     )
     analytics["data_quality"] = quality_report(track, sampled_frames, meta.duration_ms)
 

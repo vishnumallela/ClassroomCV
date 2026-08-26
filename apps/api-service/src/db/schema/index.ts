@@ -141,11 +141,19 @@ export const videoAnalytics = pgTable("video_analytics", {
     .primaryKey()
     .references(() => videos.id, { onDelete: "cascade" }),
   teacherPresentMs: bigint("teacher_present_ms", { mode: "number" }).notNull().default(0),
+  // Nullable on purpose, all three: NULL means the input was absent (no board
+  // zone; or a /rederive that replayed teacher-only rows and never saw the
+  // action classes), while 0 means measured and genuinely zero. Collapsing
+  // them would report "she never wrote" for a lesson nobody scored.
   teacherBoardMs: bigint("teacher_board_ms", { mode: "number" }),
+  teacherPointingMs: bigint("teacher_pointing_ms", { mode: "number" }),
+  teacherWritingMs: bigint("teacher_writing_ms", { mode: "number" }),
   entries: integer("entries").notNull().default(0),
   exits: integer("exits").notNull().default(0),
   presenceIntervals: jsonb("presence_intervals").$type<Interval[]>().notNull().default([]),
   boardIntervals: jsonb("board_intervals").$type<Interval[]>().notNull().default([]),
+  pointingIntervals: jsonb("pointing_intervals").$type<Interval[]>().notNull().default([]),
+  writingIntervals: jsonb("writing_intervals").$type<Interval[]>().notNull().default([]),
   entryExit: jsonb("entry_exit").$type<EntryExitItem[]>().notNull().default([]),
   heatmap: jsonb("heatmap").$type<Heatmap>().notNull().default(EMPTY_HEATMAP),
   // Additive trust report; null for rows computed before the quality pass.

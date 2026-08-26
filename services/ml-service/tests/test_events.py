@@ -4,13 +4,13 @@ from app.events import (
     board_condition,
     bridge_offscreen_gaps,
     door_entry_exit,
-    board_intervals_from_samples,
+    intervals_from_samples,
     derive,
     entry_exit_from_intervals,
     presence_intervals,
     teacher_heatmap,
 )
-from app.models import CLASS_TEACHER, Detection
+from app.models import CLASS_POINTING, CLASS_TEACHER, CLASS_WRITING, Detection
 
 
 def _det(ts, track, x=0.5, y=0.5, w=0.1, h=0.3):
@@ -81,29 +81,29 @@ def _samples(spans, step=200, end=40_000):
 
 
 def test_board_run_shorter_than_on_threshold_is_ignored():
-    assert board_intervals_from_samples(_samples([(0, 1_800)])) == []
+    assert intervals_from_samples(_samples([(0, 1_800)])) == []
 
 
 def test_board_on_off_timing():
-    iv = board_intervals_from_samples(_samples([(0, 10_000)]))
+    iv = intervals_from_samples(_samples([(0, 10_000)]))
     # opens after 2s sustained (start backdated to first true), closes 3s after last true
     assert iv == [[0, 10_000]]
 
 
 def test_board_brief_dropout_does_not_close():
-    iv = board_intervals_from_samples(_samples([(0, 10_000), (12_800, 20_000)]))
+    iv = intervals_from_samples(_samples([(0, 10_000), (12_800, 20_000)]))
     # false from 10200..12600 lasts 2600ms < 3000ms off threshold -> one interval
     assert iv == [[0, 20_000]]
 
 
 def test_board_dropout_at_off_threshold_closes():
-    iv = board_intervals_from_samples(_samples([(0, 10_000), (14_000, 20_000)]))
+    iv = intervals_from_samples(_samples([(0, 10_000), (14_000, 20_000)]))
     # false 10200..13800 -> at 13000 elapsed hits 3000ms -> close, then reopen
     assert iv == [[0, 10_000], [14_000, 20_000]]
 
 
 def test_board_interval_open_at_end_of_samples_is_closed():
-    iv = board_intervals_from_samples(_samples([(0, 40_000)]))
+    iv = intervals_from_samples(_samples([(0, 40_000)]))
     assert iv == [[0, 40_000]]
 
 
@@ -113,7 +113,7 @@ def test_board_interval_does_not_bridge_detection_gap():
     # interval instead of bridging ~5 minutes of absence.
     samples = [(ts, True) for ts in range(0, 12_001, 200)]
     samples += [(ts, True) for ts in range(300_000, 310_001, 200)]
-    assert board_intervals_from_samples(samples) == [
+    assert intervals_from_samples(samples) == [
         [0, 12_000],
         [300_000, 310_000],
     ]
@@ -121,7 +121,7 @@ def test_board_interval_does_not_bridge_detection_gap():
     presence = presence_intervals([ts for ts, _ in samples])
     presence_ms = sum(e - s for s, e in presence)
     board_ms = sum(
-        e - s for s, e in board_intervals_from_samples(samples)
+        e - s for s, e in intervals_from_samples(samples)
     )
     assert board_ms <= presence_ms
 
@@ -129,7 +129,7 @@ def test_board_interval_does_not_bridge_detection_gap():
 def test_isolated_true_samples_across_gap_do_not_open_interval():
     # Two lone true samples 5 minutes apart must not count as a
     # "continuous" 2s on-run (the opening branch must reset at the gap).
-    assert board_intervals_from_samples([(0, True), (300_000, True)]) == []
+    assert intervals_from_samples([(0, True), (300_000, True)]) == []
 
 
 def test_board_gap_below_threshold_still_bridges():
@@ -138,7 +138,7 @@ def test_board_gap_below_threshold_still_bridges():
     # keeps one interval.
     samples = [(ts, True) for ts in range(0, 10_001, 200)]
     samples += [(ts, True) for ts in range(14_800, 20_001, 200)]
-    assert board_intervals_from_samples(samples) == [[0, 20_000]]
+    assert intervals_from_samples(samples) == [[0, 20_000]]
 
 
 def test_board_condition_geometry():
@@ -162,10 +162,14 @@ def test_board_condition_geometry():
 _ANALYTICS_KEYS = {
     "teacher_present_ms",
     "teacher_board_ms",
+    "teacher_pointing_ms",
+    "teacher_writing_ms",
     "entries",
     "exits",
     "presence_intervals",
     "board_intervals",
+    "pointing_intervals",
+    "writing_intervals",
     "entry_exit",
     "heatmap",
     "data_quality",
@@ -337,3 +341,92 @@ def test_derive_no_door_bridges_blind_spot_no_phantom_crossing():
     )
     assert analytics["presence_intervals"] == [[0, 58_000]]
     assert analytics["entries"] == 1 and analytics["exits"] == 0
+
+
+# --------------------------------------------------------------------------- #
+# KPI 4 — pointing / writing
+# --------------------------------------------------------------------------- #
+
+
+def _action(ts, cls, x=0.5, y=0.5, w=0.04, h=0.06, conf=0.9):
+    """An action box. Defaults sit inside the teacher box _det() draws."""
+    return Detection(
+        video_ts_ms=ts,
+        cls=cls,
+        bbox={"x": x, "y": y, "w": w, "h": h},
+        conf=conf,
+        track_no=None,
+    )
+
+
+def _teacher_run(start, end, step=200):
+    return [_det(t, 1) for t in range(start, end + 1, step)]
+
+
+def _derive_actions(teacher, actions, **kw):
+    return derive(
+        {1: teacher},
+        {1: ("teacher", 0.9)},
+        duration_ms=kw.get("duration_ms", 60_000),
+        zones=[],
+        all_detections=teacher + actions,
+    )
+
+
+def test_actions_unknown_when_detections_not_supplied():
+    """/rederive replays teacher-only rows: the answer is None, never 0.
+
+    0 would claim the actions were measured and found absent, which is a
+    different — and wrong — statement from "this path cannot see them".
+    """
+    _, analytics = derive({1: _teacher_run(0, 10_000)}, {1: ("teacher", 0.9)}, 60_000, [])
+    assert analytics["teacher_pointing_ms"] is None
+    assert analytics["teacher_writing_ms"] is None
+
+
+def test_actions_zero_when_supplied_but_absent():
+    _, analytics = _derive_actions(_teacher_run(0, 10_000), [])
+    assert analytics["teacher_pointing_ms"] == 0
+    assert analytics["teacher_writing_ms"] == 0
+
+
+def test_writing_interval_is_measured_and_emits_events():
+    teacher = _teacher_run(0, 10_000)
+    writing = [_action(t, CLASS_WRITING) for t in range(2_000, 6_001, 200)]
+    events, analytics = _derive_actions(teacher, writing)
+    assert analytics["writing_intervals"] == [[2_000, 6_000]]
+    assert analytics["teacher_writing_ms"] == 4_000
+    assert analytics["teacher_pointing_ms"] == 0
+    kinds = [e["kind"] for e in events]
+    assert "writing_start" in kinds and "writing_end" in kinds
+
+
+def test_action_box_away_from_teacher_is_not_hers():
+    """An action box with no overlap is someone else's arm or a false positive."""
+    teacher = _teacher_run(0, 10_000)
+    far = [_action(t, CLASS_POINTING, x=0.9, y=0.9) for t in range(2_000, 6_001, 200)]
+    _, analytics = _derive_actions(teacher, far)
+    assert analytics["teacher_pointing_ms"] == 0
+
+
+def test_action_below_conf_threshold_is_ignored():
+    teacher = _teacher_run(0, 10_000)
+    weak = [_action(t, CLASS_WRITING, conf=0.2) for t in range(2_000, 6_001, 200)]
+    _, analytics = _derive_actions(teacher, weak)
+    assert analytics["teacher_writing_ms"] == 0
+
+
+def test_single_frame_action_flicker_does_not_open_a_session():
+    teacher = _teacher_run(0, 10_000)
+    blip = [_action(3_000, CLASS_POINTING)]
+    _, analytics = _derive_actions(teacher, blip)
+    assert analytics["pointing_intervals"] == []
+
+
+def test_action_time_cannot_exceed_presence():
+    """Samples are keyed on HER detections, so this holds by construction."""
+    teacher = _teacher_run(0, 4_000)
+    # Action boxes continue long after she is gone.
+    writing = [_action(t, CLASS_WRITING) for t in range(0, 30_001, 200)]
+    _, analytics = _derive_actions(teacher, writing)
+    assert analytics["teacher_writing_ms"] <= analytics["teacher_present_ms"]

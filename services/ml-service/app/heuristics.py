@@ -1,18 +1,20 @@
-"""KPI heuristics — the tunable rule layer for Luminary's three metrics.
+"""KPI heuristics — the tunable rule layer for Luminary's teacher metrics.
 
-Everything the product reports reduces to three teacher-centric KPIs, and
-every rule that turns raw detections into one of them lives HERE, in one
+Everything the product reports reduces to a handful of teacher-centric KPIs,
+and every rule that turns raw detections into one of them lives HERE, in one
 file, because this is the layer that gets tuned per school, extended with
 add-ons, and re-calibrated when cameras move:
 
 1. TEACHER ENTRY / EXIT — presence_intervals + door_entry_exit (+ the two
    gap-bridging rules that keep camera blind spots from fabricating
    crossings).
-2. TEACHER BOARD TIME — board_condition + board_intervals_from_samples
+2. TEACHER BOARD TIME — board_condition + intervals_from_samples
    (hysteresis so one occluded sample cannot open/close a session).
 3. TEACHER HEATMAP — teacher_heatmap (dwell histogram of her bbox centers;
    at a fixed sample rate a cell's count is proportional to time spent
    there).
+4. TEACHER ACTIONS — action_samples + the same hysteresis, over the
+   detector's own `pointing` and `writing` classes, attributed to her.
 
 Rules of the file:
 - Pure functions over Detection lists; no I/O, no model calls, no globals.
@@ -20,7 +22,7 @@ Rules of the file:
   stored detections (/rederive).
 - Every constant is a named knob with the measurement that set it. Change a
   knob here and only here.
-- Anything that is NOT one of the three KPIs does not belong in this file —
+- Anything that is NOT one of these KPIs does not belong in this file —
   and after the 2026-08 slimming, is not computed at all.
 
 Who is "the teacher" is decided upstream (roles.assign_roles, verified by
@@ -73,6 +75,26 @@ BOARD_OFF_MS = 3_000
 # CONSECUTIVE true samples at 5 fps and short board stints never register.
 BOARD_FLICKER_SAMPLES = 2
 BOARD_FLICKER_BUDGET_MS = 600
+
+# --- teacher actions (pointing / writing) ---
+# An action box counts as HERS when its center falls inside her bbox grown by
+# this fraction of the frame. Center-in-box rather than IoU on purpose: it is
+# correct whether the annotator drew the action on her whole body (center ~=
+# her center) or on the hand/forearm alone (center still inside her box), and
+# this pipeline has no per-frame ground truth for the action classes yet to
+# choose between those on evidence.
+ACTION_EXPAND = 0.05
+# Hysteresis for actions, shorter than the board's because a gesture is an
+# event and standing at the board is a station: 600 ms is 3 samples at 5 fps,
+# enough to reject a single-frame false positive without losing a real point.
+#
+# HONESTY NOTE: unlike every other knob in this file, these three are NOT set
+# from a measurement — the action classes have no annotated ground truth in
+# eval/gt yet. They are deliberate placeholders. Calibrate them the way
+# BOARD_ON_MS was: annotate action spans on a real lesson, then sweep.
+ACTION_ON_MS = 600
+ACTION_OFF_MS = 1_000
+ACTION_FLICKER_SAMPLES = 1
 
 # Heatmap grid: 32x18 matches the 16:9 CCTV aspect; fine enough to separate
 # aisles, coarse enough that an hour of 5 fps samples still reads as a path.
@@ -263,13 +285,19 @@ def board_condition(det: Detection, board_polygon: list[list[float]]) -> bool:
     return poly_box[0] <= cx <= poly_box[2]
 
 
-def board_intervals_from_samples(
+def intervals_from_samples(
     samples: list[tuple[int, bool]],
     on_ms: int = BOARD_ON_MS,
     off_ms: int = BOARD_OFF_MS,
     gap_ms: int = PRESENCE_GAP_MS,
+    flicker_samples: int = BOARD_FLICKER_SAMPLES,
+    flicker_budget_ms: int = BOARD_FLICKER_BUDGET_MS,
 ) -> list[list[int]]:
     """Hysteresis state machine over (ts, condition) samples (time-sorted).
+
+    Shared by board time and the action KPIs — the machine is generic and only
+    the four knobs differ, so the name does not claim a board. Defaults are the
+    board's, which is what every pre-existing caller wants.
 
     Opens an interval once the condition has been continuously true for
     >= on_ms (interval starts at the first true sample of the run); closes
@@ -308,7 +336,7 @@ def board_intervals_from_samples(
                 if run_start is None:
                     run_start = ts
                     false_run_ms = 0
-                if ts - run_start >= on_ms and false_run_ms <= BOARD_FLICKER_BUDGET_MS:
+                if ts - run_start >= on_ms and false_run_ms <= flicker_budget_ms:
                     on = True
                     start = run_start
                     last_true = ts
@@ -316,7 +344,7 @@ def board_intervals_from_samples(
                 false_streak += 1
                 if prev_ts is not None:
                     false_run_ms += ts - prev_ts
-                if false_streak >= BOARD_FLICKER_SAMPLES or false_run_ms > BOARD_FLICKER_BUDGET_MS:
+                if false_streak >= flicker_samples or false_run_ms > flicker_budget_ms:
                     run_start = None
                     false_streak = 0
                     false_run_ms = 0
@@ -363,3 +391,68 @@ def teacher_heatmap(
         gy = min(grid_h - 1, max(0, int(cy * grid_h)))
         grid[gy * grid_w + gx] += 1
     return {"grid_w": grid_w, "grid_h": grid_h, "teacher": grid}
+
+
+# --------------------------------------------------------------------------- #
+# KPI 4 — teacher actions (pointing / writing)
+# --------------------------------------------------------------------------- #
+
+
+def action_samples(
+    teacher_dets: list[Detection],
+    action_dets: list[Detection],
+    expand: float = ACTION_EXPAND,
+) -> list[tuple[int, bool]]:
+    """(ts, is_acting) per teacher sample, for one action class.
+
+    The detector emits `pointing`/`writing` as their own classes rather than as
+    an attribute of the teacher box, so they have to be attributed back to her.
+    Two rules do it:
+
+    ATTRIBUTION  An action box is hers when its center lies inside her box for
+                 that same frame, grown by `expand`. An action box with no
+                 teacher box in the frame is discarded rather than counted —
+                 it is either a false positive or somebody else's arm, and
+                 neither is a teacher KPI.
+
+    SAMPLING     One sample per TEACHER detection, not per action detection.
+                 That makes the sample series identical in shape to the board's,
+                 so the same hysteresis applies and action time is a subset of
+                 presence time by construction — `writing_ms` can never exceed
+                 `present_ms`, which a per-action-box series would allow.
+    """
+    if not teacher_dets:
+        return []
+    by_ts: dict[int, list[Detection]] = {}
+    for d in action_dets:
+        by_ts.setdefault(d.video_ts_ms, []).append(d)
+
+    samples: list[tuple[int, bool]] = []
+    for t in teacher_dets:
+        b = t.bbox
+        x0 = b["x"] - expand
+        y0 = b["y"] - expand
+        x1 = b["x"] + b["w"] + expand
+        y1 = b["y"] + b["h"] + expand
+        hit = False
+        for a in by_ts.get(t.video_ts_ms, ()):
+            cx = a.bbox["x"] + a.bbox["w"] / 2.0
+            cy = a.bbox["y"] + a.bbox["h"] / 2.0
+            if x0 <= cx <= x1 and y0 <= cy <= y1:
+                hit = True
+                break
+        samples.append((t.video_ts_ms, hit))
+    return samples
+
+
+def action_intervals(
+    teacher_dets: list[Detection],
+    action_dets: list[Detection],
+) -> list[list[int]]:
+    """Hysteresis-smoothed intervals during which the teacher was doing one action."""
+    return intervals_from_samples(
+        action_samples(teacher_dets, action_dets),
+        on_ms=ACTION_ON_MS,
+        off_ms=ACTION_OFF_MS,
+        flicker_samples=ACTION_FLICKER_SAMPLES,
+    )

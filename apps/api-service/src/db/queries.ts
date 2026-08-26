@@ -59,11 +59,7 @@ export async function updateClassroom(
   id: string,
   patch: { name?: string; location?: string | null; description?: string | null },
 ): Promise<ClassroomRow | undefined> {
-  const [row] = await db
-    .update(classrooms)
-    .set(patch)
-    .where(eq(classrooms.id, id))
-    .returning();
+  const [row] = await db.update(classrooms).set(patch).where(eq(classrooms.id, id)).returning();
   return row;
 }
 
@@ -129,9 +125,9 @@ export async function countClassroomVideos(classroomId: string): Promise<number>
   return row?.count ?? 0;
 }
 
-export async function getClassroomZones(classroomId: string): Promise<
-  { id: string; kind: string; polygon: Polygon; meta: ZoneMeta | null }[]
-> {
+export async function getClassroomZones(
+  classroomId: string,
+): Promise<{ id: string; kind: string; polygon: Polygon; meta: ZoneMeta | null }[]> {
   if (!isUuid(classroomId)) return [];
   const rows = await db
     .select()
@@ -148,9 +144,11 @@ export async function replaceClassroomZones(
   await db.transaction(async (tx) => {
     await tx.delete(classroomZones).where(eq(classroomZones.classroomId, classroomId));
     if (newZones.length > 0) {
-      await tx.insert(classroomZones).values(
-        newZones.map((z) => ({ classroomId, kind: z.kind, polygon: z.polygon, meta: null })),
-      );
+      await tx
+        .insert(classroomZones)
+        .values(
+          newZones.map((z) => ({ classroomId, kind: z.kind, polygon: z.polygon, meta: null })),
+        );
     }
   });
 }
@@ -162,11 +160,17 @@ export interface ClassroomMetrics {
   teacherPresentMs: number;
   teacherBoardMs: number;
   boardTrackedMs: number; // duration of lessons that HAVE a board zone (the honest denominator)
+  teacherPointingMs: number;
+  teacherWritingMs: number;
+  // Duration of lessons that were actually SCORED for actions, i.e. analysed
+  // since the pointing/writing KPIs shipped. Its own denominator for the same
+  // reason board time has one: an older lesson is unscored, not action-free.
+  actionTrackedMs: number;
   totalEntries: number;
   totalExits: number;
 }
 
-/** Aggregate the three teacher KPIs across a classroom's analyzed lessons. */
+/** Aggregate the teacher KPIs across a classroom's analyzed lessons. */
 export async function getClassroomMetrics(classroomId: string): Promise<ClassroomMetrics> {
   const [row] = await db
     .select({
@@ -178,6 +182,9 @@ export async function getClassroomMetrics(classroomId: string): Promise<Classroo
       // Board share divides by time where a board zone existed, not all time —
       // a lesson without a board zone must not dilute the percentage.
       boardTrackedMs: sql<number>`coalesce(sum(${videos.durationMs}) filter (where ${videoAnalytics.teacherBoardMs} is not null), 0)::bigint`,
+      teacherPointingMs: sql<number>`coalesce(sum(${videoAnalytics.teacherPointingMs}), 0)::bigint`,
+      teacherWritingMs: sql<number>`coalesce(sum(${videoAnalytics.teacherWritingMs}), 0)::bigint`,
+      actionTrackedMs: sql<number>`coalesce(sum(${videos.durationMs}) filter (where ${videoAnalytics.teacherWritingMs} is not null), 0)::bigint`,
       totalEntries: sql<number>`coalesce(sum(${videoAnalytics.entries}), 0)::int`,
       totalExits: sql<number>`coalesce(sum(${videoAnalytics.exits}), 0)::int`,
     })
@@ -191,6 +198,9 @@ export async function getClassroomMetrics(classroomId: string): Promise<Classroo
     teacherPresentMs: Number(row?.teacherPresentMs ?? 0),
     teacherBoardMs: Number(row?.teacherBoardMs ?? 0),
     boardTrackedMs: Number(row?.boardTrackedMs ?? 0),
+    teacherPointingMs: Number(row?.teacherPointingMs ?? 0),
+    teacherWritingMs: Number(row?.teacherWritingMs ?? 0),
+    actionTrackedMs: Number(row?.actionTrackedMs ?? 0),
     totalEntries: row?.totalEntries ?? 0,
     totalExits: row?.totalExits ?? 0,
   };
@@ -389,6 +399,22 @@ export async function replaceDerived(
   opts: { markDone?: boolean } = {},
 ): Promise<void> {
   await db.transaction(async (tx) => {
+    // The action KPIs do NOT depend on zones, and /rederive exists to recompute
+    // zone-dependent results from stored rows — which are teacher-only, so it
+    // cannot see the pointing/writing classes and returns null for them. Since
+    // this function deletes the row and reinserts, a rederive would erase a
+    // previously measured value. Carry it forward instead: a zone edit has no
+    // bearing on how long she spent writing.
+    const [prior] = await tx
+      .select({
+        pointingMs: videoAnalytics.teacherPointingMs,
+        writingMs: videoAnalytics.teacherWritingMs,
+        pointingIntervals: videoAnalytics.pointingIntervals,
+        writingIntervals: videoAnalytics.writingIntervals,
+      })
+      .from(videoAnalytics)
+      .where(eq(videoAnalytics.videoId, videoId));
+
     await tx.delete(tracks).where(eq(tracks.videoId, videoId));
     await tx.delete(events).where(eq(events.videoId, videoId));
     await tx.delete(videoAnalytics).where(eq(videoAnalytics.videoId, videoId));
@@ -421,6 +447,10 @@ export async function replaceDerived(
       exits: a.exits ?? 0,
       presenceIntervals: a.presence_intervals ?? [],
       boardIntervals: a.board_intervals ?? [],
+      teacherPointingMs: a.teacher_pointing_ms ?? prior?.pointingMs ?? null,
+      teacherWritingMs: a.teacher_writing_ms ?? prior?.writingMs ?? null,
+      pointingIntervals: a.pointing_intervals ?? prior?.pointingIntervals ?? [],
+      writingIntervals: a.writing_intervals ?? prior?.writingIntervals ?? [],
       entryExit: a.entry_exit ?? [],
       heatmap: a.heatmap ?? { grid_w: 0, grid_h: 0, teacher: [] },
       dataQuality: a.data_quality ?? null,
@@ -564,7 +594,14 @@ export async function getDetections(videoId: string, fpsParam?: number): Promise
   // "invalid input syntax for type uuid" (an unhandled 500). Guard like
   // getVideo/getVideoStatus and degrade to an empty result instead.
   if (!isUuid(videoId)) {
-    return { width: null, height: null, durationMs: null, fps: requestedFps, roles: {}, frames: [] };
+    return {
+      width: null,
+      height: null,
+      durationMs: null,
+      fps: requestedFps,
+      roles: {},
+      frames: [],
+    };
   }
 
   const video = await getVideo(videoId);

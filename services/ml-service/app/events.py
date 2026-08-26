@@ -1,10 +1,10 @@
 """Event + analytics derivation — a thin orchestrator over app.heuristics.
 
-Luminary reports exactly three teacher KPIs (entry/exit, board time,
-heatmap); every rule that computes them lives in app/heuristics.py — the
-one file meant to be tuned and extended. This module just wires the
-role-labelled detections through those rules and shapes the AnalysisResult
-payload. Per-student analytics (occupancy buckets, avg/max students, a
+Luminary reports four teacher KPIs (entry/exit, board time, heatmap, and the
+pointing/writing actions); every rule that computes them lives in
+app/heuristics.py — the one file meant to be tuned and extended. This module
+just wires the role-labelled detections through those rules and shapes the
+AnalysisResult payload. Per-student analytics (occupancy buckets, avg/max students, a
 students heatmap grid) were removed in the 2026-08 KPI slimming, which also
 keeps the stored analytics row light.
 
@@ -16,16 +16,18 @@ from __future__ import annotations
 from typing import Optional
 
 from app.heuristics import (
+    action_intervals,
     board_condition,
-    board_intervals_from_samples,
     bridge_offscreen_gaps,
     bridge_short_gaps,
     door_entry_exit,
     entry_exit_from_intervals,
+    intervals_from_samples,
     presence_intervals,
     teacher_heatmap,
 )
-from app.models import Detection
+from app.config import get_settings
+from app.models import CLASS_POINTING, CLASS_WRITING, Detection
 
 
 def derive(
@@ -33,8 +35,16 @@ def derive(
     roles_map: dict[int, tuple[str, Optional[float]]],
     duration_ms: int,
     zones: list[dict],
+    all_detections: Optional[list[Detection]] = None,
 ) -> tuple[list[dict], dict]:
-    """Return (events, analytics) dicts matching the SPEC AnalysisResult shapes."""
+    """Return (events, analytics) dicts matching the SPEC AnalysisResult shapes.
+
+    `all_detections` carries the classes that are NOT the teacher's own box —
+    currently `pointing` and `writing`. It is optional so /rederive, which
+    replays stored rows and has only her boxes, still works: the action KPIs
+    then come back None (unknown) rather than 0 (measured as absent). Those two
+    are different claims and the dashboard must not confuse them.
+    """
     board_polygon = next(
         (z["polygon"] for z in zones if z.get("kind") == "board"), None
     )
@@ -84,7 +94,7 @@ def derive(
                 (d.video_ts_ms, board_condition(d, board_polygon))
                 for d in teacher_dets
             ]
-            board_iv = board_intervals_from_samples(samples)
+            board_iv = intervals_from_samples(samples)
             teacher_board_ms = sum(end - start for start, end in board_iv)
             for start, end in board_iv:
                 events.append(
@@ -97,6 +107,40 @@ def derive(
     # --- KPI 3: teacher heatmap -------------------------------------------- #
     heatmap = teacher_heatmap(teacher_dets)
 
+    # --- KPI 4: teacher actions (pointing / writing) ------------------------ #
+    # None, not 0, when the action classes were never offered: /rederive replays
+    # stored detections, which are teacher-only, so it cannot recompute these.
+    # Reporting 0 there would turn "we did not look" into "she never wrote".
+    pointing_iv: list[list[int]] = []
+    writing_iv: list[list[int]] = []
+    teacher_pointing_ms: Optional[int] = None
+    teacher_writing_ms: Optional[int] = None
+    if all_detections is not None:
+        teacher_pointing_ms = 0
+        teacher_writing_ms = 0
+        if teacher_dets:
+            # action_conf, not DETECT_FLOOR: the detector emits everything down
+            # to 0.15 so one pass can serve every consumer, and a KPI measured
+            # in seconds must not be built from boxes the model barely believes.
+            action_conf = get_settings().action_conf
+            for cls, kind in ((CLASS_POINTING, "pointing"), (CLASS_WRITING, "writing")):
+                dets = [
+                    d for d in all_detections if d.cls == cls and d.conf >= action_conf
+                ]
+                iv = action_intervals(teacher_dets, dets)
+                total = sum(end - start for start, end in iv)
+                if cls == CLASS_POINTING:
+                    pointing_iv, teacher_pointing_ms = iv, total
+                else:
+                    writing_iv, teacher_writing_ms = iv, total
+                for start, end in iv:
+                    events.append(
+                        {"kind": f"{kind}_start", "video_ts_ms": start, "track_no": teacher_no}
+                    )
+                    events.append(
+                        {"kind": f"{kind}_end", "video_ts_ms": end, "track_no": teacher_no}
+                    )
+
     events.sort(key=lambda e: (e["video_ts_ms"], e["kind"]))
 
     analytics = {
@@ -106,6 +150,10 @@ def derive(
         "exits": sum(1 for e in entry_exit if e["kind"] == "exit"),
         "presence_intervals": presence,
         "board_intervals": board_iv,
+        "teacher_pointing_ms": teacher_pointing_ms,
+        "teacher_writing_ms": teacher_writing_ms,
+        "pointing_intervals": pointing_iv,
+        "writing_intervals": writing_iv,
         "entry_exit": entry_exit,
         "heatmap": heatmap,
         # Attached by the caller (jobs.derive_result), which holds the teacher

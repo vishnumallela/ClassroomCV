@@ -54,11 +54,18 @@ export interface DataQuality {
 
 export interface AnalysisResultAnalytics {
   teacher_present_ms: number;
+  // null = the input was absent (no board zone; or a /rederive that replayed
+  // teacher-only stored rows and so never saw the pointing/writing classes).
+  // 0 = measured, and it did not happen. See AnalyticsOut in app/models.py.
   teacher_board_ms: number | null;
+  teacher_pointing_ms?: number | null;
+  teacher_writing_ms?: number | null;
   entries: number;
   exits: number;
   presence_intervals: [number, number][];
   board_intervals: [number, number][];
+  pointing_intervals?: [number, number][];
+  writing_intervals?: [number, number][];
   entry_exit: { kind: string; ts_ms: number }[];
   heatmap: { grid_w: number; grid_h: number; teacher: number[] };
   data_quality?: DataQuality | null;

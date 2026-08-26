@@ -38,9 +38,7 @@ function ClassroomMetrics() {
     );
   }
   if (metrics.isError || !metrics.data) {
-    return (
-      <Card className="p-6 text-sm text-destructive">Could not load classroom metrics.</Card>
-    );
+    return <Card className="p-6 text-sm text-destructive">Could not load classroom metrics.</Card>;
   }
 
   const m = metrics.data;
@@ -55,8 +53,8 @@ function ClassroomMetrics() {
         <div className="space-y-1">
           <p className="font-display text-lg font-medium">No analyzed lessons yet</p>
           <p className="mx-auto max-w-sm text-sm text-muted-foreground">
-            Metrics aggregate across every analyzed lesson in this classroom. Upload a recording
-            and they'll appear here.
+            Metrics aggregate across every analyzed lesson in this classroom. Upload a recording and
+            they'll appear here.
           </p>
         </div>
       </Card>
@@ -78,6 +76,19 @@ function ClassroomMetrics() {
       label: "Time at board",
       value: m.boardTrackedMs > 0 ? percentOf(m.teacherBoardMs, m.boardTrackedMs) : "n/a",
       sub: m.boardTrackedMs > 0 ? "of board-tracked time" : "no board zone yet",
+    },
+    {
+      label: "Writing at board",
+      value: m.actionTrackedMs > 0 ? percentOf(m.teacherWritingMs, m.actionTrackedMs) : "n/a",
+      // An older lesson was analysed before these KPIs existed, so it was never
+      // scored for actions — not scored and scored-as-zero are different, and
+      // the denominator excludes the former rather than diluting with it.
+      sub: m.actionTrackedMs > 0 ? "of action-scored time" : "not scored yet",
+    },
+    {
+      label: "Pointing",
+      value: m.actionTrackedMs > 0 ? percentOf(m.teacherPointingMs, m.actionTrackedMs) : "n/a",
+      sub: m.actionTrackedMs > 0 ? "of action-scored time" : "not scored yet",
     },
     {
       label: "Teacher entries",
@@ -183,7 +194,9 @@ function ClassroomMetrics() {
         <p className="text-xs text-muted-foreground">
           Aggregates cover the {m.analyzedCount} analyzed lesson
           {m.analyzedCount === 1 ? "" : "s"}; board share divides by board-tracked time only, so
-          lessons without a board zone never dilute it.
+          lessons without a board zone never dilute it. Writing and pointing divide by action-scored
+          time for the same reason — a lesson analysed before those KPIs existed reads as unscored,
+          not as zero.
         </p>
       )}
     </div>
