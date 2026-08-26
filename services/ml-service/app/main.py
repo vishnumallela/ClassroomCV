@@ -161,8 +161,12 @@ async def rederive(req: RederiveRequest) -> dict:
         width=int(info.get("width") or 0),
         height=int(info.get("height") or 0),
     )
+    # actions_available=False: these rows came from detection_events, which is
+    # teacher-only, so the pointing/writing KPIs are unknown here and must stay
+    # null rather than being recomputed as zero. The API carries the previously
+    # measured values forward.
     result = jobs.derive_result(
-        meta, detections, [z.model_dump() for z in req.zones]
+        meta, detections, [z.model_dump() for z in req.zones], actions_available=False
     )
     if detections:
         # Persist the refreshed teacher assignment so detection_events matches

@@ -313,8 +313,6 @@ export async function createPod(options: CreatePodOptions = {}): Promise<PodStat
     gpuCount: spec.gpuCount,
     gpuTypePriority: "availability",
     cloudType: spec.cloudType,
-    dataCenterIds: [spec.dataCenterId],
-    dataCenterPriority: "custom",
     volumeMountPath: spec.volumeMountPath,
     containerDiskInGb: spec.containerDiskInGb,
     allowedCudaVersions: spec.allowedCudaVersions,
@@ -333,14 +331,30 @@ export async function createPod(options: CreatePodOptions = {}): Promise<PodStat
   // path. That survives stop/start but NOT terminate, so the checkpoint has to
   // be re-uploaded for each new pod. The Settings page says so rather than
   // letting it be discovered as a failed /analyze.
+  //
+  // THE REGION PIN RIDES ON THE VOLUME, and only on it. A volume is welded to
+  // its datacenter and a pod must mount it from inside the same one, so with a
+  // volume the region is not a preference — it is a constraint. With no volume
+  // there is nothing to be near, and pinning anyway is how you get "no L4
+  // available" while the catalog cheerfully reports nine: `maxCount` is a
+  // GLOBAL count, so a card can be plentiful worldwide and absent from the one
+  // datacenter the create was nailed to. Let RunPod place it instead.
   if (spec.networkVolumeId) {
     body.networkVolumeId = spec.networkVolumeId;
+    body.dataCenterIds = [spec.dataCenterId];
+    body.dataCenterPriority = "custom";
   } else {
     body.volumeInGb = spec.podVolumeGb;
+    body.dataCenterPriority = "availability";
   }
 
   logger.info(
-    { gpu: spec.gpuTypeId, dc: spec.dataCenterId, image: spec.image, cloud: spec.cloudType },
+    {
+      gpu: spec.gpuTypeId,
+      dc: spec.networkVolumeId ? spec.dataCenterId : "any (no volume to be near)",
+      image: spec.image,
+      cloud: spec.cloudType,
+    },
     "creating RunPod GPU pod",
   );
   const pod = toStatus(await call<Record<string, unknown>>(REST, key, "POST", "/pods", body));

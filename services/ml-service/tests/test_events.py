@@ -462,3 +462,26 @@ def test_every_emitted_event_kind_survives_response_validation():
     assert {"pointing_start", "pointing_end", "writing_start", "writing_end"} <= kinds
     for e in events:
         EventOut(kind=e["kind"], video_ts_ms=e["video_ts_ms"], track_no=e["track_no"])
+
+
+def test_rederive_path_reports_unknown_not_zero():
+    """derive_result must not turn a teacher-only replay into a measured zero.
+
+    The regression this pins: derive() takes all_detections=None to mean
+    "unknown", but derive_result is shared by /analyze and /rederive and used to
+    pass its detection list unconditionally — so the unknown branch was
+    unreachable in production and /rederive silently wrote 0.
+    """
+    from app.jobs import derive_result
+    from app.models import VideoMeta
+
+    teacher = _teacher_run(0, 10_000)
+    meta = VideoMeta(duration_ms=60_000, fps=5.0, width=1920, height=1080)
+
+    replayed = derive_result(meta, list(teacher), [], actions_available=False)
+    assert replayed["analytics"]["teacher_pointing_ms"] is None
+    assert replayed["analytics"]["teacher_writing_ms"] is None
+
+    fresh = derive_result(meta, list(teacher), [], actions_available=True)
+    assert fresh["analytics"]["teacher_pointing_ms"] == 0
+    assert fresh["analytics"]["teacher_writing_ms"] == 0

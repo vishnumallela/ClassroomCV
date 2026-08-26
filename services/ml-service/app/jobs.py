@@ -326,6 +326,7 @@ def derive_result(
     meta: VideoMeta,
     detections: list[Detection],
     zones: list[dict],
+    actions_available: bool = True,
 ) -> dict:
     """Teacher timeline + events + analytics. Shared by analyze & rederive.
 
@@ -351,8 +352,19 @@ def derive_result(
     # `detections` (not just hers) so the action classes reach the KPI layer —
     # pointing/writing are separate classes, and only her boxes are persisted,
     # so this is the one point where they are still available.
+    #
+    # actions_available says whether this list COULD contain them. /rederive
+    # replays teacher-only rows out of detection_events, where an action box has
+    # never been stored, so its empty result means "not looked at", not "did not
+    # happen" — passing the list anyway would silently record a confident 0.
+    # The flag cannot be inferred from the data: no action rows is exactly what
+    # both cases look like.
     events, analytics = events_mod.derive(
-        dets_by_track, roles_map, meta.duration_ms, zones, all_detections=detections
+        dets_by_track,
+        roles_map,
+        meta.duration_ms,
+        zones,
+        all_detections=detections if actions_available else None,
     )
     analytics["data_quality"] = quality_report(track, sampled_frames, meta.duration_ms)
 

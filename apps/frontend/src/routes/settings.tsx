@@ -466,7 +466,11 @@ function Settings() {
 
             <Field
               label="Region"
-              hint="Volume-capable regions only. A volume is pinned to its region for life."
+              hint={
+                volumeId
+                  ? "Pinned: a volume is welded to its region and the pod must mount it from inside the same one."
+                  : "Ignored without a volume — RunPod places the pod wherever that GPU is actually in stock."
+              }
             >
               <select
                 className={FIELD_CLASS}
