@@ -315,6 +315,10 @@ export async function createPod(options: CreatePodOptions = {}): Promise<PodStat
     cloudType: spec.cloudType,
     volumeMountPath: spec.volumeMountPath,
     containerDiskInGb: spec.containerDiskInGb,
+    // The pipeline is decode-bound: without this the pod gets RunPod's default
+    // allocation and the container cgroup lands around 5 cores, which pegs at
+    // 100% while the GPU sits at 6%.
+    minVCPUPerGPU: spec.minVcpuPerGpu,
     allowedCudaVersions: spec.allowedCudaVersions,
     ports: [`${ML_POD_PORT}/http`, "22/tcp"],
     interruptible: spec.interruptible,

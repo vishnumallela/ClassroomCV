@@ -38,6 +38,7 @@ export const SETTING_KEYS = [
   "gpuNetworkVolumeId",
   "gpuVolumeMountPath",
   "gpuContainerDiskGb",
+  "gpuMinVcpu",
   "gpuCudaVersions",
   "gpuInterruptible",
   "gpuSshPublicKey",
@@ -125,6 +126,17 @@ export const POD_DEFAULTS = {
   dataCenterId: "EU-RO-1",
   volumeMountPath: "/workspace",
   containerDiskInGb: 50,
+  // vCPUs demanded PER GPU. RunPod's own default is 2 and this field was
+  // missing from the spec entirely, so an L4 pod came up with a 5.1-core cgroup
+  // — and the pipeline is decode-bound, not GPU-bound. Measured on a 37-minute
+  // 1440p lesson: uvicorn pegged at 580% CPU while the GPU idled at 6%, because
+  // H.264 is inter-frame coded so all 55,893 frames must be decoded to use the
+  // 11,179 that get sampled. More cores is the one lever that moves this
+  // without touching the decode path.
+  //
+  // 16 is a request, not a reservation: it narrows the eligible machines, so
+  // drop it if a GPU shows as available yet nothing provisions.
+  minVcpuPerGpu: 16,
   // Used only when NO network volume is attached: the pod gets its own disk at
   // volumeMountPath instead. Survives stop/start, dies with the pod.
   podVolumeGb: 50,
@@ -144,6 +156,7 @@ export interface PodSpec {
   networkVolumeId: string;
   volumeMountPath: string;
   containerDiskInGb: number;
+  minVcpuPerGpu: number;
   /** Size of the pod's own volume, used only when networkVolumeId is empty. */
   podVolumeGb: number;
   allowedCudaVersions: string[];
@@ -197,6 +210,7 @@ export async function podSpec(): Promise<PodSpec> {
     volumeMountPath: mount,
     containerDiskInGb: Number(s.gpuContainerDiskGb) || POD_DEFAULTS.containerDiskInGb,
     podVolumeGb: POD_DEFAULTS.podVolumeGb,
+    minVcpuPerGpu: Number(s.gpuMinVcpu) || POD_DEFAULTS.minVcpuPerGpu,
     allowedCudaVersions: (s.gpuCudaVersions?.trim() || POD_DEFAULTS.cudaVersions.join(","))
       .split(",")
       .map((v) => v.trim())

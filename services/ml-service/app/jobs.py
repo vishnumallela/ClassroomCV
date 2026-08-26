@@ -334,12 +334,37 @@ def derive_result(
     accepted detections and clears everyone else's), because run_pipeline
     persists `detections` afterwards and only her rows are stored.
     """
+    sampled_frames = len({d.video_ts_ms for d in detections})
+
+    # Place any missing board/door zone from THIS pass's own detections.
+    #
+    # This used to be two separate HTTP endpoints, each re-scanning the whole
+    # video before analysis started. That was wasteful — iter_frames grabs every
+    # frame whatever the sample rate, so a zone scan costs about what the
+    # analysis costs — and on a long lesson it was worse than wasteful: the
+    # calls ran past RunPod's proxy timeout, came back 524, and the lesson was
+    # analysed with no zones at all, reporting board time as null. A 37-minute
+    # test lost ~4 minutes to two scans that returned nothing.
+    #
+    # The detections are already here, and propose_zone is a pure function over
+    # them. Proposing BEFORE gating matters twice: gate_static would drop the
+    # very out-of-zone boxes a first proposal must see, and adopting the zone
+    # now means the first analysis already reports board time rather than
+    # needing a second rederive pass to pick it up.
+    proposed: list[dict] = []
+    if actions_available:  # a fresh detector pass; stored rows are teacher-only
+        for kind in ("board", "door"):
+            if any(z.get("kind") == kind for z in zones):
+                continue
+            p = zones_mod.propose_zone(detections, kind, frames_seen=sampled_frames)
+            if p["polygon"] and p["confidence"] >= zones_mod.AUTO_ACCEPT[kind]:
+                proposed.append({"kind": kind, **p})
+                zones = [*zones, {"kind": kind, "polygon": p["polygon"]}]
+
     # Static classes are held to their configured zone, so a poster that reads
     # as a screen for a few frames cannot move the board. The teacher is never
     # gated: she has the run of the room.
     detections = zones_mod.gate_static(detections, zones)
-
-    sampled_frames = len({d.video_ts_ms for d in detections})
     track = teacher_mod.build_teacher_track(detections, meta.duration_ms)
     teacher_dets = track.detections
 
@@ -398,6 +423,7 @@ def derive_result(
             "tracks": tracks,
             "events": events,
             "analytics": analytics,
+            "proposed_zones": proposed,
         }
     )
     return result.model_dump()

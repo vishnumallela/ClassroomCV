@@ -14,7 +14,7 @@ import {
 import { mkdir } from "node:fs/promises";
 import { generateThumbnail, probeVideo } from "@api/lib/media";
 import { logger } from "@api/lib/logger";
-import { mlDetectBoard, mlDetectDoor, mlGetJob, mlGetJobResult, mlStartAnalysis } from "@api/lib/ml";
+import { mlGetJob, mlGetJobResult, mlStartAnalysis } from "@api/lib/ml";
 import { isS3, presignGet, putLocalFile } from "@api/lib/storage";
 
 // The bytes source for ffprobe/ffmpeg/the ML worker. On s3 this is a presigned
@@ -99,59 +99,23 @@ async function probeStep(
   });
 }
 
-async function detectBoardStep(
-  videoId: string,
-  attemptId: string | undefined,
-  jobId: string,
-): Promise<void> {
-  await requireCurrentRun(videoId, attemptId, jobId, "detect-board");
-  if (await hasZoneKind(videoId, "board")) return;
-  try {
-    const video = await getVideo(videoId);
-    if (!video) return;
-    const res = await mlDetectBoard(videoId, mediaSource(video.filePath));
-    if (res.polygon && res.confidence >= 0.5) {
-      await requireCurrentRun(videoId, attemptId, jobId, "detect-board insert");
-      await insertZone(videoId, {
-        kind: "board",
-        polygon: res.polygon,
-        meta: { auto: true, confidence: res.confidence, method: res.method },
-      });
-    }
-  } catch (err) {
-    if (err instanceof UnrecoverableError) throw err;
-    logger.warn({ err, videoId }, "board auto-detect failed (continuing without board)");
-  }
-}
-
-async function detectDoorStep(
-  videoId: string,
-  attemptId: string | undefined,
-  jobId: string,
-): Promise<void> {
-  await requireCurrentRun(videoId, attemptId, jobId, "detect-door");
-  if (await hasZoneKind(videoId, "door")) return;
-  try {
-    const video = await getVideo(videoId);
-    if (!video) return;
-    const res = await mlDetectDoor(videoId, mediaSource(video.filePath));
-    // Doors score lower than boards (tall/narrow geometry, softer color term),
-    // so the API auto-accept gate is lower than board's 0.5. The ML side has
-    // already rejected anything below DOOR_MIN_SCORE and returned a null polygon.
-    if (res.polygon && res.confidence >= 0.4) {
-      await requireCurrentRun(videoId, attemptId, jobId, "detect-door insert");
-      await insertZone(videoId, {
-        kind: "door",
-        polygon: res.polygon,
-        meta: { auto: true, confidence: res.confidence, method: res.method },
-      });
-    }
-  } catch (err) {
-    if (err instanceof UnrecoverableError) throw err;
-    logger.warn({ err, videoId }, "door auto-detect failed (continuing without door)");
-  }
-}
-
+/**
+ * Board and door zones are NOT probed here any more.
+ *
+ * There used to be two steps at this point, each POSTing /detect-board and
+ * /detect-door, and each of those re-scanned the entire video to place one
+ * rectangle. That was close to free on a 4-minute clip and untenable on a real
+ * lesson: iter_frames decodes every frame whatever the sample rate, so a zone
+ * scan costs about what the analysis costs, and on a 37-minute video both calls
+ * ran past RunPod's proxy timeout and came back 524 — ~4 minutes spent to
+ * return nothing, after which the lesson was analysed with no zones at all and
+ * reported board time as null.
+ *
+ * The analysis pass already detects Screen and Door on every sampled frame, so
+ * it now places any missing zone from its own detections and uses it in the
+ * same run (jobs.derive_result). ingestStep persists whatever it proposed.
+ * POST /detect-board still exists for the zone editor's manual button.
+ */
 async function startAnalysisStep(
   videoId: string,
   attemptId: string | undefined,
@@ -229,6 +193,23 @@ async function ingestStep(
     });
   }
 
+  // Zones the analysis placed for itself. It has already USED them, so the
+  // KPIs in `result` assume they exist — dropping them here would leave the
+  // numbers unexplainable in the UI and force a re-proposal next run. Guarded
+  // by hasZoneKind so a hand-drawn zone is never overwritten.
+  for (const zone of result.proposed_zones ?? []) {
+    if (await hasZoneKind(videoId, zone.kind)) continue;
+    await insertZone(videoId, {
+      kind: zone.kind,
+      polygon: zone.polygon,
+      meta: { auto: true, confidence: zone.confidence, method: zone.method },
+    });
+    logger.info(
+      { videoId, kind: zone.kind, confidence: zone.confidence },
+      "zone auto-placed from analysis",
+    );
+  }
+
   await replaceDerived(videoId, result, { markDone: true });
 }
 
@@ -237,8 +218,6 @@ export async function processAnalyzeJob(job: Job<AnalyzeJobData>): Promise<void>
   const jobId = String(job.id);
   try {
     await probeStep(videoId, attemptId, jobId);
-    await detectBoardStep(videoId, attemptId, jobId);
-    await detectDoorStep(videoId, attemptId, jobId);
     const mlJobId = await startAnalysisStep(videoId, attemptId, jobId);
     await pollUntilDone(videoId, mlJobId, attemptId, jobId, job);
     await ingestStep(videoId, mlJobId, attemptId, jobId);

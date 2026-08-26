@@ -265,11 +265,28 @@ class AnalyticsOut(BaseModel):
     data_quality: Optional[DataQualityOut] = None
 
 
+class ProposedZoneOut(BaseModel):
+    """A zone the analysis placed for itself, for the caller to persist.
+
+    Emitted only for a kind that had no zone configured, and only above
+    zones.AUTO_ACCEPT. The analysis has already USED it, so a caller that drops
+    these on the floor keeps the KPIs but loses the polygon and will re-propose
+    it on the next run.
+    """
+
+    kind: Literal["board", "door"]
+    polygon: list[PolygonPoint]
+    confidence: float
+    method: str
+    frame_ts_ms: int
+
+
 class AnalysisResult(BaseModel):
     video: VideoInfoOut
     tracks: list[TrackOut]
     events: list[EventOut]
     analytics: AnalyticsOut
+    proposed_zones: list[ProposedZoneOut] = []
 
 
 class DetectBoardResponse(BaseModel):

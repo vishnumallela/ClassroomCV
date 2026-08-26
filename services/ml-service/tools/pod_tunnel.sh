@@ -41,7 +41,12 @@ if not pod:
     sys.exit("no pod: create one in Settings first")
 ip, pm = pod.get("publicIp"), pod.get("portMappings") or {}
 if not ip or "22" not in {str(k) for k in pm}:
-    sys.exit(f"pod {pod.get(\"id\")} has no SSH yet (status {pod.get(\"desiredStatus\")}) — wait and retry")
+    # Bound to names first: this runs inside a single-quoted shell argument, so
+    # a quote in an f-string expression has to be escaped for the shell and is
+    # then a syntax error in Python. Keep the expressions quote-free.
+    pod_id = pod.get("id")
+    state = pod.get("desiredStatus")
+    sys.exit(f"pod {pod_id} has no SSH yet (status {state}) — wait and retry")
 print(ip, pm["22"])
 '
 )"

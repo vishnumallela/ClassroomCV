@@ -96,7 +96,7 @@ def test_full_pipeline_shape_and_semantics(monkeypatch):
     )
 
     parsed = AnalysisResult.model_validate(result)
-    assert set(result.keys()) == {"video", "tracks", "events", "analytics"}
+    assert set(result.keys()) == {"video", "tracks", "events", "analytics", "proposed_zones"}
 
     assert parsed.video.duration_ms == DURATION_MS
     assert parsed.video.width == 1280 and parsed.video.height == 720

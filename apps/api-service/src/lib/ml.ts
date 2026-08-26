@@ -71,11 +71,22 @@ export interface AnalysisResultAnalytics {
   data_quality?: DataQuality | null;
 }
 
+/** A zone the analysis placed from its own detections, for us to persist. */
+export interface ProposedZone {
+  kind: "board" | "door";
+  polygon: [number, number][];
+  confidence: number;
+  method: string;
+  frame_ts_ms: number;
+}
+
 export interface AnalysisResult {
   video: AnalysisResultVideo;
   tracks: AnalysisResultTrack[];
   events: AnalysisResultEvent[];
   analytics: AnalysisResultAnalytics;
+  // Optional: a pod on an older image does not send it.
+  proposed_zones?: ProposedZone[];
 }
 
 export interface MlJobStatus {

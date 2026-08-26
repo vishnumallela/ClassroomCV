@@ -485,3 +485,74 @@ def test_rederive_path_reports_unknown_not_zero():
     fresh = derive_result(meta, list(teacher), [], actions_available=True)
     assert fresh["analytics"]["teacher_pointing_ms"] == 0
     assert fresh["analytics"]["teacher_writing_ms"] == 0
+
+
+# --------------------------------------------------------------------------- #
+# Self-proposed zones
+# --------------------------------------------------------------------------- #
+
+
+def _static(ts, cls, x, y, w=0.30, h=0.18, conf=0.9):
+    return Detection(
+        video_ts_ms=ts, cls=cls, bbox={"x": x, "y": y, "w": w, "h": h},
+        conf=conf, track_no=None,
+    )
+
+
+def test_analysis_places_its_own_board_zone_and_uses_it_immediately():
+    """No board zone configured: the pass proposes one from its own Screen
+    boxes AND derives board time with it, in the same run.
+
+    Before this, zone placement was a separate pre-pass HTTP call that
+    re-scanned the whole video. On a 37-minute lesson it ran past RunPod's
+    proxy timeout, returned 524, and the lesson was analysed with no zones —
+    board time null — after burning ~4 minutes on two scans that produced
+    nothing.
+    """
+    from app.jobs import derive_result
+    from app.models import CLASS_SCREEN, VideoMeta
+
+    # She stands at the board for the whole clip; the screen is right there.
+    teacher = [_det(t, 1, x=0.30, y=0.30, w=0.10, h=0.40) for t in range(0, 20_001, 200)]
+    screen = [_static(t, CLASS_SCREEN, x=0.20, y=0.10) for t in range(0, 20_001, 200)]
+
+    out = derive_result(
+        VideoMeta(duration_ms=30_000, fps=5.0, width=1920, height=1080),
+        teacher + screen,
+        [],  # nothing configured
+    )
+    board = [z for z in out["proposed_zones"] if z["kind"] == "board"]
+    assert board, "expected a board zone proposed from the run's own Screen boxes"
+    assert len(board[0]["polygon"]) == 4
+    # Used in the same pass, not merely reported: board time is a number, not null.
+    assert out["analytics"]["teacher_board_ms"] is not None
+    assert out["analytics"]["teacher_board_ms"] > 0
+
+
+def test_configured_zone_is_never_overridden_by_a_proposal():
+    from app.jobs import derive_result
+    from app.models import CLASS_SCREEN, VideoMeta
+
+    teacher = [_det(t, 1, x=0.30, y=0.30, w=0.10, h=0.40) for t in range(0, 20_001, 200)]
+    screen = [_static(t, CLASS_SCREEN, x=0.20, y=0.10) for t in range(0, 20_001, 200)]
+    mine = [[0.5, 0.5], [0.9, 0.5], [0.9, 0.9], [0.5, 0.9]]
+
+    out = derive_result(
+        VideoMeta(duration_ms=30_000, fps=5.0, width=1920, height=1080),
+        teacher + screen,
+        [{"kind": "board", "polygon": mine}],
+    )
+    assert not [z for z in out["proposed_zones"] if z["kind"] == "board"]
+
+
+def test_rederive_does_not_invent_zones():
+    """Stored rows are teacher-only, so there is nothing to propose from."""
+    from app.jobs import derive_result
+    from app.models import VideoMeta
+
+    teacher = [_det(t, 1) for t in range(0, 20_001, 200)]
+    out = derive_result(
+        VideoMeta(duration_ms=30_000, fps=5.0, width=1920, height=1080),
+        teacher, [], actions_available=False,
+    )
+    assert out["proposed_zones"] == []

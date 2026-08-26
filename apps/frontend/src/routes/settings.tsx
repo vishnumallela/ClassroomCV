@@ -127,6 +127,7 @@ function Settings() {
         ...def("gpuNetworkVolumeId", str("gpuNetworkVolumeId")),
         ...def("gpuVolumeMountPath", str("gpuVolumeMountPath")),
         ...def("gpuContainerDiskGb", num("gpuContainerDiskGb")),
+        ...def("gpuMinVcpu", num("gpuMinVcpu")),
         ...def("gpuCudaVersions", str("gpuCudaVersions")),
         ...def("gpuInterruptible", bool("gpuInterruptible")),
         ...def("gpuSshPublicKey", str("gpuSshPublicKey")),
@@ -578,6 +579,17 @@ function Settings() {
               className={FIELD_CLASS}
               value={val("gpuCudaVersions", spec.allowedCudaVersions.join(","))}
               onChange={(e) => set("gpuCudaVersions", e.target.value)}
+            />
+          </Field>
+          <Field
+            label="vCPU per GPU"
+            hint="The real throughput lever. Analysis is decode-bound, not GPU-bound — H.264 forces every frame to be decoded to reach the sampled ones, so the CPU pegs while the GPU idles near 6%. Lower this only if a GPU shows available but nothing provisions."
+          >
+            <input
+              type="number"
+              className={FIELD_CLASS}
+              value={val("gpuMinVcpu", spec.minVcpuPerGpu)}
+              onChange={(e) => set("gpuMinVcpu", e.target.value)}
             />
           </Field>
           <div className="grid grid-cols-2 gap-3">

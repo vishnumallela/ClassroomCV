@@ -56,6 +56,13 @@ MIN_SAMPLES = 8
 # without admitting a poster on the far wall.
 GATE_TOLERANCE = 0.05
 
+# Confidence a self-proposed zone must clear before the pipeline adopts it
+# unprompted. The door sits lower than the board because its geometry is tall
+# and narrow and it scores lower for the same quality of fit; these are the
+# thresholds the API applied when zone proposal was a separate pre-pass, kept
+# identical so moving the work did not move the behaviour.
+AUTO_ACCEPT = {"board": 0.5, "door": 0.4}
+
 
 def _median(values: list[float]) -> float:
     ordered = sorted(values)

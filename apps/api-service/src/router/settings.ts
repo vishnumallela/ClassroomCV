@@ -79,6 +79,7 @@ export const settingsRouter = {
         gpuNetworkVolumeId: z.string().trim().max(60).optional(),
         gpuVolumeMountPath: z.string().trim().max(200).optional(),
         gpuContainerDiskGb: z.number().int().min(10).max(2000).optional(),
+        gpuMinVcpu: z.number().int().min(1).max(128).optional(),
         gpuCudaVersions: z.string().trim().max(100).optional(),
         gpuInterruptible: z.boolean().optional(),
         gpuSshPublicKey: z.string().trim().max(2000).optional(),
@@ -134,6 +135,7 @@ export const settingsRouter = {
         gpuAutoStopMinutes: input.gpuAutoStopMinutes,
         gpuCount: input.gpuCount,
         gpuContainerDiskGb: input.gpuContainerDiskGb,
+        gpuMinVcpu: input.gpuMinVcpu,
         mlBatch: input.mlBatch,
         mlResolution: input.mlResolution,
       } as const;
