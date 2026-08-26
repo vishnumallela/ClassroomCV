@@ -140,7 +140,17 @@ export const POD_DEFAULTS = {
   // Used only when NO network volume is attached: the pod gets its own disk at
   // volumeMountPath instead. Survives stop/start, dies with the pod.
   podVolumeGb: 50,
-  cudaVersions: ["13.0", "12.8"],
+  // 13.0 ONLY. uv.lock pins torch 2.12.1, which resolves to a cu13 wheel and
+  // needs driver >= r580; a CUDA 12.8 host (driver 570.x) cannot run it, so
+  // torch.cuda.is_available() comes back False, the device resolves to cpu and
+  // REQUIRE_DEVICE aborts the job — after the pod has already pulled the image,
+  // downloaded the video and loaded the checkpoint. Listing 12.8 here only buys
+  // the right to rent a machine that cannot work: measured on a pod that landed
+  // on driver 570.195.03 and failed 7 minutes in.
+  //
+  // This narrows the eligible hosts. If nothing provisions, lower vCPU per GPU
+  // or change GPU type — do NOT re-add 12.8.
+  cudaVersions: ["13.0"],
   weightsPath: "/workspace/weights/rfdetr-medium.pth",
   batch: 16,
   resolution: 576,

@@ -14,7 +14,7 @@ import {
 import { mkdir } from "node:fs/promises";
 import { generateThumbnail, probeVideo } from "@api/lib/media";
 import { logger } from "@api/lib/logger";
-import { mlGetJob, mlGetJobResult, mlStartAnalysis } from "@api/lib/ml";
+import { mlGetJob, mlGetJobResult, mlHealth, mlStartAnalysis } from "@api/lib/ml";
 import { isS3, presignGet, putLocalFile } from "@api/lib/storage";
 
 // The bytes source for ffprobe/ffmpeg/the ML worker. On s3 this is a presigned
@@ -122,6 +122,22 @@ async function startAnalysisStep(
   jobId: string,
 ): Promise<string> {
   const video = await requireCurrentRun(videoId, attemptId, jobId, "start-analysis");
+
+  // Refuse a CPU pod before it costs anything. A pod whose driver is too old
+  // for the cu13 torch build comes up RUNNING and answers /health perfectly —
+  // it just resolves to device "cpu". REQUIRE_DEVICE does stop the run, but
+  // only after the image pull, an 845 MB download and a checkpoint load; a
+  // 37-minute lesson burned 7 minutes of billed GPU discovering it. The device
+  // is one cheap GET away, so ask first.
+  const health = await mlHealth();
+  if (health && health.device !== "cuda") {
+    throw new UnrecoverableError(
+      `ML service resolved device "${health.device}", not cuda — the pod's driver is ` +
+        "probably too old for this image's CUDA build. Recreate the pod; do not widen " +
+        "the CUDA pin in Settings.",
+    );
+  }
+
   const zones = await getZones(videoId);
   const runTokens = [attemptId, jobId].filter((t): t is string => Boolean(t));
   return mlStartAnalysis({

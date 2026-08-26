@@ -97,6 +97,34 @@ export interface MlJobStatus {
   error: string | null;
 }
 
+export interface MlHealth {
+  status: string;
+  device: string;
+  model: string | null;
+  model_loaded: boolean;
+  backend?: string;
+}
+
+/**
+ * What the ML service says about itself right now.
+ *
+ * Worth its own call before a long job: the pod can be RUNNING, answering, and
+ * still resolve to `device: cpu` — a driver too old for the cu13 torch build
+ * does exactly that. REQUIRE_DEVICE aborts such a run, but only after the pod
+ * has pulled the image, downloaded the video and loaded the checkpoint.
+ */
+export async function mlHealth(timeoutMs = 8000): Promise<MlHealth | null> {
+  try {
+    const res = await fetch(`${await mlServiceUrl()}/health`, {
+      signal: AbortSignal.timeout(timeoutMs),
+    });
+    if (!res.ok) return null;
+    return (await res.json()) as MlHealth;
+  } catch {
+    return null;
+  }
+}
+
 export interface BoardDetectResult {
   polygon: [number, number][] | null;
   confidence: number;
