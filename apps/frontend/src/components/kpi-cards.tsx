@@ -25,20 +25,32 @@ export function KpiCards({
   durationMs: number | null;
   teacherConfidence?: number | null;
 }) {
-  const hasBoard = analytics.teacherBoardMs !== null;
   const badge = confidenceBadge(teacherConfidence);
-  // The three KPIs, teacher-centric by design: board time, and her door
-  // entries/exits. The confidence badge rides the first tile because every
-  // number below hangs off the same "who is the teacher" decision.
+
+  /**
+   * A duration KPI that can be genuinely unknown.
+   *
+   * null is not zero and must never render as "0:00": board time is null until
+   * a board zone exists, and the action KPIs are null on a lesson analysed
+   * before they shipped or re-derived from teacher-only stored rows. Showing
+   * 0:00 there would assert she never did it.
+   */
+  const duration = (label: string, ms: number | null | undefined, absent: string) => ({
+    label,
+    value: ms === null || ms === undefined ? "n/a" : msToClock(ms),
+    sub: ms === null || ms === undefined ? absent : `${percentOf(ms, durationMs)} of lesson`,
+    badge: null as Confidence | null,
+  });
+
+  // Durations first, then the two counts, so the grid breaks between the two
+  // kinds of number rather than mid-group.
   const tiles = [
     {
-      label: "Time at board",
-      value: hasBoard ? msToClock(analytics.teacherBoardMs) : "n/a",
-      sub: hasBoard
-        ? percentOf(analytics.teacherBoardMs, durationMs) + " of lesson"
-        : "no board zone",
+      ...duration("Time at board", analytics.teacherBoardMs, "no board zone"),
       badge,
     },
+    duration("Pointing", analytics.teacherPointingMs, "not scored"),
+    duration("Writing", analytics.teacherWritingMs, "not scored"),
     {
       label: "Teacher entries",
       value: String(analytics.entries),
