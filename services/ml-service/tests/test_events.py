@@ -430,3 +430,35 @@ def test_action_time_cannot_exceed_presence():
     writing = [_action(t, CLASS_WRITING) for t in range(0, 30_001, 200)]
     _, analytics = _derive_actions(teacher, writing)
     assert analytics["teacher_writing_ms"] <= analytics["teacher_present_ms"]
+
+
+def test_every_emitted_event_kind_survives_response_validation():
+    """derive() output must round-trip through the response models.
+
+    This is the gate the pointing/writing launch failed at: derive() emitted
+    pointing_start/pointing_end while EventOut.kind still enumerated only the
+    four older kinds, so the FULL AnalysisResult — 17 minutes of paid GPU
+    detection — was rejected at serialization time. Unit tests on derive()
+    alone could never catch it, because the Literal lives in the response
+    model; so this test pushes every kind derive() can produce through
+    EventOut itself.
+    """
+    from app.models import EventOut
+
+    teacher = _teacher_run(0, 30_000)
+    poly = [[0.1, 0.1], [0.9, 0.1], [0.9, 0.9], [0.1, 0.9]]
+    actions = [_action(t, CLASS_POINTING) for t in range(2_000, 8_001, 200)] + [
+        _action(t, CLASS_WRITING) for t in range(12_000, 18_001, 200)
+    ]
+    events, _ = derive(
+        {1: teacher},
+        {1: ("teacher", 0.9)},
+        duration_ms=60_000,
+        zones=[{"kind": "board", "polygon": poly}],
+        all_detections=teacher + actions,
+    )
+    kinds = {e["kind"] for e in events}
+    # The scenario must actually produce the new kinds, or the test is hollow.
+    assert {"pointing_start", "pointing_end", "writing_start", "writing_end"} <= kinds
+    for e in events:
+        EventOut(kind=e["kind"], video_ts_ms=e["video_ts_ms"], track_no=e["track_no"])

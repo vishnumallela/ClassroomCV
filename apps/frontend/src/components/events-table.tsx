@@ -20,6 +20,10 @@ export const KIND_LABEL: Record<string, string> = {
   exit: "Left room",
   board_enter: "Arrived at board",
   board_leave: "Left board",
+  pointing_start: "Started pointing",
+  pointing_end: "Stopped pointing",
+  writing_start: "Started writing",
+  writing_end: "Stopped writing",
 };
 
 export function EventsTable({

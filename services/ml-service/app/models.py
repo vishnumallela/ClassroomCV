@@ -177,7 +177,21 @@ class TrackOut(BaseModel):
 
 
 class EventOut(BaseModel):
-    kind: Literal["enter", "exit", "board_enter", "board_leave"]
+    # Every kind derive() can emit. This Literal is a hard response gate: a kind
+    # produced upstream but missing here fails the WHOLE AnalysisResult at the
+    # end of a paid GPU run — the pointing/writing launch lost a 17-minute
+    # detection pass to exactly that. Extend it in the same commit as any new
+    # events.append(kind=...).
+    kind: Literal[
+        "enter",
+        "exit",
+        "board_enter",
+        "board_leave",
+        "pointing_start",
+        "pointing_end",
+        "writing_start",
+        "writing_end",
+    ]
     video_ts_ms: int
     track_no: Optional[int]
 

@@ -60,6 +60,10 @@ const TICK_COLOR: Record<string, string> = {
   exit: "bg-red-500",
   board_enter: "bg-amber-600",
   board_leave: "bg-amber-600",
+  pointing_start: "bg-sky-500",
+  pointing_end: "bg-sky-500",
+  writing_start: "bg-violet-500",
+  writing_end: "bg-violet-500",
 };
 
 // Lane bars start after the w-24 (6rem) label column and its gap-3 (0.75rem);
