@@ -10,8 +10,9 @@ recognition, no named students, aggregate teacher insights only.
 
 A single fine-tuned **RF-DETR** does the detection — five classes (`door`,
 `screen`, `teacher`, `pointing`, `writing`) — running on an on-demand RunPod GPU
-controlled from the app's Settings page; the dashboard reads the results over a
-typed API. Because the model names the teacher directly, there is no person
+that the app's Settings page **provisions and destroys itself**, from a live
+GPU catalog, without anyone opening the RunPod console; the dashboard reads the
+results over a typed API. Because the model names the teacher directly, there is no person
 re-identification, no multi-object tracker and no vision-model tiebreak: what
 follows detection is a plausible-motion check and a gap bridge
 (`services/ml-service/app/teacher.py`). **Students are never detected, never

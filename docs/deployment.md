@@ -109,36 +109,76 @@ Project `classroomcv` in the **Ravi Sankar's Projects** workspace.
 it cannot converge — the CLI does not read the TCP proxy back, so it re-plans
 the same no-op every time. Harmless; the proxy is live.
 
-## 2. RunPod pod (one-time)
+## 2. RunPod pod — entirely from the Settings page
+
+There is nothing to do in the RunPod console. The app holds the whole pod
+specification and provisions against RunPod's API, so the only thing you paste
+in is an API key.
 
 1. `deploy-ml-runpod.yml` pushes the image to `ghcr.io/<owner>/<repo>/ml-service`
    (make the package public, or add registry credentials on RunPod).
-2. Create an **on-demand GPU pod** (NOT serverless): L4 24 GB, 8 vCPU/32 GB,
-   image `ghcr.io/…/ml-service:latest`, expose HTTP port **8000**, volume
-   **100 GB** at `/workspace` (holds the weight + TensorRT engine across
-   restarts). Env: see `services/ml-service/.env.runpod.example` —
-   `MEDIA_URL_ALLOWLIST` must be the MinIO public host, `DATABASE_URL` the
-   Railway Timescale service's public URL.
-3. First boot exports the TensorRT engine (minutes, once per GPU type); watch
-   for `warmup inference complete on cuda`.
 
-## 3. Wire it in the app (Settings page)
+   **Mind the tag.** Only `main` may write `:latest`; a branch publishes under
+   its own sanitized name. While the RF-DETR rewrite sits on
+   `feat/rfdetr-pipeline`, `:latest` is still the *previous* YOLO/identity-stack
+   service — same repository, same port, same `/health`, a different program.
+   A pod on it starts, reports RUNNING, silently ignores every `RFDETR_*`
+   variable (the settings model is `extra="ignore"`), and has no entrypoint and
+   therefore no sshd to diagnose it with, while the GPU bills. The default in
+   `POD_DEFAULTS` is the branch tag for exactly this reason; **switch it back to
+   `:latest` when this branch merges.**
 
-Open **Settings** in the app and fill in:
+   You do not have to remember this: the Settings page reads the configured
+   tag's own config out of the registry and reports which service it contains,
+   and refuses to create a pod on an image that is not the ML service or on a
+   tag that does not exist (`lib/registry.ts`).
+2. Open **Settings** and paste a **RunPod API key** (read/write scope). Every
+   dropdown below then fills from RunPod's live catalog.
+3. **Machine** — pick the GPU (each option carries its real current $/hr and
+   only appears if it is actually purchasable on the selected tier), the cloud
+   tier, and the region. Regions that cannot hold a network volume are not
+   offered, because the checkpoint has to live in the pod's own region.
+4. **Network volume** — select an existing one or create it inline. It holds
+   the RF-DETR checkpoint and the video scratch, and it outlives every pod.
+5. **Image and environment** — image tag, container disk, allowed CUDA
+   versions, and the ml-service env (`RFDETR_*`, `MEDIA_URL_ALLOWLIST`,
+   `DATABASE_URL`). `MEDIA_URL_ALLOWLIST` must be the MinIO public host and
+   `DATABASE_URL` the Railway Timescale service's public URL; the page warns
+   when either is missing rather than letting you create a pod that cannot work.
+6. **Create pod.** The page then shows its state, GPU, region and hourly rate,
+   and whether `/health` is answering.
 
-- **RunPod API key + pod ID** — enables the Start/Stop GPU buttons and the
-  live status card. Stop when the batch is done; a stopped pod bills volume
-  storage only (~cents/month) instead of ~$0.39/hr.
-- **GPU autopilot** — "Auto-start GPU" boots the pod when a lesson is queued
-  while it's off; "Auto-stop after idle" shuts it down once the queue has
-  been empty for the configured minutes. Together they make the
-  rent-by-the-hour model fully hands-off.
-- **ML service URL** — the pod's exposed port, e.g.
-  `https://<podId>-8000.proxy.runpod.net`. Applies immediately (no redeploy);
-  it overrides the env default.
+Populating a **fresh** volume with the checkpoint is the one step that needs a
+shell: add your SSH public key in Settings before creating the pod (the image
+runs sshd for exactly this), then rsync the `.pth` to
+`/workspace/weights/`. Once it is there, no later pod needs this.
 
-Lessons uploaded while the GPU is off simply queue (BullMQ retries with
-backoff) and process when the pod starts.
+`allowedCudaVersions` defaults to `13.0,12.8` and should stay pinned: `uv.lock`
+resolves torch 2.12.1 to a cu13 wheel needing driver r580+, and an unpinned pod
+can land on a 12.4 host, come up "healthy", and run the whole batch on CPU.
+
+## 3. Autopilot
+
+- **Auto-provision GPU** — a queued lesson with no GPU serving it creates a pod
+  from this spec (or starts a stopped one). An account with no pod at all
+  recovers on its own; nobody has to open a browser.
+- **Idle release** — once the queue has been empty for the configured minutes,
+  the GPU is released. **Terminate** is the default and the right choice: a
+  *stopped* pod stays pinned to its host machine while that machine's GPU is
+  re-rented, and the restart then fails with "not enough free GPUs on the host
+  machine". Billing ends either way, and the checkpoint is on the volume, so
+  the replacement pod comes up ready.
+
+Together these make the rent-by-the-hour model hands-off: cost floor is the
+volume (~$0.07/GB/month), and GPU time is bought only while lessons are running.
+
+Lessons uploaded while the GPU is down simply queue (BullMQ delays without
+consuming retries) and process when a pod is serving again.
+
+**ML service URL** should stay empty. With a pod, the URL is derived from its
+id — RunPod's proxy hostname is the one address that survives a pod's whole
+life, so autopilot never leaves a stale URL behind. Fill it in only to override
+(a tunnel, a second pod); it applies immediately, no redeploy.
 
 ## 4. CI/CD (automatic on push to main)
 

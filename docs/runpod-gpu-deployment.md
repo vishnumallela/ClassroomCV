@@ -4,20 +4,29 @@ The ML pipeline runs **only on the RunPod GPU worker** in production. The
 Azure VM hosts frontend / api-service / Postgres / MinIO; the pod pulls video
 by presigned URL, runs the pipeline, and posts results back. Nothing here is
 live — one 12-camera class-day is a few GPU-hours on an L4, so the pod is
-started for the batch and stopped after.
+provisioned for the batch and destroyed after.
+
+**The pod is created and destroyed from the app's Settings page, not the RunPod
+console.** The app holds the whole specification below and provisions against
+RunPod's API; see `docs/deployment.md` for the walkthrough. This file explains
+*why* the values are what they are, which is what you need when changing one.
 
 ## Pod specification
 
 | Item | Value | Why |
 |---|---|---|
-| GPU | **NVIDIA L4 24 GB** (on-demand ~$0.39/h; spot is safe — batch jobs resume) | Video analytics is decode+throughput bound; L4 has strong NVDEC. H100 is 5–8x the price for no useful gain. |
+| GPU | **NVIDIA L4 24 GB** (on-demand ~$0.49/h; spot is safe — batch jobs resume) | Video analytics is decode+throughput bound; L4 has strong NVDEC. H100 is 5–8x the price for no useful gain. |
 | CPU / RAM | 8 vCPU / 32 GB | ffmpeg/cv2 decode feeds the GPU; starving the CPU strands the card. |
-| Volume | 100 GB at `/workspace` | RF-DETR checkpoint + per-job video scratch. |
+| Volume | 100 GB at `/workspace` | RF-DETR checkpoint + per-job video scratch. Outlives every pod — that is what makes terminate-on-idle cheap. |
+| CUDA | pinned to **13.0 / 12.8** at create time | `uv.lock` resolves torch 2.12.1 to a cu13 wheel needing driver r580+. Unpinned, RunPod may place the pod on a 12.4 host; it boots, reports healthy, and runs on CPU at ~20x the wall-clock. |
 | Image | `services/ml-service/Dockerfile` (PyTorch 2.12.1 + CUDA 13.0 runtime) | Must match `uv.lock`; see the Dockerfile header. |
+| Image **tag** | `:feat-rfdetr-pipeline` until this branch merges, then `:latest` | Only `main` writes `:latest`, so today it is still the old YOLO service — identical name and `/health`, different program, no entrypoint, and it ignores every `RFDETR_*` var. Settings verifies the tag against the registry and blocks a wrong one. |
 
 ## Environment
 
-Copy `services/ml-service/.env.runpod.example`. The load-bearing settings:
+Set on the Settings page, which passes it to the container at create time;
+`services/ml-service/.env.runpod.example` is the same list for a hand-run pod.
+The load-bearing settings:
 
 - `DEVICE=cuda REQUIRE_DEVICE=cuda` — the pod **refuses to run** if CUDA
   didn't resolve. A silent CPU fallback bills ~20x the wall-clock, which is
@@ -98,14 +107,51 @@ ties on who the teacher was; a trained `teacher` class removed the need.)
 
 ## Bring-up checklist
 
-1. Build + push the image; create the pod with the volume at `/workspace`.
-2. Upload the RF-DETR checkpoint to `/workspace/weights/` and point
-   `RFDETR_WEIGHTS` at it.
-3. Set the rest of the env from `.env.runpod.example` (storage host,
-   DATABASE_URL).
-4. First start: watch logs for `loading RF-DETR … on device cuda` and
-   `RF-DETR optimized for inference`. A checkpoint whose class order disagrees
-   with `app/models.py` refuses to load here rather than silently reporting the
-   door as the teacher.
-5. `GET /health` → `{"device": "cuda", "model": "/workspace/weights/…"}`.
+All of steps 1–4 are the Settings page; none of them is the RunPod console.
+
+1. Build + push the image (CI does this on every push to `services/ml-service/**`).
+2. Settings → paste the RunPod API key, pick the GPU and region, select or
+   create the network volume, set `MEDIA_URL_ALLOWLIST` and `DATABASE_URL`.
+   The page names anything still missing.
+3. **Create pod.**
+4. Watch the status card: it reports the pod's state and hourly rate, then
+   `/health` once uvicorn answers. Expect
+   `{"device": "cuda", "model": "/workspace/weights/…"}` — `device: cpu` there
+   means the CUDA pin did not hold, and the pod should be terminated, not used.
+5. Pod logs on first start: `loading RF-DETR … on device cuda` and `RF-DETR
+   optimized for inference`. A checkpoint whose class order disagrees with
+   `app/models.py` refuses to load here rather than silently reporting the door
+   as the teacher.
 6. Submit one short clip via `/analyze` end-to-end before the first real batch.
+
+## Running against a laptop (MinIO + Postgres are local)
+
+In production the pod reaches object storage and the database over the public
+internet. Against a dev laptop it cannot, and **two of the three legs of an
+analysis run inbound**, so they need reverse tunnels:
+
+```bash
+services/ml-service/tools/pod_tunnel.sh
+```
+
+It reads the live pod's IP and SSH port out of the running api-service — a new
+pod gets both fresh every time, so a pasted-in endpoint tunnels to nothing —
+and holds `pod:9000 -> MinIO` and `pod:5533 -> Postgres` open in a reconnect
+loop. Leave it running for the whole analysis.
+
+Do **not** rewrite the storage host to make it reachable: the presigned URL's
+host is what SigV4 signs *and* what `MEDIA_URL_ALLOWLIST` checks, so it has to
+resolve to the same name inside the pod. That is why the tunnel maps port 9000
+to port 9000.
+
+Without it, analysis fails with `<urlopen error [Errno 111] Connection
+refused>` — which reads like a broken GPU and is only a missing route. The
+third leg, api-service to pod, needs nothing: it goes out over RunPod's proxy
+hostname.
+
+**Once per volume, not per pod:** a brand-new volume has no checkpoint on it, so
+`/analyze` fails with "checkpoint not found" however healthy the pod looks. Add
+your SSH public key in Settings *before* creating the pod, then rsync the `.pth`
+to `/workspace/weights/` using RunPod's "SSH over exposed TCP" line — the
+`ssh.runpod.io` proxy does not support SCP/SFTP. `tools/pod_setup.sh` does this
+and more for a hand-built pod.
