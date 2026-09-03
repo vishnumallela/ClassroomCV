@@ -9,6 +9,7 @@ import {
 } from "@api/db/queries";
 import { rederiveFromRaw } from "@api/analysis/rederive";
 import { enqueueAnalysis } from "@api/lib/queue";
+import { schoolTimezone } from "@api/lib/school-time";
 import { base } from "@api/orpc/base";
 import { toDetailDto } from "@api/router/dto";
 
@@ -61,6 +62,6 @@ export const analysisRouter = {
       throw errors.DEPENDENCY_UNAVAILABLE({ message: "Re-derivation failed." });
     }
     const detail = await getVideoDetail(input.id);
-    return toDetailDto(detail!);
+    return toDetailDto(detail!, await schoolTimezone());
   }),
 };

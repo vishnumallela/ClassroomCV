@@ -7,6 +7,7 @@ import {
   events,
   type Polygon,
   tracks,
+  utterances,
   videoAnalytics,
   videos,
   type ZoneMeta,
@@ -248,6 +249,85 @@ export async function updateVideo(
 export async function updateStatus(
   id: string,
   patch: { status?: string; progress?: number; error?: string | null },
+): Promise<void> {
+  await db.update(videos).set(patch).where(eq(videos.id, id));
+}
+
+/**
+ * The timetable facts a person types in (docs/teacher-measurements.md, P1-P5).
+ *
+ * Undefined means "leave alone", null means "clear it" — the two are different
+ * and the form relies on it: blanking the subject must erase it, while saving
+ * the period must not wipe a scheduled time the same form did not include.
+ */
+export interface LessonDetailsPatch {
+  recordingStartedAt?: Date | null;
+  lessonDate?: string | null;
+  period?: string | null;
+  scheduledStart?: string | null;
+  scheduledEnd?: string | null;
+  subject?: string | null;
+  yearGroup?: string | null;
+  roomType?: string | null;
+  hasFollowingPeriod?: boolean | null;
+}
+
+export async function updateLessonDetails(
+  id: string,
+  patch: LessonDetailsPatch,
+): Promise<VideoRow | undefined> {
+  if (!isUuid(id)) return undefined;
+  const [row] = await db.update(videos).set(patch).where(eq(videos.id, id)).returning();
+  return row;
+}
+
+export interface UtteranceInput {
+  idx: number;
+  speaker: string;
+  isTeacher: boolean | null;
+  startMs: number;
+  endMs: number;
+  text: string;
+  confidence: number | null;
+  language: string | null;
+}
+
+/**
+ * Replace a lesson's transcript wholesale.
+ *
+ * Delete-then-insert in one transaction, like replaceZones: a re-transcription
+ * must not leave half of the previous run interleaved with the new one, and the
+ * (video_id, idx) unique index would collide on the overlap anyway.
+ */
+export async function replaceUtterances(videoId: string, rows: UtteranceInput[]): Promise<void> {
+  await db.transaction(async (tx) => {
+    await tx.delete(utterances).where(eq(utterances.videoId, videoId));
+    if (rows.length === 0) return;
+    // Chunked: a 40-minute lesson is a few thousand turns, and one oversized
+    // parameter list is the classic way this fails only on the long recordings.
+    for (let i = 0; i < rows.length; i += 500) {
+      await tx.insert(utterances).values(rows.slice(i, i + 500).map((r) => ({ videoId, ...r })));
+    }
+  });
+}
+
+export async function getUtterances(videoId: string) {
+  if (!isUuid(videoId)) return [];
+  return db
+    .select()
+    .from(utterances)
+    .where(eq(utterances.videoId, videoId))
+    .orderBy(utterances.idx);
+}
+
+export async function setAudioStatus(
+  id: string,
+  patch: {
+    audioStatus?: string;
+    audioError?: string | null;
+    audioPath?: string | null;
+    transcriptId?: string | null;
+  },
 ): Promise<void> {
   await db.update(videos).set(patch).where(eq(videos.id, id));
 }

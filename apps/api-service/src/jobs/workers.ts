@@ -14,9 +14,16 @@ import {
 } from "@api/lib/runpod";
 import { createBullConnection } from "@api/lib/redis";
 import { processAnalyzeJob } from "@api/jobs/analyze-video";
-import { type AnalyzeJobData, queues } from "@api/lib/queue";
+import { processAudioJob } from "@api/jobs/analyze-audio";
+import { type AnalyzeJobData, type AudioJobData, queues } from "@api/lib/queue";
 
 let worker: Worker<AnalyzeJobData> | undefined;
+let audioWorker: Worker<AudioJobData> | undefined;
+
+// Higher than the video queue's 1 because this queue spends its time waiting
+// on a remote API rather than holding a GPU. Modest, because each job does
+// hold an ffmpeg extraction and an upload.
+const AUDIO_CONCURRENCY = 4;
 let autopilotTimer: ReturnType<typeof setInterval> | undefined;
 
 // How long a job sleeps when the ML service is unreachable (the RunPod GPU is
@@ -152,6 +159,21 @@ export function startWorkers(): void {
     { connection: createBullConnection(), concurrency: 1 },
   );
 
+  // Deliberately NOT gated on mlReachable(): audio needs no GPU, and a lesson
+  // uploaded while the pod is down should still come back transcribed.
+  audioWorker = new Worker<AudioJobData>(
+    QUEUE_NAMES.AUDIO_ANALYSIS,
+    async (job) => {
+      if (job.name === JOB_NAMES.ANALYZE_AUDIO) return processAudioJob(job);
+      throw new Error(`No processor registered for job "${job.name}"`);
+    },
+    { connection: createBullConnection(), concurrency: AUDIO_CONCURRENCY },
+  );
+  audioWorker.on("failed", (job, err) =>
+    logger.error({ jobId: job?.id, videoId: job?.data.videoId, err }, "audio job failed"),
+  );
+  audioWorker.on("error", (err) => logger.error({ err }, "audio worker error"));
+
   worker.on("failed", (job, err) => {
     lastActivityAt = Date.now();
     logger.error({ jobId: job?.id, attemptsMade: job?.attemptsMade, err }, "analysis job failed");
@@ -169,5 +191,5 @@ export function startWorkers(): void {
 
 export async function stopWorkers(): Promise<void> {
   if (autopilotTimer) clearInterval(autopilotTimer);
-  await worker?.close();
+  await Promise.allSettled([worker?.close(), audioWorker?.close()]);
 }

@@ -1,4 +1,16 @@
-import { bigint, integer, jsonb, pgTable, real, text, timestamp, uuid } from "drizzle-orm/pg-core";
+import {
+  bigint,
+  boolean,
+  date,
+  integer,
+  jsonb,
+  pgTable,
+  real,
+  text,
+  time,
+  timestamp,
+  uuid,
+} from "drizzle-orm/pg-core";
 
 export type Bbox = { x: number; y: number; w: number; h: number };
 export type Polygon = [number, number][];
@@ -86,6 +98,91 @@ export const videos = pgTable("videos", {
   workflowRunId: text("workflow_run_id"),
   thumbnailPath: text("thumbnail_path"),
   uploadedAt: timestamp("uploaded_at", { withTimezone: true }).notNull().defaultNow(),
+
+  // --- Lesson details (docs/teacher-measurements.md, P1-P5) ---
+  //
+  // Every measurement compares a video offset (ms from the first frame) to a
+  // wall-clock time from the timetable, so recordingStartedAt is the hinge
+  // between the two and nothing in Group A or B resolves without it. It is
+  // read from the container's creation_time at probe time (36 of 39 sample
+  // recordings carry one) and stays editable for the rest.
+  //
+  // All nullable on purpose: an upload is never blocked on them, and a
+  // measurement missing its input reports "Not Observed" rather than a guess.
+  recordingStartedAt: timestamp("recording_started_at", { withTimezone: true }),
+  lessonDate: date("lesson_date"),
+  // Free text: schools name periods differently ("Period 3", "Block A", "II").
+  // A per-classroom period table can fill this in later without a rewrite.
+  period: text("period"),
+  // Local wall clock, paired with lessonDate and the school timezone in
+  // app_settings. Stored as time (not timestamptz) because a period is a
+  // fact about the school day, not an instant, and this keeps DST out of it.
+  scheduledStart: time("scheduled_start"),
+  scheduledEnd: time("scheduled_end"),
+  subject: text("subject"),
+  yearGroup: text("year_group"),
+  roomType: text("room_type"),
+  hasFollowingPeriod: boolean("has_following_period"),
+
+  // --- Audio track ---------------------------------------------------------
+  //
+  // Deliberately NOT `status`/`progress`. The video and audio halves run as
+  // independent jobs against different services (a rented GPU, a transcription
+  // API), and one status column with two writers produces a badge that flickers
+  // between them. Video keeps `status`; audio reports here.
+  //
+  // "skipped" is a real outcome, not a failure: a lesson with no usable audio
+  // still yields every Group A number.
+  audioStatus: text("audio_status"),
+  audioError: text("audio_error"),
+  // Where the extracted 16 kHz mono FLAC lives. Kept after transcription
+  // because the loudness pass (R17) reads the same file, and re-extracting it
+  // from a 2 GB mp4 to retry one threshold is waste.
+  audioPath: text("audio_path"),
+  // The provider's transcript id. Stored so a retry resumes the existing job
+  // instead of paying to transcribe the same hour of audio twice.
+  transcriptId: text("transcript_id"),
+});
+
+/**
+ * One turn of speech, with what the labelling pass made of it.
+ *
+ * The unit of storage is the utterance rather than the KPI, for the same reason
+ * `detection_events` stores boxes rather than board-minutes: every number in
+ * Groups C and D of docs/teacher-measurements.md is arithmetic over these rows,
+ * so a changed definition is a re-derive rather than a re-spend on the API.
+ *
+ * Only the teacher's utterances get labelled — that decision halves both the
+ * cost and the annotation surface, and it is already the documented scope.
+ */
+export const utterances = pgTable("utterances", {
+  id: uuid("id").primaryKey().defaultRandom(),
+  videoId: uuid("video_id")
+    .notNull()
+    .references(() => videos.id, { onDelete: "cascade" }),
+  // Position in the lesson. Ordering by startMs alone is ambiguous when a
+  // diarizer emits overlapping turns.
+  idx: integer("idx").notNull(),
+  // Whatever the diarizer called them: "teacher" when role identification
+  // worked, otherwise "A"/"B"/"C".
+  speaker: text("speaker").notNull(),
+  // Resolved separately from `speaker`, because the diarizer's own role guess
+  // is one opinion and the video is another: a turn attributed to the teacher
+  // while she is out of the room is misattributed, and presence data says so.
+  isTeacher: boolean("is_teacher"),
+  startMs: bigint("start_ms", { mode: "number" }).notNull(),
+  endMs: bigint("end_ms", { mode: "number" }).notNull(),
+  text: text("text").notNull(),
+  confidence: real("confidence"),
+  // Per-utterance language for R21. Null until the language pass runs.
+  language: text("language"),
+
+  // --- labels (null until the labelling pass runs) -------------------------
+  // instructing | explaining | asking | feedback | behaviour | procedure |
+  // off_topic | closing — the set named in docs/domain-a-kpis-and-labels.md.
+  intent: text("intent"),
+  attentionCue: boolean("attention_cue"),
+  setsTask: boolean("sets_task"),
 });
 
 export const zones = pgTable("zones", {

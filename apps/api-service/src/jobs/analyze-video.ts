@@ -13,6 +13,7 @@ import {
 } from "@api/db/queries";
 import { mkdir } from "node:fs/promises";
 import { generateThumbnail, probeVideo } from "@api/lib/media";
+import { localDateInSchoolTz, schoolTimezone } from "@api/lib/school-time";
 import { logger } from "@api/lib/logger";
 import { mlGetJob, mlGetJobResult, mlHealth, mlStartAnalysis } from "@api/lib/ml";
 import { isS3, presignGet, putLocalFile } from "@api/lib/storage";
@@ -88,12 +89,24 @@ async function probeStep(
     logger.warn({ err, videoId }, "thumbnail generation failed (non-fatal)");
   }
 
+  // Seed the lesson's wall-clock anchor and date from the container, but never
+  // over a value already on the row: a re-analysis must not silently discard a
+  // correction someone typed after watching the recording. Both stay editable.
+  const lessonSeed: { recordingStartedAt?: Date; lessonDate?: string } = {};
+  if (meta.recordingStartedAt && video.recordingStartedAt === null) {
+    lessonSeed.recordingStartedAt = meta.recordingStartedAt;
+    if (video.lessonDate === null) {
+      lessonSeed.lessonDate = localDateInSchoolTz(meta.recordingStartedAt, await schoolTimezone());
+    }
+  }
+
   await updateVideo(videoId, {
     durationMs: meta.durationMs,
     fps: meta.fps,
     width: meta.width,
     height: meta.height,
     ...(thumbnailPath ? { thumbnailPath } : {}),
+    ...lessonSeed,
     status: "analyzing",
     progress: 0.05,
   });

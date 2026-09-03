@@ -6,6 +6,7 @@ import {
   podSpec,
   setAppSetting,
 } from "@api/lib/app-settings";
+import { DEFAULT_SCHOOL_TIMEZONE, isValidTimezone } from "@api/lib/school-time";
 import { env } from "@api/lib/env";
 import { inspectImage } from "@api/lib/registry";
 import * as runpod from "@api/lib/runpod";
@@ -51,6 +52,8 @@ export const settingsRouter = {
       defaults: POD_DEFAULTS,
       sshPublicKeySet: Boolean(s.gpuSshPublicKey),
       mlDatabaseUrlMasked: maskDsn(s.mlDatabaseUrl),
+      schoolTimezone: s.schoolTimezone ?? null,
+      schoolTimezoneEffective: s.schoolTimezone ?? DEFAULT_SCHOOL_TIMEZONE,
     };
   }),
 
@@ -90,6 +93,10 @@ export const settingsRouter = {
         mlTensorrt: z.boolean().optional(),
         mlMediaAllowlist: z.string().trim().max(500).optional(),
         mlDatabaseUrl: z.string().trim().max(500).optional(),
+
+        // IANA zone the timetable is kept in. Everything in Group A/B of
+        // docs/teacher-measurements.md converts through it.
+        schoolTimezone: z.string().trim().max(80).optional(),
       }),
     )
     .handler(async ({ input, errors }) => {
@@ -104,6 +111,14 @@ export const settingsRouter = {
           message:
             'That does not look like an OpenSSH public key (expected "ssh-ed25519 AAAA… user@host"). ' +
             "Paste the contents of ~/.ssh/id_ed25519.pub — not the private key.",
+        });
+      }
+
+      // A zone name Intl cannot resolve would make every punctuality figure
+      // silently fall back to the default zone, which is worse than refusing it.
+      if (input.schoolTimezone && !isValidTimezone(input.schoolTimezone)) {
+        throw errors.VALIDATION({
+          message: `"${input.schoolTimezone}" is not an IANA timezone (expected e.g. "Asia/Kolkata").`,
         });
       }
 
@@ -124,6 +139,7 @@ export const settingsRouter = {
         mlWeightsPath: input.mlWeightsPath,
         mlMediaAllowlist: input.mlMediaAllowlist,
         mlDatabaseUrl: input.mlDatabaseUrl,
+        schoolTimezone: input.schoolTimezone,
       } as const;
       for (const [key, value] of Object.entries(text)) {
         if (value !== undefined) {

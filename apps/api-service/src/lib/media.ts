@@ -3,6 +3,14 @@ export interface ProbeResult {
   fps: number | null;
   width: number | null;
   height: number | null;
+  /**
+   * Wall-clock instant the recording started, from the container's
+   * creation_time tag. This is the hinge every punctuality measurement turns
+   * on: detections are offsets in ms from the first frame, the timetable is a
+   * clock time, and the two do not subtract without it. 36 of 39 sample
+   * recordings carry the tag; null means someone has to type it in.
+   */
+  recordingStartedAt: Date | null;
 }
 
 interface FfprobeStream {
@@ -11,11 +19,26 @@ interface FfprobeStream {
   r_frame_rate?: string;
   width?: number;
   height?: number;
+  tags?: { creation_time?: string };
 }
 
 interface FfprobeOutput {
   streams?: FfprobeStream[];
-  format?: { duration?: string };
+  format?: { duration?: string; tags?: { creation_time?: string } };
+}
+
+/**
+ * Reject a creation_time that cannot be a lesson. Some encoders write a zero
+ * epoch or a placeholder year, and a bogus instant is worse than none here:
+ * it silently produces a confident "47 minutes late".
+ */
+function parseCreationTime(value: string | undefined): Date | null {
+  if (!value) return null;
+  const at = new Date(value);
+  if (Number.isNaN(at.getTime())) return null;
+  const year = at.getUTCFullYear();
+  if (year < 2000 || year > 2100) return null;
+  return at;
 }
 
 async function run(cmd: string[]): Promise<{ code: number; stdout: string; stderr: string }> {
@@ -59,11 +82,17 @@ export async function probeVideo(filePath: string): Promise<ProbeResult> {
   const durationMs =
     Number.isFinite(durationSec) && durationSec > 0 ? Math.round(durationSec * 1000) : null;
   const fps = parseFrameRate(stream?.avg_frame_rate) ?? parseFrameRate(stream?.r_frame_rate);
+  // Format tag first: it is the container's own record. The video stream's
+  // copy is the fallback, and the two agree wherever both are present.
+  const recordingStartedAt =
+    parseCreationTime(parsed.format?.tags?.creation_time) ??
+    parseCreationTime(stream?.tags?.creation_time);
   return {
     durationMs,
     fps,
     width: stream?.width ?? null,
     height: stream?.height ?? null,
+    recordingStartedAt,
   };
 }
 

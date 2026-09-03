@@ -7,6 +7,7 @@ import { DataQualityCard } from "@/components/data-quality-card";
 import { EventsTable } from "@/components/events-table";
 import { HeatmapCard } from "@/components/heatmap-card";
 import { KpiCards } from "@/components/kpi-cards";
+import { LessonDetailsCard } from "@/components/lesson-details-card";
 import { StatusBadge } from "@/components/status-badge";
 import { TimelineStrip } from "@/components/timeline-strip";
 import { Button } from "@/components/ui/button";
@@ -147,6 +148,12 @@ function VideoDetail() {
         )}
         onTimeUpdate={setCurrentMs}
       />
+
+      {/* Outside the done/not-done branch on purpose: the whole reason the
+          details form is not a gate on upload is that someone can fill the
+          timetable in while the GPU works. Hiding it until analysis finishes
+          would give back the minutes the design just bought. */}
+      <LessonDetailsCard videoId={video.id} lesson={data.lesson} punctuality={data.punctuality} />
 
       {!done ? (
         <Card className="p-6 text-sm text-muted-foreground">

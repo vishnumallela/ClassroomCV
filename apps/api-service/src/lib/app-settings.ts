@@ -50,6 +50,18 @@ export const SETTING_KEYS = [
   "mlTensorrt",
   "mlMediaAllowlist",
   "mlDatabaseUrl",
+
+  // ── audio ─────────────────────────────────────────────────────────────────
+  // AssemblyAI key for transcription + diarization. Here rather than in env for
+  // the same reason as the RunPod key: it can be rotated from the Settings page
+  // without a redeploy. Masked on read, never echoed to the browser.
+  "assemblyaiApiKey",
+
+  // ── school ────────────────────────────────────────────────────────────────
+  // IANA zone the timetable is kept in (default Asia/Kolkata). Container
+  // creation_time is UTC; every scheduled start/end is local wall clock, and
+  // this is what converts between them. See lib/school-time.ts.
+  "schoolTimezone",
 ] as const;
 export type SettingKey = (typeof SETTING_KEYS)[number];
 

@@ -7,17 +7,31 @@ export interface AnalyzeJobData {
   attemptId?: string;
 }
 
+export interface AudioJobData {
+  videoId: string;
+}
+
 const videoAnalysisQueue = new Queue<AnalyzeJobData>(QUEUE_NAMES.VIDEO_ANALYSIS, {
+  connection: createBullConnection(),
+  defaultJobOptions: DEFAULT_JOB_OPTIONS as JobsOptions,
+});
+
+const audioAnalysisQueue = new Queue<AudioJobData>(QUEUE_NAMES.AUDIO_ANALYSIS, {
   connection: createBullConnection(),
   defaultJobOptions: DEFAULT_JOB_OPTIONS as JobsOptions,
 });
 
 export const queues: Record<QueueName, Queue> = {
   [QUEUE_NAMES.VIDEO_ANALYSIS]: videoAnalysisQueue,
+  [QUEUE_NAMES.AUDIO_ANALYSIS]: audioAnalysisQueue,
 };
 
 export function enqueueAnalysis(data: AnalyzeJobData) {
   return videoAnalysisQueue.add(JOB_NAMES.ANALYZE, data);
+}
+
+export function enqueueAudioAnalysis(data: AudioJobData) {
+  return audioAnalysisQueue.add(JOB_NAMES.ANALYZE_AUDIO, data);
 }
 
 export async function closeQueues(): Promise<void> {

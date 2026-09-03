@@ -12,7 +12,7 @@ import {
 } from "@api/db/queries";
 import { env } from "@api/lib/env";
 import { logger } from "@api/lib/logger";
-import { enqueueAnalysis } from "@api/lib/queue";
+import { enqueueAnalysis, enqueueAudioAnalysis } from "@api/lib/queue";
 import { ensureLocal, openWriteSink, removeObjects } from "@api/lib/storage";
 
 const CONTENT_TYPES: Record<string, string> = {
@@ -134,6 +134,15 @@ async function handleUpload(c: Context): Promise<Response> {
 
   const job = await enqueueAnalysis({ videoId: id });
   await setWorkflowRunId(id, String(job.id));
+
+  // Both halves start together. They run against different services — a rented
+  // GPU and a transcription API — so the lesson's turnaround is the longer of
+  // the two rather than their sum. Audio failing must never hold up the video
+  // pipeline, hence the catch: it reports itself through videos.audio_status.
+  await enqueueAudioAnalysis({ videoId: id }).catch((err) =>
+    logger.warn({ err, videoId: id }, "could not queue audio analysis (non-fatal)"),
+  );
+
   return c.json({ id }, 201);
 }
 

@@ -12,6 +12,7 @@
     "start": "bun src/index.ts",
     "build": "bun build src/index.ts --target=bun --outdir=dist --packages=external",
     "typecheck": "tsc --noEmit",
+    "test": "bun test",
     "lint": "oxlint",
     "format": "oxfmt --write .",
     "format:check": "oxfmt --check .",
