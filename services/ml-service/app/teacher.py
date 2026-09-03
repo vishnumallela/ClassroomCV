@@ -29,7 +29,19 @@ this module hands over is (a) the segments, with the noise filtered out, and
 a one-adult lesson and is refused downstream on a two-adult one until Phase 3
 can do better.
 
-Two things the segments do NOT fix, stated so nobody assumes they do:
+Three things the segments do NOT fix, stated so nobody assumes they do:
+
+- An OCCLUDED crossing. On the real handover clip the two teachers crossed
+  paths twice. Predicting each body's position from its velocity carries the
+  walker through the first. The second happened while one teacher was briefly
+  undetected behind the other, and the model then drew a partial box on the
+  occluded one: a partial box's CENTRE sits higher than a full box's on the
+  same standing person, so centre-distance matched each body to the other's
+  box. Tracking the box top (the head) instead resolves exactly that crossing —
+  and re-swaps the first, and splits the 37-minute baseline, because a
+  two-frame false box then seeds a lane whose stale prediction later steals
+  hers. Rejected on that evidence (tools/ab_tracker.py). What resolves an
+  occluded crossing is appearance, which is Phase 3.
 
 - A student the detector calls "teacher" for a few frames is a short segment
   and is dropped as noise, which is right. A student who stands still at the
@@ -105,7 +117,13 @@ CO_PRESENCE_MIN_MS = 30_000
 # called them two bodies, nearest-assignment gave each its own lane, and the
 # phantom lane then reached across the room and collected a student. The
 # smaller box is 100% inside the larger; two people side by side are not.
-SAME_BODY_OVERLAP = 0.7
+#
+# 0.5, not 0.7, after the real handover clip: on a SEATED teacher the model
+# emits a head-only box beside a torso box, and the head box hangs over the
+# torso box's top edge, so its containment is 0.5-0.9 rather than 1.0. At 0.7
+# she became two lanes for 25 seconds. Two adults in that room, even at the
+# moment they pass each other, overlap by ~0 — so 0.5 costs nothing there.
+SAME_BODY_OVERLAP = 0.5
 # A segment shorter than this is a misdetection, not a person: the detector
 # calling a student "teacher" for some frames. On the baseline the longest such
 # run is 0.8 s; three seconds is fifteen frames at 5 fps, well past a flicker
@@ -115,6 +133,20 @@ SAME_BODY_OVERLAP = 0.7
 # hijack her timeline.
 SEGMENT_MIN_MS = 3_000
 SEGMENT_MIN_DETS = 8
+
+# --- predicting where a body is next -----------------------------------------
+# Assignment ranks candidate boxes by distance from where each body is PREDICTED
+# to be, extrapolating its last step, rather than from where it last was. The
+# difference only matters when two bodies compete for boxes, and that is
+# exactly when it matters most: on the real handover clip the two teachers
+# crossed paths twice, and nearest-to-last-position swapped their segments both
+# times — the one walking past inherited the one standing still, because at the
+# crossing "where she was" is the other person's position. Predicting carries
+# the walker through. A velocity is only trusted from two sightings at most
+# this far apart, and is only extrapolated this far ahead, because per-frame
+# box jitter turns a long lead into a random guess.
+PREDICT_MAX_STEP_MS = 1_000
+PREDICT_MAX_LEAD_MS = 600
 
 
 @dataclass
@@ -240,10 +272,38 @@ def _plausible(prev: Detection, cand: Detection) -> bool:
     return dist <= allowed
 
 
-def _dist(a: Detection, b: Detection) -> float:
-    ax, ay = _center(a)
-    bx, by = _center(b)
-    return ((ax - bx) ** 2 + (ay - by) ** 2) ** 0.5
+def _predicted(seg: Segment, ts: int) -> tuple[float, float]:
+    """Where `seg` should be at `ts`: its last centre carried forward by the
+    velocity of its last step, when that step is recent enough to trust."""
+    last = seg.last
+    lx, ly = _center(last)
+    if len(seg.detections) < 2:
+        return lx, ly
+    prev = seg.detections[-2]
+    dt = last.video_ts_ms - prev.video_ts_ms
+    if dt <= 0 or dt > PREDICT_MAX_STEP_MS:
+        return lx, ly
+    px, py = _center(prev)
+    lead = min(ts - last.video_ts_ms, PREDICT_MAX_LEAD_MS)
+    return lx + (lx - px) / dt * lead, ly + (ly - py) / dt * lead
+
+
+def _dist_from(point: tuple[float, float], d: Detection) -> float:
+    cx, cy = _center(d)
+    return ((cx - point[0]) ** 2 + (cy - point[1]) ** 2) ** 0.5
+
+
+def _recent_height(seg: Segment) -> float:
+    """Median box height over the segment's last SIZE_WINDOW sightings."""
+    hs = sorted(d.bbox["h"] for d in seg.detections[-SIZE_WINDOW:])
+    return hs[len(hs) // 2]
+
+
+def _size_cost(ref_h: float, d: Detection) -> float:
+    h = d.bbox["h"]
+    if ref_h <= 0 or h <= 0:
+        return 0.0
+    return SIZE_WEIGHT * abs(math.log(h / ref_h))
 
 
 def _containment(a: Detection, b: Detection) -> float:
@@ -319,10 +379,14 @@ def _track(stamps: list[int], by_ts: dict[int, list[Detection]]) -> tuple[list[S
     any box left over either welds onto the one person who is unambiguously
     returning from an absence, or starts a new segment.
 
-    Nearest, not most confident. Confidence is a statement about whether this
-    is a teacher at all, which the class id has already settled; it says
-    nothing about WHICH teacher. Distance from where a body was 200 ms ago does.
-    Choosing on confidence is the identity swap this rewrite exists to end.
+    Nearest to where each body is PREDICTED to be, not most confident.
+    Confidence is a statement about whether this is a teacher at all, which the
+    class id has already settled; it says nothing about WHICH teacher. Distance
+    from where a body was heading does. Choosing on confidence is the identity
+    swap this rewrite exists to end; choosing on last position instead of
+    predicted position is the swap the real handover clip then showed at every
+    crossing. Reachability (_plausible) is still judged from the last sighting,
+    so a body is never refused a box it could have reached.
     """
     segments: list[Segment] = []
     duplicates = 0
@@ -331,8 +395,9 @@ def _track(stamps: list[int], by_ts: dict[int, list[Detection]]) -> tuple[list[S
         duplicates += len(by_ts[ts]) - len(boxes)
 
         active = [s for s in segments if ts - s.last_ms < FREE_GAP_MS]
+        predicted = [_predicted(seg, ts) for seg in active]
         pairs = sorted(
-            (_dist(seg.last, box), si, bi)
+            (_dist_from(predicted[si], box), si, bi)
             for si, seg in enumerate(active)
             for bi, box in enumerate(boxes)
             if _plausible(seg.last, box)

@@ -475,6 +475,44 @@ class TestSegments:
         assert chosen is twin  # the higher confidence stands for the body
         assert twin.track_no == T.TEACHER_TRACK_NO
 
+    def test_two_bodies_crossing_paths_keep_their_identities(self):
+        """One adult walks past another who is standing still. The real
+        handover clip did this twice and nearest-to-LAST-position swapped the
+        segments both times: at the crossing, "where she was" is the other
+        person's position. Predicting from velocity carries the walker through.
+
+        At the crossing instant the two boxes coincide and dedup keeps one, so
+        one body goes a frame without a sighting — realistic, and the case the
+        prediction has to survive.
+        """
+        dets = []
+        for i, ts in enumerate(range(0, 4_001, 200)):
+            dets.append(_det(ts, x=0.8 - 0.03 * i, y=0.3, w=0.1, h=0.3, conf=0.85))  # walker
+            dets.append(_det(ts, x=0.5, y=0.3, w=0.1, h=0.3, conf=0.85))  # standing
+        track = T.build_teacher_track(dets, duration_ms=4_000)
+        subs = [s for s in track.segments if s.substantial]
+        assert len(subs) == 2
+        still = next(s for s in subs if s.detections[0].bbox["x"] == 0.5)
+        walker = next(s for s in subs if s is not still)
+        assert all(d.bbox["x"] == 0.5 for d in still.detections), "the standing body moved lanes"
+        xs = [d.bbox["x"] for d in walker.detections]
+        assert xs == sorted(xs, reverse=True), "the walker's x must fall monotonically: no swap"
+        assert xs[-1] < 0.3  # and it made it all the way across
+
+    def test_a_head_box_beside_a_torso_box_is_one_seated_person(self):
+        """From the real clip: on a seated teacher the detector emits a
+        head-only box and a torso box at the same instant, the head box
+        hanging above the torso box's top edge (containment ~0.6). One body,
+        not two lanes."""
+        dets = []
+        for ts in range(0, 10_001, 200):
+            dets.append(_det(ts, x=0.42, y=0.60, w=0.06, h=0.12, conf=0.84))  # head
+            dets.append(_det(ts, x=0.41, y=0.64, w=0.08, h=0.26, conf=0.55))  # torso
+        track = T.build_teacher_track(dets, duration_ms=10_000)
+        assert len([s for s in track.segments if s.substantial]) == 1
+        assert track.others == []
+        assert track.duplicates == 51
+
     def test_a_student_within_reach_during_her_occlusion_is_absorbed(self):
         """DOCUMENTED LIMITATION, not a regression. She is occluded for one
         second; a student stands where she was; the only continuation on

@@ -289,10 +289,54 @@ box within reach of her last position joins HER segment (only continuation on
 offer). The old chain did the same. Appearance (Phase 3) can catch it; motion
 cannot. Pinned as a test so nobody mistakes it for a regression later.
 
-**Not yet verified on the real handover.** Its 1,641 stored rows are
-pre-0014 winners-only, so the second teacher is not in the data and a
-`/rederive` cannot split it. That needs a fresh detector pass on the 6-minute
-clip — the same GPU run Phase 3 will need anyway.
+#### Verified on the real handover (2026-09-03, fresh GPU pass, 2,048 boxes stored)
+
+The card that read **"Teacher 100%, 1 in · 0 out"** now tracks five bodies,
+refuses the punctuality numbers (`co_presence 78.8 s`, `attribution: low`),
+and stores every box. What the segments say, checked frame by frame against
+the video:
+
+| segment | span | who |
+| --- | --- | --- |
+| T2, T3 | 0 → 68 s | the cream teacher **seated** — a head-only box and a torso box, two lanes (see below) |
+| T1 | 65 → 360 s | the cream teacher from the moment she stands (primary by size; **swaps to the black teacher at ~307 s**, see below) |
+| T4 | 247 → 262 s | the black teacher **in the doorway** — 09:54:05, twenty seconds before the note in §2 said she "first appears"; the detector is right |
+| T5 | 262 → 336 s | the black teacher at the board; cream leaves at 335.8 s (09:55:34) |
+
+Three things the real clip changed, all landed with the 37-minute baseline
+still byte-identical:
+
+- **Containment threshold 0.7 → 0.5.** On a seated teacher the model draws a
+  head-only box beside a torso box; the head box hangs over the torso box's
+  top edge, so containment is 0.5–0.9, not 1.0. At 0.7 she was two lanes for
+  25 seconds.
+- **Assignment by velocity-predicted position, not last position.** The two
+  teachers cross paths twice. At the first crossing (≈258 s, black walking in
+  from the door past cream at the board) nearest-to-last-position swapped
+  them; predicting carries the walker through. **Fixed.**
+- **A box-size term was tried and removed.** No benefit on either crossing,
+  and the 308 s frame shows why it would mislead: cream's box legitimately
+  grows to h≈0.37 as she walks toward the camera.
+
+**Known limit, not fixed — the second crossing (≈306 s).** Cream walks left
+past black and is undetected for a moment behind her; the model then draws a
+partial box on the occluded teacher. A partial box's *centre* sits higher than
+a full box's on the same standing person, so centre-distance matched each body
+to the other's box. Tracking the box **top** (the head) instead resolves
+exactly this crossing — and re-swaps the first, and **splits the 37-minute
+baseline at 390 s**: a two-frame false box (a student ahead of her) seeds a
+lane whose stale prediction eight seconds later sits closer to her next box
+than her own lane's does, and steals it. Rejected on that evidence via
+`tools/ab_tracker.py`. What resolves an occluded crossing is appearance,
+which is Phase 3 — and the two outfits here (cream stripes vs black) are as
+easy as appearance gets.
+
+So after Phase 2 the segments are **pure between crossings, not across
+them**, and fragmented (cream is three segments before she stands; black is
+two). Phase 3's linking step has to do the joining; Phase 3's appearance step
+has to catch the one remaining swap. The interim primary (biggest segment) is
+cream for 65–307 s and black after — wrong either way, and Phase 0 keeps it off
+the dashboard.
 
 ### Phase 3 — Attribution (medium)
 
@@ -515,9 +559,10 @@ Phases **0 and 1** first: small, low-risk, independent of every open decision,
 and together they stop the wrong numbers reaching anyone and make everything
 after them free to iterate on. Then the baseline re-run (§6), then Phase 2.
 
-**Done: 0, 1, the §6 baseline, and 2.** Next is Phase 3 (attribution), and
-the first thing it needs is a fresh GPU pass on the 6-minute handover clip so
-the second teacher's boxes exist in the database to attribute between.
+**Done: 0, 1, the §6 baseline, 2, and the real-handover pass.** Next is
+Phase 3: link the fragments, catch the occluded-crossing swap by appearance,
+then attribute by timetable overlap. The handover's timetable (recording start
+09:49:58 from the burned-in clock, period 09:50–10:35) still needs typing in.
 
 Two things learned while building them, worth knowing before Phase 2:
 
