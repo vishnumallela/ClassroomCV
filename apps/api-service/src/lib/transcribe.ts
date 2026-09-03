@@ -50,7 +50,15 @@ export interface TranscriptResult {
   error: string | null;
   utterances: Utterance[];
   audioDurationMs: number | null;
-  /** Which languages the model actually heard, when it reports them. */
+  /**
+   * Which languages this run covered, when the response says so.
+   *
+   * Not per-utterance, and not a measurement: on a code-switched run this is
+   * the pair that was allowed, not a claim about what was spoken. R21 has to
+   * read the turn's own text (the two languages come back in their own
+   * scripts), which is also where the Devanagari/Latin normalisation the
+   * counting needs has to happen.
+   */
   detectedLanguages: string[];
 }
 
@@ -60,8 +68,10 @@ interface RawTranscript {
   error?: string | null;
   audio_duration?: number | null;
   utterances?: Utterance[] | null;
+  /** Single dominant language. Present when the file was not code-switched. */
   language_code?: string | null;
-  language_detection_results?: { language_code?: string }[] | null;
+  /** Echo of the code-switching request — the languages this run allowed. */
+  language_codes?: string[] | null;
 }
 
 async function readError(res: Response): Promise<string> {
@@ -154,15 +164,35 @@ export async function submitTranscript(
     headers: { authorization: key, "content-type": "application/json" },
     body: JSON.stringify({
       audio_url: uploadUrl,
+      // Universal 3.5 Pro, explicitly. Plural and an array: `speech_model`
+      // (singular) is the deprecated field, and omitting this altogether lets
+      // the account default answer instead — which on a real lesson returned a
+      // single speaker and ignored the key terms below, quietly undoing both of
+      // the settings that make Group D measurable.
+      speech_models: ["universal-3-5-pro"],
       // Both codes, English required by the API. Classrooms here code-switch
       // mid-sentence, and pinning a single language mangles whichever half
       // loses — verified on a real lesson.
+      //
+      // NOT `language_detection`. The two are mutually exclusive ("`language_
+      // detection` is not available when `language_codes` is specified"), and
+      // this is the one to keep: language_detection resolves the FILE to one
+      // dominant language, so on a Hinglish lesson it would pick a winner and
+      // mangle the other half — the exact failure this line exists to prevent.
+      // It would not buy R21 anything either; per-utterance language is not in
+      // its response for pre-recorded audio. Code switching returns each turn
+      // in its own script, so R21's per-turn language comes from the text.
       language_codes: ["en", "hi"],
-      // R21 needs to know which language each turn was in.
-      language_detection: true,
       // X-7: nothing in Group D is measurable until the teacher's voice is
       // separable from the room's.
       speaker_labels: true,
+      // speaker_labels ALONE returned a whole 4.5-minute lesson as one speaker.
+      // The floor is what makes the diarizer separate the teacher from the room
+      // at all. A ceiling of 6 because this is one adult plus the handful of
+      // students who get close enough to the mic to be resolved — a ~30-student
+      // room does not produce 30 separable voices, and asking for them invents
+      // speakers. Mutually exclusive with `speakers_expected`; do not add both.
+      speaker_options: { min_speakers_expected: 2, max_speakers_expected: 6 },
       // Restarts and hesitation are not noise here — "repeated attempts to
       // begin" is a graded behaviour, and cleaning them up makes a floundering
       // start read as a fluent one.
@@ -191,10 +221,15 @@ export async function getTranscript(id: string): Promise<TranscriptResult> {
   const body = (await res.json()) as RawTranscript;
 
   const status = body.status ?? "error";
+  // Read both shapes. `language_codes` comes back on a code-switched run,
+  // `language_code` on a single-language one, and neither is guaranteed — so
+  // this reports what the response actually carried rather than asserting a
+  // language nobody returned. It is the set the run COULD produce, not a
+  // per-turn answer; R21 needs the turn's own text for that.
   const languages = new Set<string>();
   if (body.language_code) languages.add(body.language_code);
-  for (const entry of body.language_detection_results ?? []) {
-    if (entry.language_code) languages.add(entry.language_code);
+  for (const code of body.language_codes ?? []) {
+    if (code) languages.add(code);
   }
 
   return {

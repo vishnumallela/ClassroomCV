@@ -283,7 +283,7 @@ answer.
 - **OCR the burned-in clock** as a fallback for `recording_started_at` when the
   container tag is missing. Fixed crop, top-right ~470x56. Unblocks Group A for
   this school's entire archive.
-- **Fix `transcribe.ts`** (see §7) and re-run the audio.
+- ~~**Fix `transcribe.ts`** (see §7)~~ — done. Re-run the audio.
 
 ---
 
@@ -308,7 +308,7 @@ On the handover clip, after the fix:
 
 ---
 
-## 7. Separate bug: audio never ran
+## 7. Separate bug: audio never ran — FIXED
 
 The audio job failed at submit:
 
@@ -316,17 +316,40 @@ The audio job failed at submit:
 transcript submit failed: {"error": "`language_detection` is not available when `language_codes` is specified."}
 ```
 
-`apps/api-service/src/lib/transcribe.ts:160` still sends **both**
-`language_codes: ["en","hi"]` and `language_detection: true`. It is also missing
-two settings proven necessary on real classroom audio earlier in the session:
+`apps/api-service/src/lib/transcribe.ts` sent **both** `language_codes:
+["en","hi"]` and `language_detection: true`, which the API rejects at submit. It
+was also missing two settings proven necessary on real classroom audio.
+
+Nothing was billed — it fails before upload.
 
 | Change | Why |
 | --- | --- |
-| **drop** `language_codes` | mutually exclusive with detection; detection is the one that reports *which* languages were heard, which R21 needs |
-| **add** `speech_models: ["universal-3-5-pro"]` | without it the account default runs: one speaker, key terms ignored. Note plural + array |
-| **add** `speaker_options: {min_speakers_expected: 2, max_speakers_expected: 6}` | `speaker_labels` alone returned the whole 4.5-min lesson as ONE speaker. With the floor: 2 speakers |
+| **drop** `language_detection` | mutually exclusive with `language_codes`, and `language_codes` is the one to keep — see the correction below |
+| **add** `speech_models: ["universal-3-5-pro"]` | without it the account default runs: one speaker, key terms ignored. Note plural + array; `speech_model` singular is deprecated |
+| **add** `speaker_options: {min_speakers_expected: 2, max_speakers_expected: 6}` | `speaker_labels` alone returned the whole 4.5-min lesson as ONE speaker. With the floor: 2 speakers. Mutually exclusive with `speakers_expected` |
 
-Nothing was billed — it fails before upload.
+> **CORRECTION to this section's original advice.** It said to drop
+> `language_codes` and keep `language_detection`, on the grounds that detection
+> "reports which languages were heard, which R21 needs". That is wrong on both
+> counts, checked against AssemblyAI's docs before applying it:
+>
+> - `language_detection` resolves the FILE to a single dominant language. On a
+>   Hinglish lesson it picks a winner and mangles the other half — precisely the
+>   failure `language_codes` was added to prevent, and one already verified on a
+>   real lesson.
+> - It reports **no per-utterance language** for pre-recorded audio, so it never
+>   could have served R21.
+>
+> `language_codes` is the code-switching parameter (max 2, one must be `en`) and
+> Universal 3.5 Pro supports mid-sentence Hinglish. R21's per-turn language has
+> to come from the turn's own text, which code switching returns in its native
+> script — the same place the Devanagari/Latin normalisation already has to
+> happen before anything is counted.
+
+`transcribe.test.ts` pins each of these against a stubbed fetch, because three of
+the four fail SILENTLY rather than loudly: omit `speech_models` and the account
+default answers with a 200 and a plausible transcript that has one speaker and
+no key terms.
 
 ---
 
