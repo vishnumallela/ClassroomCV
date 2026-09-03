@@ -217,20 +217,22 @@ describe("previousTeacher: the other lesson in this file", () => {
       },
     } as Partial<DataQuality>);
 
-  test("her departure is observed, against the bell she overran", () => {
+  test("her departure is observed, measured into THIS period", () => {
     const p = toDetailDto(detail(handover()), IST).previousTeacher;
     expect(p.state).toBe("observed");
     expect(p.departureAt).toBe("09:55");
-    expect(p.previousBellEnd).toBe("09:50");
+    expect(p.periodStart).toBe("09:50");
     // 335.8 s after a bell at +2 s
-    expect(p.departureMinutesAfterBell).toBe(5.6);
-    expect(p.stayedToBell).toBe(true);
+    expect(p.departureMinutesIntoPeriod).toBe(5.6);
+    // Her own bell (09:25 at this school — a 25-minute break precedes period
+    // 3) is neither covered by this file nor known without the timetable table.
+    expect(p.previousPeriodEndKnown).toBe(false);
     expect(p.adultsAtBell).toBe(1);
     expect(p.reason).toContain("left at 09:55");
   });
 
-  test("an adult who left BEFORE the bell did not stay to it", () => {
-    // Recording from 09:45, bell at 09:50: she leaves at 09:46:40.
+  test("an adult who left before this period began is reported as such", () => {
+    // Recording from 09:45, this period's bell at 09:50: she leaves at 09:46:40.
     const d = detail(
       handover({
         candidates: [
@@ -259,8 +261,7 @@ describe("previousTeacher: the other lesson in this file", () => {
     d.video.recordingStartedAt = new Date("2026-08-17T04:15:00.000Z");
     const p = toDetailDto(d, IST).previousTeacher;
     expect(p.state).toBe("observed");
-    expect(p.stayedToBell).toBe(false);
-    expect(p.departureMinutesAfterBell).toBe(-3.3);
+    expect(p.departureMinutesIntoPeriod).toBe(-3.3);
     expect(p.departureAt).toBe("09:46");
   });
 

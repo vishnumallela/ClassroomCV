@@ -119,9 +119,12 @@ const AT_BELL_TOLERANCE_MS = 10_000;
  * independently nullable; `state` says which of the three honest answers this
  * is, and `reason` says why in words.
  *
- * The previous period's end bell is taken as this period's start bell — true
- * for back-to-back periods and stated as an assumption until timetable_periods
- * exists (Phase D).
+ * What this file also cannot say: anything against HER bell. Periods at this
+ * school are not back-to-back (period 2 ends 09:25, period 3 starts 09:50), so
+ * "this period's start" is not "her period's end", and a file that starts on
+ * this period's bell does not cover hers. Until timetable_periods exists (Phase
+ * D) her departure is reported against THIS period's start — "5.6 min into the
+ * period" — which is true, and nothing is claimed about her own bell.
  */
 type PreviousTeacherState = "observed" | "not_observed" | "withheld" | "none";
 
@@ -130,11 +133,12 @@ function noPreviousTeacher(state: Exclude<PreviousTeacherState, "observed">, rea
     state,
     reason,
     departureAt: null as string | null,
-    departureMinutesAfterBell: null as number | null,
-    stayedToBell: null as boolean | null,
+    departureMinutesIntoPeriod: null as number | null,
     adultsAtBell: 0,
-    previousBellEnd: null as string | null,
-    assumedContiguousPeriods: true,
+    periodStart: null as string | null,
+    // Her own bell is not known until timetable_periods exists (Phase D);
+    // nothing about it is claimed here.
+    previousPeriodEndKnown: false,
   };
 }
 
@@ -184,11 +188,10 @@ function toPreviousTeacher(v: Detail["video"], analytics: Analytics, timezone: s
         ? ` (${atBell.length} such adults were tracked; the last to leave is taken).`
         : "."),
     departureAt: localTimeInSchoolTz(departureAt, timezone),
-    departureMinutesAfterBell: minutesAfterBell,
-    stayedToBell: previous.last_ms >= bellMs,
+    departureMinutesIntoPeriod: minutesAfterBell,
     adultsAtBell: atBell.length,
-    previousBellEnd: bellLocal,
-    assumedContiguousPeriods: true,
+    periodStart: bellLocal,
+    previousPeriodEndKnown: false,
   };
 }
 

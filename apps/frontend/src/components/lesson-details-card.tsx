@@ -38,11 +38,10 @@ export interface PreviousTeacher {
   state: "observed" | "withheld" | "none" | "not_observed";
   reason: string;
   departureAt: string | null;
-  departureMinutesAfterBell: number | null;
-  stayedToBell: boolean | null;
+  departureMinutesIntoPeriod: number | null;
   adultsAtBell: number;
-  previousBellEnd: string | null;
-  assumedContiguousPeriods: boolean;
+  periodStart: string | null;
+  previousPeriodEndKnown: boolean;
 }
 
 export interface Punctuality {
@@ -87,12 +86,12 @@ function Row({ label, value, muted }: { label: string; value: string; muted?: bo
   );
 }
 
-/** "5.6 min after the bell" / "2.0 min before the bell". */
-function againstHerBell(minutes: number | null): string {
+/** "5.6 min into the period" / "3.3 min before it began". */
+function intoThePeriod(minutes: number | null): string {
   if (minutes === null) return "—";
   const rounded = Math.abs(Math.round(minutes * 10) / 10);
-  if (rounded < 0.5) return "at the bell";
-  return `${rounded} min ${minutes > 0 ? "after" : "before"} the bell`;
+  if (rounded < 0.5) return "as the period began";
+  return minutes > 0 ? `${rounded} min into the period` : `${rounded} min before it began`;
 }
 
 export function LessonDetailsCard({
@@ -246,18 +245,14 @@ export function LessonDetailsCard({
           <div className="divide-y divide-border/60">
             <Row label="Left the room" value={previousTeacher.departureAt ?? "—"} />
             <Row
-              label={`Against her ${previousTeacher.previousBellEnd ?? ""} bell`}
-              value={againstHerBell(previousTeacher.departureMinutesAfterBell)}
-            />
-            <Row
-              label="Stayed to the end of her period"
-              value={previousTeacher.stayedToBell ? "Yes" : "No — left before the bell"}
-              muted={previousTeacher.stayedToBell === false}
+              label={`Against this period's ${previousTeacher.periodStart ?? ""} bell`}
+              value={intoThePeriod(previousTeacher.departureMinutesIntoPeriod)}
             />
           </div>
           <p className="mt-2 text-[0.7rem] leading-relaxed text-muted-foreground">
-            {previousTeacher.reason} Only the end of her lesson is in this recording; the previous
-            period&rsquo;s file has the rest.
+            {previousTeacher.reason} Only the end of her stay is in this recording. Whether she
+            stayed to her own bell needs her period&rsquo;s times (the timetable) and the previous
+            file.
           </p>
         </div>
       )}

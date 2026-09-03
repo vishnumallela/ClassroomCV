@@ -1,6 +1,6 @@
 # The lesson is the period, not the file — recording protocol and coverage plan
 
-**Status:** Diagnosed 2026-09-03. Phase B′ (below) built 2026-09-04; A–E not started.
+**Status:** Diagnosed 2026-09-03. Phase B′ (below) built 2026-09-04; A–E not started. School bell times confirmed from the 7B timetable 2026-09-04 (§2 of the attribution plan's 09:50 guess was right; periods are not contiguous).
 **Branch:** `feat/rfdetr-pipeline` (not pushed)
 **Companion:** `docs/teacher-attribution-plan.md` — that plan fixes *who* the
 timeline belongs to. This one fixes *when the timeline is allowed to say
@@ -251,10 +251,13 @@ answerable from **this one file, at read time**:
   teacher (the adult who stays to the end), the adult in the room at the
   **end of the previous period** is that period's teacher.
 - So her last sighting here is the previous period's **departure (R3)**, and
-  whether she stayed to her own bell is **R4** against it. The previous
-  period's end bell is taken as this period's start bell — true for
-  back-to-back periods, stated as `assumedContiguousPeriods` until Phase D's
-  timetable table exists.
+  whether she stayed to her own bell is **R4** against it — **but only once her
+  bell is known.** The school's timetable (7B, 2026) shows periods are NOT
+  back-to-back: period 2 ends 09:25, period 3 starts 09:50, with a 25-minute
+  break between. So "this period's start" is not "her period's end", and a
+  file that starts on this period's bell does not cover hers. Until Phase D's
+  table exists, her departure is reported against **this** period's start
+  ("5.6 min into the period") and nothing is claimed about her own bell.
 - `dto.ts` `toPreviousTeacher` → `previousTeacher` on the detail DTO, with the
   same three-state honesty as §5: **observed** / **not_observed** (no anchor,
   no timetable, or the file starts after the bell so nobody's presence at it
@@ -264,9 +267,12 @@ answerable from **this one file, at read time**:
   the last to leave, and the count is reported so a reader can judge.
 - `lesson-details-card.tsx` renders it under "Previous period's teacher".
 
-On the real handover clip: *left the room 09:55 — 5.6 min after her 09:50
-bell — stayed to the end of her period: yes.* That is the period-2 teacher's
-R3/R4, read off the period-3 file, with no re-analysis.
+On the real handover clip: *left the room 09:55 — 5.6 min into the period.*
+That is the period-2 teacher's R3 read off the period-3 file, with no
+re-analysis. Her R4 (against 09:25) needs Phase D; it would read **+30 min**,
+which with a 25-minute break in between means she stayed in the room through
+the break rather than that she taught over — another reason the bell has to
+come from the timetable and not be inferred.
 
 **What this file cannot say**, and the card says so: whether she was there for
 the *whole* of her period. Her arrival and mid-lesson absences are in the
