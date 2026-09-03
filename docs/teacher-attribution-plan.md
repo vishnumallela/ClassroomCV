@@ -293,11 +293,53 @@ answer.
 37-minute lesson at 94.5% coverage is the validated baseline and this change
 must not move it.
 
-> **Problem:** `detection_events` was wiped for the older videos
-> (see memory `detections-wiped-needs-reanalysis`), so there is no stored
-> fixture to replay against. **Before Phase 2, re-run one known single-teacher
-> lesson to freeze a baseline.** One GPU run, ~11 min, ~$0.11. Cheap insurance
-> against silently regressing the case that already works.
+> ~~**Problem:** `detection_events` was wiped for the older videos, so there is
+> no stored fixture to replay against.~~ **DONE 2026-09-03.**
+
+### The frozen baseline
+
+Video `b6d19a9c-45c6-4ad7-b8b3-0fe0129c3543` (`test_video1`, 37.3 min,
+2560x1440 @25fps), re-run on a fresh pod with Phase 0+1 in the image. It
+reproduces the pre-change reference EXACTLY, which is the point:
+
+| | 2026-08-24 reference | 2026-09-03, with Phase 0+1 |
+| --- | --- | --- |
+| sampled frames | 11,179 | **11,179** |
+| teacher tracks | 1 | **1** |
+| teacher detections | 10,561 | **10,561** |
+| span | 0 -> 2,234.6 s | **0 -> 2,234.6 s** |
+| coverage | 94.5% | **94.47%** |
+| mean confidence | 0.86 | **0.855** |
+| overall quality | medium | **medium** |
+
+Not "close enough" — identical detection counts and span. The single-teacher
+case did not move.
+
+**Two things this measured that synthetic fixtures could not:**
+
+- **The co-presence threshold has real headroom.** This genuinely
+  single-teacher lesson still reports `co_presence_ms: 8600` and
+  `max_simultaneous_adults: 2` — the detector really does offer a second
+  teacher box at 43 instants across 37 minutes. It was correctly NOT flagged
+  (`attribution: high`), so `CO_PRESENCE_MIN_MS = 30_000` clears real
+  double-detection noise by ~3.5x. That constant was a judgement call before
+  this run; it is now measured against a real room.
+- **Phase 1's storage cost is 0.41%, not ~20%.** 10,604 rows stored: 10,561
+  attributed plus **43 unattributed** — exactly the losing boxes at those 43
+  contested instants (43 x 200 ms = the 8,600 ms of co-presence, which is a
+  clean internal consistency check on both numbers). The earlier ~20% estimate
+  came from comparing raw all-class detections against the stored chain and was
+  measuring the wrong thing.
+
+Zones were auto-placed this run, so board time is real (5.6 min) where the
+2026-08-24 run reported null. Presence 2,196 s across 4 intervals, 2 entries /
+1 exit, 10 timeline breaks (longest 17 s) -> continuity `medium`, which is what
+drags overall off `high`.
+
+> **Cost that run:** the configured `RTX PRO 4000 Blackwell` had NO CAPACITY in
+> EU-RO-1 (four attempts, no pod created, nothing billed); `RTX PRO 4500
+> Blackwell` came up first try at $0.72/hr. The first analysis then died on the
+> DATA_DIR bug now fixed in `dc9cb9d`. Budget two attempts on a fresh pod.
 
 On the handover clip, after the fix:
 
