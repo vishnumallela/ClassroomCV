@@ -34,6 +34,17 @@ export interface LessonDetails {
   hasFollowingPeriod: boolean | null;
 }
 
+export interface PreviousTeacher {
+  state: "observed" | "withheld" | "none" | "not_observed";
+  reason: string;
+  departureAt: string | null;
+  departureMinutesAfterBell: number | null;
+  stayedToBell: boolean | null;
+  adultsAtBell: number;
+  previousBellEnd: string | null;
+  assumedContiguousPeriods: boolean;
+}
+
 export interface Punctuality {
   timezone: string;
   arrivalAt: string | null;
@@ -76,14 +87,24 @@ function Row({ label, value, muted }: { label: string; value: string; muted?: bo
   );
 }
 
+/** "5.6 min after the bell" / "2.0 min before the bell". */
+function againstHerBell(minutes: number | null): string {
+  if (minutes === null) return "—";
+  const rounded = Math.abs(Math.round(minutes * 10) / 10);
+  if (rounded < 0.5) return "at the bell";
+  return `${rounded} min ${minutes > 0 ? "after" : "before"} the bell`;
+}
+
 export function LessonDetailsCard({
   videoId,
   lesson,
   punctuality,
+  previousTeacher,
 }: {
   videoId: string;
   lesson: LessonDetails;
   punctuality: Punctuality;
+  previousTeacher?: PreviousTeacher;
 }) {
   const queryClient = useQueryClient();
   const [open, setOpen] = useState(false);
@@ -211,6 +232,40 @@ export function LessonDetailsCard({
             muted={punctuality.presenceShareOfPeriod === null}
           />
         </div>
+      )}
+
+      {/* The other lesson in this file. A recording that starts on the bell with
+          the previous teacher still in the room shows the END of her lesson —
+          when she left, and whether she stayed to her own bell. Shown only when
+          there is something to say; a single-teacher lesson renders nothing. */}
+      {!open && previousTeacher && previousTeacher.state === "observed" && (
+        <div className="mt-4 border-t border-border/60 pt-3">
+          <p className="mb-1 text-xs font-medium text-muted-foreground">
+            Previous period&rsquo;s teacher
+          </p>
+          <div className="divide-y divide-border/60">
+            <Row label="Left the room" value={previousTeacher.departureAt ?? "—"} />
+            <Row
+              label={`Against her ${previousTeacher.previousBellEnd ?? ""} bell`}
+              value={againstHerBell(previousTeacher.departureMinutesAfterBell)}
+            />
+            <Row
+              label="Stayed to the end of her period"
+              value={previousTeacher.stayedToBell ? "Yes" : "No — left before the bell"}
+              muted={previousTeacher.stayedToBell === false}
+            />
+          </div>
+          <p className="mt-2 text-[0.7rem] leading-relaxed text-muted-foreground">
+            {previousTeacher.reason} Only the end of her lesson is in this recording; the previous
+            period&rsquo;s file has the rest.
+          </p>
+        </div>
+      )}
+      {!open && previousTeacher && previousTeacher.state === "withheld" && (
+        <p className="mt-3 flex items-start gap-1.5 rounded-lg bg-muted/50 px-3 py-2 text-xs leading-relaxed text-muted-foreground">
+          <CircleAlert className="mt-0.5 size-3.5 shrink-0 text-tier-medium" />
+          <span>Previous period&rsquo;s teacher: {previousTeacher.reason}</span>
+        </p>
       )}
 
       {!open && punctuality.notObservedReason && (

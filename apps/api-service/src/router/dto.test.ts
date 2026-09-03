@@ -158,7 +158,7 @@ describe("toPunctuality", () => {
 });
 
 describe("toPunctuality with an attribution report (Phase 3)", () => {
-  const blended = (attribution: unknown) =>
+  const blended = (attribution?: unknown) =>
     quality({ multiple_adults_detected: true, attribution } as Partial<DataQuality>);
 
   test("a HIGH-confidence attribution lifts the refusal", () => {
@@ -175,8 +175,203 @@ describe("toPunctuality with an attribution report (Phase 3)", () => {
   });
 
   test("no attribution report at all falls back to the Phase 0 refusal", () => {
-    const p = toDetailDto(detail(blended(undefined)), IST).punctuality;
+    const p = toDetailDto(detail(blended()), IST).punctuality;
     expect(p.arrivalAt).toBeNull();
     expect(p.notObservedReason).toContain("adult");
+  });
+});
+
+describe("previousTeacher: the other lesson in this file", () => {
+  // The real handover, as attribution reported it: the period-3 teacher from
+  // 246.9 s; the period-2 teacher present at t=0, gone at 335.8 s (09:55:34).
+  const handover = (over: Partial<DataQuality["attribution"] & object> = {}) =>
+    quality({
+      multiple_adults_detected: true,
+      attribution: {
+        confidence: "medium",
+        reason: "1 other adult left while this one remained.",
+        chosen_track_no: 1,
+        period_known: true,
+        splits: 2,
+        candidates: [
+          {
+            track_no: 1,
+            first_ms: 246_929,
+            last_ms: 359_880,
+            present_ms: 113_000,
+            in_period_ms: 113_000,
+            handed_over: false,
+            segments: 3,
+          },
+          {
+            track_no: 2,
+            first_ms: 0,
+            last_ms: 335_800,
+            present_ms: 328_000,
+            in_period_ms: 326_000,
+            handed_over: true,
+            segments: 3,
+          },
+        ],
+        ...over,
+      },
+    } as Partial<DataQuality>);
+
+  test("her departure is observed, against the bell she overran", () => {
+    const p = toDetailDto(detail(handover()), IST).previousTeacher;
+    expect(p.state).toBe("observed");
+    expect(p.departureAt).toBe("09:55");
+    expect(p.previousBellEnd).toBe("09:50");
+    // 335.8 s after a bell at +2 s
+    expect(p.departureMinutesAfterBell).toBe(5.6);
+    expect(p.stayedToBell).toBe(true);
+    expect(p.adultsAtBell).toBe(1);
+    expect(p.reason).toContain("left at 09:55");
+  });
+
+  test("an adult who left BEFORE the bell did not stay to it", () => {
+    // Recording from 09:45, bell at 09:50: she leaves at 09:46:40.
+    const d = detail(
+      handover({
+        candidates: [
+          {
+            track_no: 1,
+            first_ms: 400_000,
+            last_ms: 2_700_000,
+            present_ms: 1,
+            in_period_ms: 1,
+            handed_over: false,
+            segments: 1,
+          },
+          {
+            track_no: 2,
+            first_ms: 0,
+            last_ms: 100_000,
+            present_ms: 1,
+            in_period_ms: 1,
+            handed_over: true,
+            segments: 1,
+          },
+        ],
+      }),
+    );
+    // 09:45 IST
+    d.video.recordingStartedAt = new Date("2026-08-17T04:15:00.000Z");
+    const p = toDetailDto(d, IST).previousTeacher;
+    expect(p.state).toBe("observed");
+    expect(p.stayedToBell).toBe(false);
+    expect(p.departureMinutesAfterBell).toBe(-3.3);
+    expect(p.departureAt).toBe("09:46");
+  });
+
+  test("with nobody else at the bell there is no previous teacher to report", () => {
+    const p = toDetailDto(
+      detail(
+        handover({
+          candidates: [
+            {
+              track_no: 1,
+              first_ms: 0,
+              last_ms: 359_880,
+              present_ms: 1,
+              in_period_ms: 1,
+              handed_over: false,
+              segments: 1,
+            },
+          ],
+        }),
+      ),
+      IST,
+    ).previousTeacher;
+    expect(p.state).toBe("none");
+    expect(p.departureAt).toBeNull();
+  });
+
+  test("a recording that starts after the bell cannot say who was there at it", () => {
+    const d = detail(handover());
+    // 09:55 IST, bell 09:50
+    d.video.recordingStartedAt = new Date("2026-08-17T04:25:00.000Z");
+    const p = toDetailDto(d, IST).previousTeacher;
+    expect(p.state).toBe("not_observed");
+    expect(p.reason).toContain("starts after the 09:50 bell");
+  });
+
+  test("an undetermined attribution withholds it with the attribution's reason", () => {
+    const p = toDetailDto(
+      detail(handover({ confidence: "low", reason: "too close to call" })),
+      IST,
+    ).previousTeacher;
+    expect(p.state).toBe("withheld");
+    expect(p.reason).toBe("too close to call");
+  });
+
+  test("two handed-over adults at the bell: the last to leave, and say so", () => {
+    const p = toDetailDto(
+      detail(
+        handover({
+          candidates: [
+            {
+              track_no: 1,
+              first_ms: 246_929,
+              last_ms: 359_880,
+              present_ms: 1,
+              in_period_ms: 1,
+              handed_over: false,
+              segments: 3,
+            },
+            {
+              track_no: 2,
+              first_ms: 0,
+              last_ms: 33_000,
+              present_ms: 1,
+              in_period_ms: 1,
+              handed_over: true,
+              segments: 1,
+              // the head-only lane
+            },
+            {
+              track_no: 3,
+              first_ms: 7_800,
+              last_ms: 335_800,
+              present_ms: 1,
+              in_period_ms: 1,
+              handed_over: true,
+              segments: 3,
+            },
+          ],
+        }),
+      ),
+      IST,
+    ).previousTeacher;
+    expect(p.state).toBe("observed");
+    expect(p.departureAt).toBe("09:55");
+    expect(p.adultsAtBell).toBe(2);
+    expect(p.reason).toContain("2 such adults");
+  });
+
+  test("the single-teacher lesson is untouched: no previous teacher, nothing withheld", () => {
+    const p = toDetailDto(detail(quality()), IST).previousTeacher;
+    // no attribution report on a pre-Phase-3 row
+    expect(p.state).toBe("not_observed");
+    const p2 = toDetailDto(
+      detail(
+        handover({
+          candidates: [
+            {
+              track_no: 1,
+              first_ms: 0,
+              last_ms: 2_700_000,
+              present_ms: 1,
+              in_period_ms: 1,
+              handed_over: false,
+              segments: 1,
+            },
+          ],
+          confidence: "high",
+        }),
+      ),
+      IST,
+    ).previousTeacher;
+    expect(p2.state).toBe("none");
   });
 });

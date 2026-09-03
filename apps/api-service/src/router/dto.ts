@@ -57,8 +57,7 @@ function toPunctuality(v: Detail["video"], analytics: Analytics, timezone: strin
   // handover trim leaves 24 s to judge on), and a number that is probably
   // right is still the thing this card exists not to show.
   const dq = analytics?.dataQuality;
-  const blended =
-    dq?.multiple_adults_detected === true && dq?.attribution?.confidence !== "high";
+  const blended = dq?.multiple_adults_detected === true && dq?.attribution?.confidence !== "high";
 
   if (!clock || !first || !last || blended) {
     return {
@@ -97,6 +96,102 @@ function toPunctuality(v: Detail["video"], analytics: Analytics, timezone: strin
   };
 }
 
+/**
+ * A tracked adult is "at the bell" if first seen within this long after the
+ * scheduled start (or before it). Two sampled seconds beyond a first-frame miss.
+ */
+const AT_BELL_TOLERANCE_MS = 10_000;
+
+/**
+ * The OTHER lesson in this file: the previous period's teacher.
+ *
+ * A file that starts on the bell with the previous teacher still in the room
+ * (docs/lesson-coverage-plan.md, "a file can cover parts of two periods") shows
+ * the END of her lesson. Attribution marks her `handed_over` — present at the
+ * bell, gone while the period's own teacher remained — and by the same rule
+ * that picks this period's teacher (the one who stays to the end), the adult
+ * in the room at the end of the previous period is that period's teacher. So
+ * her last sighting here is the previous period's departure (R3), and whether
+ * she stayed to her own bell is R4 against it.
+ *
+ * What this file cannot say: whether she was there for the WHOLE of her period.
+ * That is the previous file's job (Phase C stitching). Every field is
+ * independently nullable; `state` says which of the three honest answers this
+ * is, and `reason` says why in words.
+ *
+ * The previous period's end bell is taken as this period's start bell — true
+ * for back-to-back periods and stated as an assumption until timetable_periods
+ * exists (Phase D).
+ */
+type PreviousTeacherState = "observed" | "not_observed" | "withheld" | "none";
+
+function noPreviousTeacher(state: Exclude<PreviousTeacherState, "observed">, reason: string) {
+  return {
+    state,
+    reason,
+    departureAt: null as string | null,
+    departureMinutesAfterBell: null as number | null,
+    stayedToBell: null as boolean | null,
+    adultsAtBell: 0,
+    previousBellEnd: null as string | null,
+    assumedContiguousPeriods: true,
+  };
+}
+
+function toPreviousTeacher(v: Detail["video"], analytics: Analytics, timezone: string) {
+  const clock = lessonClock(v, timezone);
+  if (!clock)
+    return noPreviousTeacher(
+      "not_observed",
+      "No recording start time, so the bell cannot be placed in the video.",
+    );
+  if (!clock.scheduledStartAt)
+    return noPreviousTeacher("not_observed", "No scheduled start entered for this lesson.");
+  const bellMs = clock.scheduledStartAt.getTime() - clock.recordingStartedAt.getTime();
+  const bellLocal = localTimeInSchoolTz(clock.scheduledStartAt, timezone);
+  if (bellMs < 0) {
+    return noPreviousTeacher(
+      "not_observed",
+      `The recording starts after the ${bellLocal} bell, so whether anyone was still in the room at it is not covered.`,
+    );
+  }
+  const attribution = analytics?.dataQuality?.attribution;
+  if (!attribution)
+    return noPreviousTeacher(
+      "not_observed",
+      "Analysed before attribution existed; re-analyse to see who was in the room at the bell.",
+    );
+  if (attribution.confidence === "low") return noPreviousTeacher("withheld", attribution.reason);
+
+  const atBell = (attribution.candidates ?? []).filter(
+    (c) => c.handed_over && c.first_ms <= bellMs + AT_BELL_TOLERANCE_MS,
+  );
+  if (atBell.length === 0) {
+    return noPreviousTeacher("none", `No other adult was in the room at the ${bellLocal} bell.`);
+  }
+  // Several handed-over adults at the bell is usually one person tracked in
+  // pieces (a seated teacher's head-only lane); the last to leave is the one
+  // whose departure is the lesson's. Say how many, so a reader can judge.
+  const previous = atBell.reduce((a, b) => (b.last_ms > a.last_ms ? b : a));
+  const departureAt = offsetToInstant(clock.recordingStartedAt, previous.last_ms);
+  const minutesAfterBell = Math.round(((previous.last_ms - bellMs) / 60_000) * 10) / 10;
+  return {
+    state: "observed" as const,
+    reason:
+      `An adult was in the room at the ${bellLocal} bell and left at ` +
+      `${localTimeInSchoolTz(departureAt, timezone)} while this period's teacher remained` +
+      (atBell.length > 1
+        ? ` (${atBell.length} such adults were tracked; the last to leave is taken).`
+        : "."),
+    departureAt: localTimeInSchoolTz(departureAt, timezone),
+    departureMinutesAfterBell: minutesAfterBell,
+    stayedToBell: previous.last_ms >= bellMs,
+    adultsAtBell: atBell.length,
+    previousBellEnd: bellLocal,
+    assumedContiguousPeriods: true,
+  };
+}
+
 export function toDetailDto(d: Detail, timezone: string) {
   const v = d.video;
   return {
@@ -128,6 +223,7 @@ export function toDetailDto(d: Detail, timezone: string) {
       hasFollowingPeriod: v.hasFollowingPeriod,
     },
     punctuality: toPunctuality(v, d.analytics, timezone),
+    previousTeacher: toPreviousTeacher(v, d.analytics, timezone),
     zones: d.zones.map((z) => ({
       id: z.id,
       kind: z.kind,

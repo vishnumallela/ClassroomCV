@@ -153,7 +153,12 @@ function VideoDetail() {
           details form is not a gate on upload is that someone can fill the
           timetable in while the GPU works. Hiding it until analysis finishes
           would give back the minutes the design just bought. */}
-      <LessonDetailsCard videoId={video.id} lesson={data.lesson} punctuality={data.punctuality} />
+      <LessonDetailsCard
+        videoId={video.id}
+        lesson={data.lesson}
+        punctuality={data.punctuality}
+        previousTeacher={data.previousTeacher}
+      />
 
       {!done ? (
         <Card className="p-6 text-sm text-muted-foreground">

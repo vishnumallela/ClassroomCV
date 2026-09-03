@@ -25,6 +25,17 @@ export type QualityTier = "high" | "medium" | "low";
 // Additive per-run trust report from the ML service (services/ml-service/app/quality.py).
 // Rows written before the RF-DETR pipeline carry the older identity/fragmentation
 // shape; the dashboard renders whichever fields are present.
+/** One tracked adult as attribution saw it (mirrors AttributionCandidateOut). */
+export type AttributionCandidate = {
+  track_no: number;
+  first_ms: number;
+  last_ms: number;
+  present_ms: number;
+  in_period_ms: number;
+  handed_over: boolean;
+  segments: number;
+};
+
 export type DataQuality = {
   detections: number;
   frames: number;
@@ -46,7 +57,7 @@ export type DataQuality = {
     chosen_track_no: number | null;
     period_known: boolean;
     splits: number;
-    candidates: unknown[];
+    candidates: AttributionCandidate[];
   } | null;
   confidence: {
     overall: QualityTier;
