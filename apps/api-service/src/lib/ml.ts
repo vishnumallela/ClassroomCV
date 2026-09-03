@@ -43,11 +43,20 @@ export interface DataQuality {
   mean_confidence: number;
   breaks: number;
   longest_gap_ms: number;
+  // More than one adult in the room. The fields above say how well ONE person
+  // was followed; these say whether "one person" was the right question. All
+  // three are optional because `data_quality` is stored jsonb and rows outlive
+  // the code that wrote them — a lesson analysed before this check has no
+  // opinion, which is not the same as "there was one adult".
+  multiple_adults_detected?: boolean;
+  max_simultaneous_adults?: number;
+  co_presence_ms?: number;
   confidence: {
     overall: QualityTier;
     coverage: QualityTier;
     continuity: QualityTier;
     teacher: QualityTier;
+    attribution?: QualityTier;
   };
   notes: string[];
 }

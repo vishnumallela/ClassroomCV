@@ -13,11 +13,18 @@ The pipeline is:
     detect (RF-DETR)  ->  gate static classes to their zones
                       ->  follow the teacher
                       ->  KPIs from her timeline
-                      ->  store HER detections only
+                      ->  store every teacher box, attributed or not
 
 /rederive replays everything after detection from the stored teacher rows, so
 editing a zone recomputes board time and entries in milliseconds without
 re-running the model.
+
+That last step stores the boxes the timeline REJECTED as well as the ones it
+kept (migration 0014). It is the difference between a rederive that can only
+replay the tracker's old answer and one that can be given a new question — and
+the question that needs asking is which of several adults the lesson assesses,
+which nothing decides yet. Until it does, sustained co-presence makes the
+lesson report Not Observed rather than a confident number for the wrong person.
 """
 
 from __future__ import annotations
@@ -212,8 +219,10 @@ def run_pipeline(
 ) -> dict:
     """detect -> derive -> (COPY to DB). Returns AnalysisResult dict.
 
-    The DB write happens AFTER derivation because derivation is what decides
-    which detections are the teacher's, and only hers are stored.
+    The DB write happens AFTER derivation because derivation stamps track_no on
+    the boxes the timeline accepted, and the stored rows carry that attribution.
+    It writes `detections` — the whole detector output — and db.replace_detections
+    keeps the teacher-class rows from it, attributed or not.
     """
     cb: ProgressCb = progress_cb or (lambda stage, frac: None)
 
@@ -441,6 +450,9 @@ def quality_report(
         duration_ms,
         teacher_confidence=track.confidence,
         mean_conf=track.mean_conf if track.found else None,
+        multiple_adults=track.multiple_adults,
+        co_presence_ms=track.co_presence_ms,
+        max_simultaneous=track.max_simultaneous,
     )
     report["notes"] = [*track.notes, *report["notes"]]
     return report

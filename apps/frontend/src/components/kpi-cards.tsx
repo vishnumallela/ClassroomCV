@@ -28,6 +28,16 @@ export function KpiCards({
   const badge = confidenceBadge(teacherConfidence);
 
   /**
+   * R6 refuses on the same evidence Group A does.
+   *
+   * Entries and exits are counted from breaks in the presence timeline, so when
+   * that timeline blends two adults the count is of the blend's gaps, not of
+   * anyone's door crossings. `=== true` because absence of the field means the
+   * lesson predates the check, not that one adult was measured.
+   */
+  const blended = analytics.dataQuality?.multiple_adults_detected === true;
+
+  /**
    * A duration KPI that can be genuinely unknown.
    *
    * null is not zero and must never render as "0:00": board time is null until
@@ -53,14 +63,14 @@ export function KpiCards({
     duration("Writing", analytics.teacherWritingMs, "not scored"),
     {
       label: "Teacher entries",
-      value: String(analytics.entries),
-      sub: "into the room",
+      value: blended ? "n/a" : String(analytics.entries),
+      sub: blended ? "more than one adult" : "into the room",
       badge: null,
     },
     {
       label: "Teacher exits",
-      value: String(analytics.exits),
-      sub: "out of the room",
+      value: blended ? "n/a" : String(analytics.exits),
+      sub: blended ? "more than one adult" : "out of the room",
       badge: null,
     },
   ];

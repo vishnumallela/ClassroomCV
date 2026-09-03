@@ -2,7 +2,11 @@
 
 The two things this module decides are which box is hers when the detector
 offers more than one, and whether she is still here across a frame where it
-offered none. Everything below is one of those two.
+offered none. Most of what follows is one of those two.
+
+TestMultipleAdults is the exception, and it tests the thing this module does
+NOT decide: whether "which box is hers" was even the right question. It only
+measures and reports that; refusing on the answer happens downstream.
 """
 
 import pytest
@@ -196,3 +200,157 @@ class TestConfidence:
         assert not track.found
         assert track.detections == []
         assert track.confidence is None
+
+
+class TestMultipleAdults:
+    """Co-presence: was there one adult to follow, or several?
+
+    The measurement exists because every OTHER signal is silent here. A track
+    blended from two people is continuous, fully covered and confidently
+    detected — there is always *a* box — so nothing else in this file would
+    notice, and the lesson would be graded on the wrong body.
+    """
+
+    def test_one_adult_is_not_flagged(self):
+        track = T.build_teacher_track(_walk(end=60_000), duration_ms=60_000)
+        assert track.multiple_adults is False
+        assert track.max_simultaneous == 1
+        assert track.co_presence_ms == 0
+        assert track.contested_instants == 0
+
+    def test_a_sustained_second_adult_is_flagged(self):
+        """The handover: a second teacher shares the room for 60s of two
+        minutes, which is the shape of the recording that started all this."""
+        dets = _walk(end=120_000)
+        dets += [_det(ts, x=0.7) for ts in range(0, 60_001, 200)]
+        track = T.build_teacher_track(dets, duration_ms=120_000)
+
+        assert track.multiple_adults is True
+        assert track.max_simultaneous == 2
+        assert track.co_presence_ms >= T.CO_PRESENCE_MIN_MS
+        assert any("two or more adults" in n.lower() for n in track.notes)
+
+    def test_someone_passing_through_is_not_a_second_teacher(self):
+        """Three seconds of overlap is a duplicate box or an adult crossing the
+        doorway. Refusing a lesson's numbers over that would spend the
+        refusal's credibility on noise and leave nothing for the real case."""
+        dets = _walk(end=120_000)
+        dets += [_det(ts, x=0.7) for ts in range(0, 3_001, 200)]
+        track = T.build_teacher_track(dets, duration_ms=120_000)
+
+        assert track.multiple_adults is False
+        assert track.max_simultaneous == 2  # seen and counted...
+        assert track.co_presence_ms == pytest.approx(3_200, abs=400)  # ...but brief
+
+    def test_co_presence_is_reported_in_time_not_frames(self):
+        """A frame count is unreadable without the sample rate; the same two
+        adults sampled twice as often must not read as twice the overlap."""
+        dense = _walk(end=120_000, step=100)
+        dense += [_det(ts, x=0.7) for ts in range(0, 60_001, 100)]
+        sparse = _walk(end=120_000, step=400)
+        sparse += [_det(ts, x=0.7) for ts in range(0, 60_001, 400)]
+
+        a = T.build_teacher_track(dense, duration_ms=120_000)
+        b = T.build_teacher_track(sparse, duration_ms=120_000)
+        assert a.contested_instants > b.contested_instants  # 4x the frames
+        assert a.co_presence_ms == pytest.approx(b.co_presence_ms, rel=0.02)
+
+    def test_the_blend_warning_comes_before_the_rejected_jumps_note(self):
+        """Ordering is load-bearing: "this may not be one person" changes how
+        every other note is read, so it must not be buried under them."""
+        dets = _walk(end=120_000)
+        dets += [_det(ts, x=0.7) for ts in range(0, 60_001, 200)]
+        dets.append(_det(120_400, x=0.95, y=0.9))  # an implausible jump too
+        track = T.build_teacher_track(dets, duration_ms=121_000)
+
+        assert track.rejected_jumps == 1
+        assert len(track.notes) == 2
+        assert "two or more adults" in track.notes[0].lower()
+        assert "implausible jumps" in track.notes[1]
+
+    def test_two_adults_standing_close_still_count_as_two(self):
+        """The measured failure, not the easy one.
+
+        In the real recording the two teachers were ~8% of the frame apart, so
+        BOTH boxes are reachable from the previous frame and _pick_candidate
+        settles each instant on confidence alone — the track silently swaps
+        between them. Co-presence must catch this, because it is the case where
+        coverage, continuity and confidence all look perfect.
+        """
+        dets = []
+        for i, ts in enumerate(range(0, 60_001, 200)):
+            dets.append(_det(ts, x=0.20, conf=0.80 if i % 2 else 0.86))
+            dets.append(_det(ts, x=0.28, conf=0.86 if i % 2 else 0.80))
+        track = T.build_teacher_track(dets, duration_ms=60_000)
+
+        assert track.multiple_adults is True
+        assert track.max_simultaneous == 2
+        # The blend is invisible to every other signal: she is "found" in every
+        # sampled instant, with no rejected jumps and high confidence.
+        assert track.coverage == 1.0
+        assert track.rejected_jumps == 0
+        assert track.mean_conf > 0.8
+
+
+class TestSampleInterval:
+    """_sample_interval_ms: the multiplier behind the refusal decision.
+
+    co_presence_ms is contested_instants * this value, and the refusal is a
+    threshold on co_presence_ms — so reading the interval off the wrong
+    statistic rescales the refuse-or-report decision by exactly that factor.
+    Every assertion here was written because the mutant it kills survived the
+    whole suite: max, mean and min all passed 158 tests, and so did sourcing
+    the stamps from her own detections instead of every class.
+    """
+
+    def test_one_long_absence_does_not_inflate_the_interval(self):
+        """The case the median was chosen for, stated as a test.
+
+        A minute at 5 fps, six minutes where nothing was detected at all, then
+        another minute. The mean over that is ~798 ms and the max is 360,000 —
+        four seconds of real overlap would read as sixteen seconds under the
+        mean, and as half a lesson under the max.
+        """
+        stamps = list(range(0, 60_001, 200)) + list(range(420_000, 480_001, 200))
+        assert T._sample_interval_ms(stamps) == 200
+
+    def test_one_unusually_short_gap_does_not_shrink_the_interval(self):
+        """Symmetry: the minimum is as wrong as the maximum, in the other
+        direction. A single pair of stamps closer together than the sample rate
+        is a decoder artefact, not the rate."""
+        stamps = [0, 40, 240, 440, 640, 840]
+        assert T._sample_interval_ms(stamps) == 200
+
+    def test_too_few_stamps_to_measure_reports_zero_not_a_guess(self):
+        """Zero propagates to co_presence_ms == 0, which never refuses. A
+        fabricated interval here would refuse a lesson on no evidence."""
+        assert T._sample_interval_ms([]) == 0
+        assert T._sample_interval_ms([1_000]) == 0
+
+    def test_the_interval_comes_from_every_class_not_just_her(self):
+        """The sampling rate is a property of the detector pass, not of how
+        often she happened to be found.
+
+        A heavily occluded lesson: the board is detected every 200 ms, she is
+        found only once every 2 s, and a second box shares 20 of those
+        instants. Measured against every class the overlap is 4 s and the
+        lesson reports normally. Measured against her stamps alone the interval
+        reads as 2,000 ms, the same 20 instants become 40 s, and a lesson with
+        four seconds of overlap has its arrival, departure, time in the room
+        and entry/exit counts all withheld.
+
+        This is not hypothetical for /rederive, which replays stored rows —
+        teacher-class only by construction — so its stamps really are hers
+        alone. See the note in build_teacher_track.
+        """
+        dets = [_det(ts, cls=CLASS_SCREEN, x=0.5) for ts in range(0, 120_001, 200)]
+        for ts in range(0, 40_001, 2_000):
+            dets.append(_det(ts, x=0.2))
+            if ts < 40_000:  # a second body at 20 of her 21 instants
+                dets.append(_det(ts, x=0.7))
+
+        track = T.build_teacher_track(dets, duration_ms=120_000)
+        assert track.contested_instants == 20
+        assert track.max_simultaneous == 2
+        assert track.co_presence_ms == 4_000  # 20 x 200 ms, not 20 x 2,000
+        assert track.multiple_adults is False

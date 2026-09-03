@@ -10,11 +10,22 @@
 - fetch_video_info: best-effort read of the dashboard's videos row (duration
   etc.) for the /rederive response; returns None when unavailable.
 
-ONLY THE TEACHER IS STORED. Every persisted row is one of her detections, so
-"students are never displayed" is a property of the data rather than of the
-renderer — there is no student box in the database to leak into an overlay by
-mistake. The board and door live in `zones` (one polygon each, not one row per
-frame) and their derived numbers in `video_analytics`, so nothing is lost.
+ONLY THE TEACHER CLASS IS STORED. Every persisted row is a box the detector
+labelled `teacher`, so "students are never displayed" is a property of the data
+rather than of the renderer — there is no student box in the database to leak
+into an overlay by mistake. The board and door live in `zones` (one polygon
+each, not one row per frame) and their derived numbers in `video_analytics`, so
+nothing is lost.
+
+Since migration 0014 that includes teacher boxes NO TRACK CLAIMED (track_no
+NULL). The distinction matters and is not a privacy change: the filter is on
+the class, and the class is still teacher-only. What changed is that the
+timeline's opinion no longer decides what survives. app/teacher.py follows one
+chain and drops everything else; on a lesson with two adults in the room, the
+rows it dropped were the only evidence that the chain was blending two people,
+and they were dropped before the database ever saw them. Keeping them makes a
+changed attribution rule a /rederive over stored rows rather than another paid
+detector pass — which is what the rule needs, since it does not exist yet.
 """
 
 from __future__ import annotations
@@ -88,8 +99,22 @@ async def replace_detections(
     """
     conn = await _connect(dsn)
     try:
-        # Only rows the teacher track claimed: track_no is NOT NULL in the
-        # schema, and an unclaimed detection is by definition not hers.
+        # Every TEACHER box the tracker was allowed to consider, attributed or
+        # not. Two details of this filter are load-bearing:
+        #
+        # It tests the CLASS, not track_no. Before 0014 those selected the same
+        # rows, because only teacher boxes were ever stamped — so simply
+        # loosening the null check would have silently started persisting
+        # screen, door, pointing and writing rows too, quietly ending
+        # "teacher-only storage" as a property of the data.
+        #
+        # It applies teacher_conf, the same threshold app/teacher.py uses to
+        # decide what is a candidate at all. The detector emits down to a much
+        # lower floor so one pass can serve every consumer; storing that floor
+        # would be storing noise no attribution rule would ever consult. Both
+        # read the setting rather than a local constant, so there is one
+        # definition of "a teacher box worth considering", not two.
+        threshold = get_settings().teacher_conf
         records = [
             (
                 d.video_ts_ms,
@@ -100,7 +125,7 @@ async def replace_detections(
                 json.dumps({"cls": int(d.cls)}),
             )
             for d in detections
-            if d.track_no is not None
+            if d.cls == CLASS_TEACHER and d.conf >= threshold
         ]
         async with conn.transaction():
             row = await conn.fetchrow(
@@ -136,10 +161,18 @@ async def replace_detections(
 async def fetch_detections(
     video_id: str, dsn: Optional[str] = None
 ) -> list[Detection]:
-    """Read the teacher's stored detections back, for /rederive.
+    """Read the stored teacher detections back, for /rederive.
 
     Rows written before this schema carry no 'cls' in meta; they are read as
     teacher detections, which is what they were — the only rows ever stored.
+
+    A NULL track_no (0014) comes back as None, which is exactly what a fresh
+    detector pass hands app/teacher.py. That is what makes /rederive able to
+    re-run the attribution question rather than merely replay its old answer:
+    the losing candidates are in the input, not just the winners. Note the
+    consequence for lessons analysed BEFORE 0014 — their stored rows are the
+    winners only, so a rederive of one cannot rediscover a second adult and
+    will report no co-presence. Those need a fresh run, not a rederive.
     """
     conn = await _connect(dsn)
     try:
@@ -157,13 +190,14 @@ async def fetch_detections(
         bbox = json.loads(bbox) if isinstance(bbox, str) else (bbox or {})
         meta = r["meta"]
         meta = json.loads(meta) if isinstance(meta, str) else (meta or {})
+        track_no = r["track_no"]
         detections.append(
             Detection(
                 video_ts_ms=int(r["video_ts_ms"]),
                 cls=int(meta.get("cls", CLASS_TEACHER)),
                 bbox=bbox,
                 conf=float(r["confidence"]),
-                track_no=int(r["track_no"]),
+                track_no=None if track_no is None else int(track_no),
             )
         )
     return detections

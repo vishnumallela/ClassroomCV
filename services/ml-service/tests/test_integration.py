@@ -1,9 +1,16 @@
 """End-to-end pipeline test over a synthetic detection stream (no model, no DB).
 
 Exercises run_pipeline the way production runs it — detect, gate the static
-classes, follow the teacher, derive the KPIs, write only her rows — with
-detect_video monkeypatched so the shape and semantics are checked without a
-GPU.
+classes, follow the teacher, derive the KPIs, write the teacher-class rows —
+with detect_video monkeypatched so the shape and semantics are checked without
+a GPU.
+
+test_full_pipeline_shape_and_semantics is the SINGLE-TEACHER BASELINE. The
+multi-adult work must not move it: a lesson with one adult in the room has to
+produce the numbers it always produced, and the assertions below are what says
+so at the unit level. (The other half of that guarantee — a real 37-minute
+lesson at 94.5% coverage — needs a GPU run, because detection_events was wiped
+for the older videos and there is no stored fixture to replay.)
 """
 
 import math
@@ -154,6 +161,14 @@ def test_full_pipeline_shape_and_semantics(monkeypatch):
     assert dq.coverage == 1.0 and dq.breaks == 0
     assert dq.confidence.overall == "high"
 
+    # One adult, measured and said so. "high" attribution and a False flag are
+    # different claims from a missing field, which is what a lesson analysed
+    # before this check carries — the dashboard must be able to tell them apart.
+    assert dq.multiple_adults_detected is False
+    assert dq.max_simultaneous_adults == 1
+    assert dq.co_presence_ms == 0
+    assert dq.confidence.attribution == "high"
+
 
 def test_teleporting_teacher_box_is_rejected(monkeypatch):
     """A second 'teacher' appearing across the room mid-lesson is not her.
@@ -212,3 +227,117 @@ def test_pipeline_empty_over_5s_video_is_failure(monkeypatch):
     monkeypatch.setattr(detector, "detect_video", fake_detect)
     with pytest.raises(RuntimeError, match="zero detections"):
         jobs.run_pipeline(VIDEO_ID, "/fake.mp4", 5.0, [], write_db=False)
+
+
+# --------------------------------------------------------------------------- #
+# Two adults in the room
+# --------------------------------------------------------------------------- #
+
+
+def _handover() -> tuple[VideoMeta, list[Detection]]:
+    """The recording that started this: period 3 filmed while period 2 is still
+    packing up.
+
+    Both adults are detected at 0.7-0.86 and stand close enough that either box
+    is reachable from the previous frame, so _pick_candidate settles each
+    instant on confidence alone and the "teacher track" swaps between them. The
+    outgoing teacher is present from the first frame and leaves a third of the
+    way in; the incoming one arrives before she goes.
+    """
+    dets: list[Detection] = []
+    for i, ts in enumerate(range(0, DURATION_MS + 1, 200)):
+        dets.append(_static_det(ts, CLASS_SCREEN, 0.1))
+        # Incoming teacher: arrives at 15s and stays.
+        if ts >= 15_000:
+            dets.append(_teacher_det(ts, conf=0.86 if i % 2 else 0.80))
+        # Outgoing teacher: present from the start, leaves at 50s. Offset a
+        # little in x — close, the way two people at the front of a room are.
+        if ts <= 50_000:
+            out = _teacher_det(ts, conf=0.80 if i % 2 else 0.86)
+            out.bbox = {**out.bbox, "x": round(out.bbox["x"] + 0.08, 5)}
+            dets.append(out)
+    meta = VideoMeta(duration_ms=DURATION_MS, fps=30.0, width=1280, height=720)
+    return meta, dets
+
+
+def test_handover_is_flagged_and_survives_the_response_model(monkeypatch):
+    """Two adults for 35 of 60 seconds: the run must SAY so, all the way out.
+
+    The "all the way out" is the point of asserting on the parsed model rather
+    than the raw dict. Pydantic defaults to extra="ignore", so a field added to
+    quality.assess() without a matching one on DataQualityOut is dropped
+    silently by AnalysisResult.model_validate — it never reaches the API, the
+    jsonb column or the dashboard, and nothing raises to say so. The database
+    column is schemaless jsonb, so it would have accepted the field happily;
+    this assertion is the only thing standing between that and a flag that
+    exists everywhere except where it is read.
+    """
+    meta, dets = _handover()
+    monkeypatch.setattr(detector, "detect_video", lambda *a, **k: (meta, dets))
+    result = jobs.run_pipeline(VIDEO_ID, "/fake.mp4", 5.0, [], write_db=False)
+    parsed = AnalysisResult.model_validate(result)
+
+    dq = parsed.analytics.data_quality
+    assert dq is not None
+    assert dq.multiple_adults_detected is True
+    assert dq.max_simultaneous_adults == 2
+    assert dq.co_presence_ms >= 30_000
+    assert dq.confidence.attribution == "low"
+    assert dq.confidence.overall == "low"
+    assert any("adults" in n.lower() for n in dq.notes)
+
+
+def test_the_handover_looks_perfect_on_every_other_signal(monkeypatch):
+    """Why a flag was needed rather than trusting the existing report.
+
+    There is always *a* teacher box in this lesson, so the timeline is
+    unbroken, fully covered and confidently detected. Every signal that existed
+    before this change reports a clean lesson — and the arrival time it reports
+    belongs to the teacher who was leaving.
+    """
+    meta, dets = _handover()
+    monkeypatch.setattr(detector, "detect_video", lambda *a, **k: (meta, dets))
+    result = jobs.run_pipeline(VIDEO_ID, "/fake.mp4", 5.0, [], write_db=False)
+    parsed = AnalysisResult.model_validate(result)
+
+    dq = parsed.analytics.data_quality
+    assert dq is not None
+    assert dq.confidence.coverage == "high"
+    assert dq.confidence.continuity == "high"
+    assert dq.confidence.teacher == "high"
+    # And the number that would have been reported: present from frame one,
+    # which is the OUTGOING teacher's arrival, three minutes before the lesson's
+    # actual teacher walked in.
+    assert parsed.analytics.presence_intervals[0][0] == 0
+
+
+def test_every_teacher_box_is_offered_for_storage_including_the_unclaimed(
+    monkeypatch,
+):
+    """Phase 1 end to end: the losing candidates reach db.replace_detections.
+
+    Asserted on what run_pipeline HANDS the writer rather than on the writer's
+    own filter (test_db.py covers that), because the defect was upstream of
+    both: derive_result stamps track_no in place, and if it stamped only the
+    winners onto a list the writer then filtered by track_no, the second adult
+    was gone before any storage decision was made.
+    """
+    meta, dets = _handover()
+    monkeypatch.setattr(detector, "detect_video", lambda *a, **k: (meta, dets))
+
+    handed: dict = {}
+
+    async def fake_replace(video_id, detections, **kwargs):
+        handed["all"] = list(detections)
+        return len(detections)
+
+    monkeypatch.setattr(db, "replace_detections", fake_replace)
+    jobs.run_pipeline(VIDEO_ID, "/fake.mp4", 5.0, [], write_db=True)
+
+    teacher_boxes = [d for d in handed["all"] if d.cls == CLASS_TEACHER]
+    claimed = [d for d in teacher_boxes if d.track_no is not None]
+    unclaimed = [d for d in teacher_boxes if d.track_no is None]
+
+    assert claimed, "the timeline must still claim its own boxes"
+    assert unclaimed, "the second adult's boxes must survive to the writer"
+    assert len(teacher_boxes) == len(claimed) + len(unclaimed)

@@ -9,19 +9,37 @@ id, so the only questions left are the two a tracker actually answers:
   WHICH BOX IS HERS when the model offers more than one, and
   IS SHE STILL HERE across a frame where it offered none.
 
-Both are settled by continuity, and the measurements say that is enough:
+Both are settled by continuity, and on a room with ONE adult in it that is
+enough:
 
-  - At the configured threshold the model emits AT MOST ONE teacher box per
+  - At the configured threshold the model emits at most one teacher box per
     frame (0 frames with two, over 583 scored frames of the held-out room), so
     the disambiguation path is a safety net rather than the common case.
   - Its longest unbroken miss on that lesson is ~5.4 s, which a gap bridge
     covers; there is no re-identification problem to solve because there is no
     competing identity to confuse her with.
 
-That is why there is no ByteTrack/BoT-SORT here, and no Re-ID encoder. Adding
-either would be adding machinery to fix a problem the detector no longer has.
-If a future room DOES show identity switching, the place to add it is
-_pick_candidate, which is already the single point where competing boxes meet.
+THE ROOM WITH TWO ADULTS HAS NOW SHOWN UP, and it breaks that assumption in a
+way worth stating plainly, because the code below still makes it. A 45-minute
+recording of period 3 that starts while the period 2 teacher is still in the
+room offers two teacher boxes at 64% of the instants across the handover, both
+scoring 0.7-0.86. _pick_candidate resolves each of those instants on its own
+merits, so the resulting "track" is a frame-by-frame blend of two people rather
+than one person followed through the lesson — and because there is always *a*
+box, nothing downstream notices: coverage, continuity and confidence all read
+high on a timeline that belongs to nobody.
+
+What this module does about that, for now, is COUNT it and say so
+(_co_presence). It does not yet split the blend into per-person segments, and
+it does not decide which person the lesson assesses; those are the tracking and
+attribution stages in docs/teacher-attribution-plan.md. Until they exist, a
+lesson with sustained co-presence is reported as Not Observed rather than
+measured against the wrong body — see app/quality.py and the punctuality DTO.
+
+That is also why there is still no ByteTrack/BoT-SORT here and no Re-ID
+encoder: the missing piece is not a better tracker, it is a rule for which
+tracked person is hers. When the split does get built, _pick_candidate is the
+single point where competing boxes meet and so the place it belongs.
 
 Pure function of detections, so /analyze, /rederive and the offline harness all
 produce identical timelines.
@@ -39,6 +57,10 @@ from app.models import CLASS_TEACHER, Detection
 logger = logging.getLogger(__name__)
 
 # The teacher is one person, so she gets one identity number.
+#
+# Note what this asserts: one tracked person per video, by construction. It
+# holds for a room with a single adult and is wrong for a handover, which is
+# why _co_presence measures the assumption instead of trusting it.
 TEACHER_TRACK_NO = 1
 
 # --- plausible motion --------------------------------------------------------
@@ -59,6 +81,20 @@ JUMP_BASE = 0.05
 # fresh start is correct.
 FREE_GAP_MS = 5_000
 
+# --- more than one adult -----------------------------------------------------
+# Two teacher boxes at ONE instant is evidence of two people. It is not a tie to
+# break: the model puts a correct box on the teacher in 95.5% of scored frames
+# and emitted at most one per frame across 583 frames of the single-adult
+# held-out room, so a second box is far more likely to be a second body than a
+# duplicate of the first.
+#
+# It can still be a duplicate, or an adult crossing the doorway on their way
+# past, so the flag is raised on DURATION rather than on any single contested
+# frame. A passer-by is seconds; the measured handover ran ~90 s of overlap
+# before the outgoing teacher left. 30 s sits an order of magnitude above the
+# first and comfortably below the second.
+CO_PRESENCE_MIN_MS = 30_000
+
 
 @dataclass
 class TeacherTrack:
@@ -69,10 +105,28 @@ class TeacherTrack:
     mean_conf: float = 0.0
     rejected_jumps: int = 0
     notes: list[str] = field(default_factory=list)
+    # How often the detector offered more than one teacher box at a single
+    # instant, the most it ever offered at once, and roughly how long that
+    # lasted. These describe the ROOM, not her: they are the evidence that
+    # `detections` above may not all belong to the same person.
+    contested_instants: int = 0
+    max_simultaneous: int = 1
+    co_presence_ms: int = 0
 
     @property
     def found(self) -> bool:
         return bool(self.detections)
+
+    @property
+    def multiple_adults(self) -> bool:
+        """Was a second adult in the room long enough to matter?
+
+        Deliberately not "were two boxes ever offered": a single contested
+        instant is a duplicate box or someone passing the doorway, and refusing
+        a lesson's numbers over that would make the refusal worthless. Sustained
+        co-presence is the thing that makes this timeline a blend.
+        """
+        return self.co_presence_ms >= CO_PRESENCE_MIN_MS
 
     @property
     def first_ms(self) -> int:
@@ -196,6 +250,40 @@ def _chain(
     return before + accepted, rejected
 
 
+def _sample_interval_ms(stamps: list[int]) -> int:
+    """Median gap between consecutive sampled instants, or 0 if unknowable.
+
+    The median rather than the mean because a lesson's stamps are not evenly
+    spaced end to end — a stretch where nothing at all was detected leaves one
+    enormous gap, and an average over that would inflate every duration built
+    from it.
+    """
+    if len(stamps) < 2:
+        return 0
+    gaps = sorted(b - a for a, b in zip(stamps, stamps[1:]))
+    return gaps[len(gaps) // 2]
+
+
+def _co_presence(
+    by_ts: dict[int, list[Detection]], sample_ms: int
+) -> tuple[int, int, int]:
+    """(contested instants, most boxes at once, ms with two or more in frame).
+
+    Reported as a duration as well as a count because a count means nothing
+    without the sample rate: "289 contested frames" is unreadable, and "58
+    seconds with two adults in the room" is a fact somebody can act on.
+    """
+    contested = 0
+    most = 0
+    for boxes in by_ts.values():
+        n = len(boxes)
+        if n > most:
+            most = n
+        if n >= 2:
+            contested += 1
+    return contested, most, contested * sample_ms
+
+
 def build_teacher_track(
     detections: list[Detection],
     duration_ms: int,
@@ -203,9 +291,16 @@ def build_teacher_track(
 ) -> TeacherTrack:
     """Follow the teacher class through the lesson; stamps track_no in place.
 
-    Returns her accepted detections in time order. Detections rejected as
+    Returns the accepted detections in time order. Detections rejected as
     implausible jumps keep their original class but are left without a
-    track_no, so nothing downstream mistakes them for her.
+    track_no, so nothing downstream mistakes them for her — since migration
+    0014 they are still PERSISTED, unattributed, which is what lets the
+    attribution rule change later without paying for another detector pass.
+
+    The returned track also carries how often the detector offered more than
+    one teacher box at once. On a lesson where that is sustained, "her accepted
+    detections" is the wrong description of the result and the caller must not
+    report it as one person's timeline; see TeacherTrack.multiple_adults.
     """
     threshold = (
         conf_threshold if conf_threshold is not None else get_settings().teacher_conf
@@ -223,8 +318,11 @@ def build_teacher_track(
             notes=["The detector never found a teacher in this lesson."],
         )
 
-    # Group by sampled instant: several boxes at one timestamp are competing
-    # claims on the same body, and exactly one of them can be her.
+    # Group by sampled instant. The chain below treats several boxes at one
+    # timestamp as competing claims on ONE body and keeps the reachable one —
+    # which is right when the extra box is a duplicate or a false positive, and
+    # wrong when it is a second person. _co_presence measures which case this
+    # is; the chain itself does not yet act on the answer.
     by_ts: dict[int, list[Detection]] = {}
     for d in teacher_dets:
         by_ts.setdefault(d.video_ts_ms, []).append(d)
@@ -234,7 +332,35 @@ def build_teacher_track(
     for d in accepted:
         d.track_no = TEACHER_TRACK_NO
 
+    # Over every instant the detector LOOKED at, not just the ones offering a
+    # teacher box: the sampling interval is a property of the pass, not of how
+    # often she happened to be found.
+    #
+    # KNOWN ASYMMETRY between the two callers. /analyze passes a fresh detector
+    # pass, where the board is detected in ~every frame, so this median IS the
+    # sample rate. /rederive replays stored rows, which are teacher-class only
+    # by construction, so on a heavily occluded lesson its stamps are sparse and
+    # the median reads high — inflating co_presence_ms and making a rederive
+    # more willing to refuse than the analysis that preceded it. It takes a
+    # lesson where she is found rarely AND contested often to matter, and it
+    # errs toward refusing rather than toward a wrong number, so it is recorded
+    # here rather than worked around. The real fix is to persist the pass's
+    # sampled-frame count instead of re-deriving it from whatever survived.
+    sample_ms = _sample_interval_ms(sorted({d.video_ts_ms for d in detections}))
+    contested, max_simultaneous, co_presence_ms = _co_presence(by_ts, sample_ms)
+
     notes: list[str] = []
+    if co_presence_ms >= CO_PRESENCE_MIN_MS:
+        # First in the list on purpose. It outranks every other note because it
+        # says the timeline below may not describe one person, which changes how
+        # to read all of them.
+        notes.append(
+            f"Two or more adults were in the room together for about "
+            f"{co_presence_ms / 1000:.0f}s (up to {max_simultaneous} at once). "
+            "This timeline follows whichever of them scored highest frame by "
+            "frame, so it may blend them; nothing yet decides which adult the "
+            "lesson assesses."
+        )
     if rejected:
         notes.append(
             f"{rejected} teacher detection(s) were rejected as implausible jumps "
@@ -259,6 +385,9 @@ def build_teacher_track(
         mean_conf=round(mean_conf, 4),
         rejected_jumps=rejected,
         notes=notes,
+        contested_instants=contested,
+        max_simultaneous=max_simultaneous,
+        co_presence_ms=co_presence_ms,
     )
     logger.info(
         "teacher track: %d detections %d-%dms of a %dms lesson "
@@ -270,4 +399,12 @@ def build_teacher_track(
         mean_conf,
         rejected,
     )
+    if track.multiple_adults:
+        logger.warning(
+            "video has %d contested instants (~%.0fs, up to %d teacher boxes at "
+            "once): this track may blend more than one adult",
+            contested,
+            co_presence_ms / 1000.0,
+            max_simultaneous,
+        )
     return track

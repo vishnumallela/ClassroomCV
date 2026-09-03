@@ -11,6 +11,23 @@ type Detail = NonNullable<Awaited<ReturnType<typeof getVideoDetail>>>;
 type Analytics = Detail["analytics"];
 
 /**
+ * Why a lesson's Group A numbers are withheld, in words a reader can act on.
+ *
+ * Refusing beats guessing here, and the choice is not close. The presence
+ * timeline is built by following ONE person; when two adults are in the room it
+ * follows whichever of them the detector scored highest on each frame, which is
+ * a blend rather than a person. Every number below would then be measured
+ * against the wrong body — and always in the flattering direction, because the
+ * blend starts with whoever was alone first, which in a handover recording is
+ * the OUTGOING teacher. A gap prompts someone to look; a confident wrong number
+ * gets read as a fact.
+ */
+const MULTIPLE_ADULTS_REASON =
+  "More than one adult was in the room during this lesson, so the teacher timeline may " +
+  "blend them. Nothing yet decides which of them this lesson assesses, so arrival, " +
+  "departure and time in the room are not reported.";
+
+/**
  * Group A of docs/teacher-measurements.md, derived at read time.
  *
  * Nothing here is stored. These are three subtractions over rows that already
@@ -19,8 +36,11 @@ type Analytics = Detail["analytics"];
  * to drift out of step with the timetable.
  *
  * Every field is independently nullable, and null means "Not Observed" (R23):
- * no recording anchor, no presence data, or no timetable entered. It never
- * means zero.
+ * no recording anchor, no presence data, no timetable entered, or more than one
+ * adult in the room. It never means zero. `notObservedReason` is non-null only
+ * for that last case — the others are visible from the inputs themselves (an
+ * empty date field explains itself), while a blended timeline looks exactly
+ * like a clean one and has to be said out loud.
  */
 function toPunctuality(v: Detail["video"], analytics: Analytics, timezone: string) {
   const clock = lessonClock(v, timezone);
@@ -28,7 +48,13 @@ function toPunctuality(v: Detail["video"], analytics: Analytics, timezone: strin
   const first = presence[0];
   const last = presence.at(-1);
 
-  if (!clock || !first || !last) {
+  // `=== true` on purpose: this field is absent on every lesson analysed before
+  // the check existed, and absent means "never looked", not "one adult". Those
+  // rows keep reporting their numbers rather than being retroactively withheld
+  // on evidence nobody gathered.
+  const blended = analytics?.dataQuality?.multiple_adults_detected === true;
+
+  if (!clock || !first || !last || blended) {
     return {
       timezone,
       recordingStartedAt: v.recordingStartedAt?.toISOString() ?? null,
@@ -37,6 +63,7 @@ function toPunctuality(v: Detail["video"], analytics: Analytics, timezone: strin
       arrivalMinutesLate: null,
       departureMinutesLate: null,
       presenceShareOfPeriod: null,
+      notObservedReason: blended ? MULTIPLE_ADULTS_REASON : null,
     };
   }
 
@@ -60,6 +87,7 @@ function toPunctuality(v: Detail["video"], analytics: Analytics, timezone: strin
       scheduledMs !== null && scheduledMs > 0 && presentMs !== null
         ? Math.round((presentMs / scheduledMs) * 1000) / 1000
         : null,
+    notObservedReason: null,
   };
 }
 

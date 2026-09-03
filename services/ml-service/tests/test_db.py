@@ -11,16 +11,23 @@ transaction committed or rolled back.
 import pytest
 
 from app import db
-from app.models import CLASS_TEACHER, Detection
+from app.models import (
+    CLASS_DOOR,
+    CLASS_POINTING,
+    CLASS_SCREEN,
+    CLASS_TEACHER,
+    CLASS_WRITING,
+    Detection,
+)
 
 
-def _det(ts: int) -> Detection:
+def _det(ts: int, cls: int = CLASS_TEACHER, conf: float = 0.9, track_no=1) -> Detection:
     return Detection(
         video_ts_ms=ts,
-        cls=CLASS_TEACHER,
+        cls=cls,
         bbox={"x": 0.1, "y": 0.1, "w": 0.1, "h": 0.2},
-        conf=0.9,
-        track_no=1,
+        conf=conf,
+        track_no=track_no,
     )
 
 
@@ -47,6 +54,7 @@ class _FakeConn:
         workflow_run_id: str | None = None,
     ) -> None:
         self.log: list = []
+        self.copied: list = []
         self.in_tx = False
         self._copies = 0
         self._fail_on_copy = fail_on_copy
@@ -73,6 +81,7 @@ class _FakeConn:
         self._copies += 1
         if self._fail_on_copy == self._copies:
             raise ConnectionError("connection dropped mid-COPY")
+        self.copied.extend(records)
         self.log.append(("COPY", len(records)))
 
     async def close(self):
@@ -190,3 +199,120 @@ async def test_replace_detections_skips_token_check_without_tokens(monkeypatch):
     n = await db.replace_detections("vid", [_det(i) for i in range(2)], batch_size=2)
     assert n == 2
     assert conn.log[-2:] == ["COMMIT", "CLOSE"]
+
+
+# --------------------------------------------------------------------------- #
+# What gets stored (migration 0014)
+# --------------------------------------------------------------------------- #
+#
+# The write filter is the whole of Phase 1, and it is one line that is easy to
+# get subtly wrong in two opposite directions: too tight and the evidence of a
+# second adult is destroyed before the database sees it (the bug), too loose and
+# "only the teacher class is ever stored" quietly stops being true (a privacy
+# property, not a preference). Both directions are pinned below.
+
+
+def _copied_columns(conn) -> list[tuple]:
+    """(video_ts_ms, track_no, cls) for every row the fake connection COPYed."""
+    import json as _json
+
+    return [(r[0], r[2], _json.loads(r[5])["cls"]) for r in conn.copied]
+
+
+async def _write(monkeypatch, detections, conn=None):
+    conn = conn or _FakeConn()
+
+    async def fake_connect(dsn=None):
+        return conn
+
+    monkeypatch.setattr(db, "_connect", fake_connect)
+    n = await db.replace_detections("vid", detections)
+    return conn, n
+
+
+async def test_unattributed_teacher_boxes_are_persisted(monkeypatch):
+    """The Phase 1 point: a teacher box no track claimed is EVIDENCE, not noise.
+
+    On the lesson that prompted this, 285 of 289 co-present instants were never
+    even recorded as rejected — the second adult simply vanished on the way to
+    the database, which is why a stored-row replay could never rediscover her.
+    """
+    dets = [_det(0), _det(0, track_no=None), _det(200), _det(200, track_no=None)]
+    conn, n = await _write(monkeypatch, dets)
+
+    assert n == 4
+    assert _copied_columns(conn) == [
+        (0, 1, CLASS_TEACHER),
+        (0, None, CLASS_TEACHER),
+        (200, 1, CLASS_TEACHER),
+        (200, None, CLASS_TEACHER),
+    ]
+
+
+async def test_only_the_teacher_class_is_ever_stored(monkeypatch):
+    """Regression guard for the tempting one-character fix.
+
+    Before 0014, `track_no is not None` was ALSO what kept every other class
+    out, because only teacher boxes were ever stamped. Loosening that check
+    instead of testing the class would have started persisting screen, door,
+    pointing and writing rows — silently, with no test failing, and with the
+    privacy claim in this module's docstring no longer true of the data.
+    """
+    dets = [
+        _det(0, cls=CLASS_TEACHER, track_no=None),
+        _det(0, cls=CLASS_SCREEN, track_no=None),
+        _det(0, cls=CLASS_DOOR, track_no=None),
+        _det(0, cls=CLASS_POINTING, track_no=None),
+        _det(0, cls=CLASS_WRITING, track_no=None),
+    ]
+    conn, n = await _write(monkeypatch, dets)
+
+    assert n == 1
+    assert {cls for _, _, cls in _copied_columns(conn)} == {CLASS_TEACHER}
+
+
+async def test_sub_threshold_teacher_boxes_are_not_stored(monkeypatch):
+    """The detector emits down to a low floor so one pass serves every
+    consumer. Storing that floor would store noise no attribution rule would
+    ever consult, so the write applies the same teacher_conf the tracker uses
+    to decide what counts as a candidate."""
+    from app.config import get_settings
+
+    threshold = get_settings().teacher_conf
+    dets = [
+        _det(0, conf=threshold + 0.1, track_no=None),
+        _det(200, conf=threshold - 0.1, track_no=None),
+    ]
+    conn, n = await _write(monkeypatch, dets)
+
+    assert n == 1
+    assert [ts for ts, _, _ in _copied_columns(conn)] == [0]
+
+
+async def test_fetch_reads_an_unattributed_row_back_as_none(monkeypatch):
+    """The round trip that makes /rederive able to re-ask the attribution
+    question rather than replay its old answer: the losing candidates come back
+    in the input, shaped exactly as a fresh detector pass would hand them over.
+    """
+    rows = [
+        {"video_ts_ms": 0, "track_no": 1, "bbox": {"x": 0.1, "y": 0.1, "w": 0.1,
+         "h": 0.2}, "confidence": 0.9, "meta": {"cls": CLASS_TEACHER}},
+        {"video_ts_ms": 0, "track_no": None, "bbox": {"x": 0.5, "y": 0.1,
+         "w": 0.1, "h": 0.2}, "confidence": 0.8, "meta": {"cls": CLASS_TEACHER}},
+    ]
+
+    class _ReadConn:
+        async def fetch(self, sql, *args):
+            return rows
+
+        async def close(self):
+            pass
+
+    async def fake_connect(dsn=None):
+        return _ReadConn()
+
+    monkeypatch.setattr(db, "_connect", fake_connect)
+    out = await db.fetch_detections("vid")
+
+    assert [d.track_no for d in out] == [1, None]
+    assert all(d.cls == CLASS_TEACHER for d in out)

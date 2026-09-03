@@ -1,4 +1,5 @@
 import { useMutation, useQueryClient } from "@tanstack/react-query";
+import { CircleAlert } from "lucide-react";
 import { useState } from "react";
 import { Button } from "@/components/ui/button";
 import { Card } from "@/components/ui/card";
@@ -40,6 +41,15 @@ export interface Punctuality {
   arrivalMinutesLate: number | null;
   departureMinutesLate: number | null;
   presenceShareOfPeriod: number | null;
+  /**
+   * Why these numbers are withheld, when the reason is not visible on the form.
+   *
+   * A missing scheduled time explains itself — the field next to it is empty.
+   * A timeline blended from two adults does not: the analysis looks complete
+   * and confident, so without this line the refusal is indistinguishable from
+   * "nobody typed the bell times in yet" and gets fixed by typing them in.
+   */
+  notObservedReason: string | null;
 }
 
 /** "6.8 min late" / "6.2 min early" / "on time". Sign carries the meaning. */
@@ -117,6 +127,11 @@ export function LessonDetailsCard({
 
   const hasSchedule = Boolean(lesson.scheduledStart && lesson.scheduledEnd);
   const anchored = punctuality.arrivalAt !== null;
+  // The measurement was refused rather than missing an input. Every Group A row
+  // reads "Not Observed" instead of an em dash, because the dash means "we have
+  // nothing to compute from" and this means "we could compute it and it would
+  // be wrong".
+  const refused = punctuality.notObservedReason !== null;
 
   return (
     <Card className="p-5">
@@ -160,17 +175,31 @@ export function LessonDetailsCard({
             }
             muted={!hasSchedule}
           />
-          <Row label="Teacher arrived" value={punctuality.arrivalAt ?? "—"} muted={!anchored} />
           <Row
-            label="Against the bell"
-            value={hasSchedule ? againstBell(punctuality.arrivalMinutesLate) : "Not Observed"}
-            muted={!hasSchedule}
+            label="Teacher arrived"
+            value={refused ? "Not Observed" : (punctuality.arrivalAt ?? "—")}
+            muted={!anchored}
           />
-          <Row label="Teacher left" value={punctuality.departureAt ?? "—"} muted={!anchored} />
           <Row
             label="Against the bell"
-            value={hasSchedule ? againstBell(punctuality.departureMinutesLate) : "Not Observed"}
-            muted={!hasSchedule}
+            value={
+              hasSchedule && !refused ? againstBell(punctuality.arrivalMinutesLate) : "Not Observed"
+            }
+            muted={!hasSchedule || refused}
+          />
+          <Row
+            label="Teacher left"
+            value={refused ? "Not Observed" : (punctuality.departureAt ?? "—")}
+            muted={!anchored}
+          />
+          <Row
+            label="Against the bell"
+            value={
+              hasSchedule && !refused
+                ? againstBell(punctuality.departureMinutesLate)
+                : "Not Observed"
+            }
+            muted={!hasSchedule || refused}
           />
           <Row
             label="Present, of the period"
@@ -182,6 +211,13 @@ export function LessonDetailsCard({
             muted={punctuality.presenceShareOfPeriod === null}
           />
         </div>
+      )}
+
+      {!open && punctuality.notObservedReason && (
+        <p className="mt-3 flex items-start gap-1.5 rounded-lg bg-muted/50 px-3 py-2 text-xs leading-relaxed text-muted-foreground">
+          <CircleAlert className="mt-0.5 size-3.5 shrink-0 text-tier-medium" />
+          <span>{punctuality.notObservedReason}</span>
+        </p>
       )}
 
       {open && (

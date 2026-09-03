@@ -33,11 +33,19 @@ export type DataQuality = {
   mean_confidence: number;
   breaks: number;
   longest_gap_ms: number;
+  // Optional because this column is jsonb and rows outlive the code that wrote
+  // them: a lesson analysed before the co-presence check simply has no opinion
+  // on how many adults were in the room, which is NOT the same claim as "one".
+  // Readers must treat absence as unknown and never as a measured single adult.
+  multiple_adults_detected?: boolean;
+  max_simultaneous_adults?: number;
+  co_presence_ms?: number;
   confidence: {
     overall: QualityTier;
     coverage: QualityTier;
     continuity: QualityTier;
     teacher: QualityTier;
+    attribution?: QualityTier;
   };
   notes: string[];
 };
@@ -226,7 +234,13 @@ export const events = pgTable("events", {
 export const detectionEvents = pgTable("detection_events", {
   videoTsMs: bigint("video_ts_ms", { mode: "number" }).notNull(),
   videoId: uuid("video_id").notNull(),
-  trackNo: integer("track_no").notNull(),
+  // Nullable since 0014. NULL = the detector called this box a teacher and no
+  // tracked person owns it — a second adult in the room, or her own box on a
+  // frame the chain rejected. Keeping those rows is what lets the attribution
+  // rule change with a /rederive instead of another paid GPU pass; dropping
+  // them is how the evidence of a two-teacher lesson was destroyed before it
+  // reached the database. Only the `teacher` class is ever stored either way.
+  trackNo: integer("track_no"),
   bbox: jsonb("bbox").$type<Bbox>().notNull(),
   confidence: real("confidence").notNull(),
   meta: jsonb("meta").$type<Record<string, unknown> | null>(),

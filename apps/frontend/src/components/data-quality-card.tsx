@@ -52,6 +52,13 @@ const DIMENSIONS: { key: keyof DataQuality["confidence"]; label: string; help: s
     label: "Detection",
     help: "How confident the detector was when it found her.",
   },
+  {
+    key: "attribution",
+    label: "Attribution",
+    help:
+      "Whether there was only one adult to follow. The other three describe how well one " +
+      "person was tracked; this one asks whether tracking one person was right at all.",
+  },
 ];
 
 export function DataQualityCard({ analytics }: { analytics: Analytics }) {
@@ -73,7 +80,7 @@ export function DataQualityCard({ analytics }: { analytics: Analytics }) {
         <TierPill tier={overall} size="lg" />
       </div>
 
-      <div className="mt-4 grid grid-cols-3 gap-3">
+      <div className="mt-4 grid grid-cols-2 gap-3 sm:grid-cols-4">
         {DIMENSIONS.map((d) => (
           <div
             key={d.key}
@@ -104,6 +111,13 @@ export function DataQualityCard({ analytics }: { analytics: Analytics }) {
           value={num(dq.mean_confidence, 2)}
           hint="Average score of the detections behind her timeline."
         />
+        {dq.multiple_adults_detected === true && (
+          <CrossCheck
+            label="Adults at once"
+            value={num(dq.max_simultaneous_adults)}
+            hint="The most adults the detector saw in the room at the same moment."
+          />
+        )}
       </div>
 
       {(dq.notes ?? []).length > 0 && (

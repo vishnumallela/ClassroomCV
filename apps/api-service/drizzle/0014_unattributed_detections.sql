@@ -1,0 +1,32 @@
+-- Persist every teacher detection, not only the ones the timeline claimed.
+--
+-- app/teacher.py follows ONE chain through a lesson and stamps track_no on the
+-- boxes it accepts; app/db.py then stored only those. On a lesson with a second
+-- adult in the room, that filter destroys the evidence that there WAS a second
+-- adult before it ever reaches the database — the stored rows describe a single
+-- unbroken person because every box contradicting that was dropped on the way
+-- in. The measured case: 289 instants with two teacher boxes, both scoring
+-- 0.7-0.86, of which 285 were never even recorded as rejected.
+--
+-- With unattributed boxes kept, every future change to the attribution rule is
+-- a /rederive over stored rows instead of a paid GPU re-run. That is the point:
+-- the rule does not exist yet and its definition is still being argued out, so
+-- the cheap thing to protect is the evidence, not the conclusion.
+--
+-- NULL track_no means "the detector called this a teacher; no tracked person
+-- owns it". A sentinel like 0 would avoid this migration and collide with the
+-- roles_map keys that drive events.derive.
+--
+-- Storage: teacher-class boxes at or above the teacher confidence threshold,
+-- which is ~20% more rows than the accepted chain alone on the measured
+-- 6-minute clip. Negligible against a compressed hypertable.
+--
+-- track_no is a compress_orderby column and this hypertable has compressed
+-- chunks, which is the reason to check rather than assume: verified against
+-- this database (TimescaleDB 2.28.2 / PostgreSQL 16.14) that DROP NOT NULL is
+-- accepted with a compressed chunk present, and that a NULL row then inserts.
+--
+-- NO PRIVACY CHANGE. Only the `teacher` class is ever persisted. The model does
+-- not detect students at all, so there is still no student box in the database
+-- to leak into an overlay by mistake — see the module docstring in app/db.py.
+ALTER TABLE "detection_events" ALTER COLUMN "track_no" DROP NOT NULL;

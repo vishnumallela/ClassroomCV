@@ -51,7 +51,9 @@ class Detection:
     adult, and the model now says so directly.
 
     `track_no` is set only on the teacher's accepted detections (see
-    app/teacher.py); everything else carries None.
+    app/teacher.py); everything else carries None. A teacher-class detection
+    with track_no None is not discarded — since migration 0014 it is persisted
+    as an unattributed box, which is what a later attribution rule reads.
     """
 
     video_ts_ms: int
@@ -219,13 +221,25 @@ class QualityTiers(BaseModel):
     coverage: Literal["high", "medium", "low"]
     continuity: Literal["high", "medium", "low"]
     teacher: Literal["high", "medium", "low"]
+    # Whether following ONE person was the right thing to do at all. Defaulted
+    # rather than required so a payload built before this signal existed still
+    # validates; app/quality.py always sets it explicitly.
+    attribution: Literal["high", "medium", "low"] = "high"
 
 
 class DataQualityOut(BaseModel):
     """Additive per-run trust report (app/quality.py). Annotates, never alters,
     the derived numbers: how much of the lesson the teacher was actually found
-    in, how broken her timeline is, and how sure the detector was — the trust
-    inputs behind the three teacher KPIs."""
+    in, how broken her timeline is, how sure the detector was, and whether there
+    was only one adult to follow — the trust inputs behind the teacher KPIs.
+
+    EVERY FIELD app/quality.py EMITS MUST BE DECLARED HERE. Pydantic's default
+    is extra="ignore", so a key added to the assess() dict without a field on
+    this model is dropped silently by AnalysisResult.model_validate — it never
+    reaches the API, the jsonb column or the dashboard, and nothing errors to
+    say so. `data_quality` being schemaless jsonb in Postgres makes that trap
+    easier to fall into, not harder: the database would have accepted it.
+    """
 
     detections: int
     frames: int
@@ -234,6 +248,13 @@ class DataQualityOut(BaseModel):
     mean_confidence: float
     breaks: int
     longest_gap_ms: int
+    # More than one adult in the room. The fields above describe how well one
+    # person was followed; these say whether "one person" was the right
+    # question — see the attribution section of app/quality.py. Defaulted so an
+    # older stored report still validates as "measured, one adult".
+    multiple_adults_detected: bool = False
+    max_simultaneous_adults: int = 1
+    co_presence_ms: int = 0
     confidence: QualityTiers
     notes: list[str]
 

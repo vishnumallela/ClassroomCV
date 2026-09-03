@@ -25,6 +25,18 @@ time would be theatre. What can still go wrong is different, and this is it:
 
 3. DETECTION CONFIDENCE: how sure the model was when it did find her. A lesson
    held together by 0.3-confidence boxes is a lesson to be careful with.
+
+4. ATTRIBUTION: was there only one adult to follow in the first place?
+
+The fourth is not like the other three, and the difference is the reason it
+exists. Coverage, continuity and confidence all ask HOW WELL one person was
+followed, and all three degrade visibly when the answer is "badly". Attribution
+asks whether following one person was the right thing to do at all — and when
+the answer is no, the other three do not degrade. They improve. A timeline
+blended from two adults is unbroken, well covered and confidently detected,
+because there is always *a* box to find: the measured handover scored high on
+every axis while reporting the wrong teacher's arrival. A trust report that
+could not say this would be most reassuring in exactly the case it exists for.
 """
 
 from __future__ import annotations
@@ -83,6 +95,9 @@ def assess(
     teacher_confidence: Optional[float] = None,
     mean_conf: Optional[float] = None,
     gap_ms: int = BREAK_GAP_MS,
+    multiple_adults: bool = False,
+    co_presence_ms: int = 0,
+    max_simultaneous: int = 1,
 ) -> dict:
     """Additive data-quality report for one analysed video.
 
@@ -154,7 +169,27 @@ def assess(
             "is tentative."
         )
 
-    overall = _worst(coverage_tier, continuity_tier, teacher_tier)
+    # --- attribution -------------------------------------------------------- #
+    # What counts as "more than one adult" is decided by the module that
+    # measured it (app/teacher.py owns the threshold and the evidence behind
+    # it); this one only reports the verdict. Taking the boolean rather than
+    # re-deriving it from co_presence_ms keeps ONE definition instead of two
+    # that drift apart the first time the threshold moves.
+    if multiple_adults:
+        attribution_tier: Tier = "low"
+        notes.append(
+            f"Two or more adults were in the room together for about "
+            f"{co_presence_ms / 1000:.0f}s. Nothing yet decides which of them "
+            "this lesson assesses, so arrival, departure, time in the room and "
+            "the entry/exit counts are reported as Not Observed rather than "
+            "measured against a timeline that may blend them."
+        )
+    elif not dets:
+        attribution_tier = "low"
+    else:
+        attribution_tier = "high"
+
+    overall = _worst(coverage_tier, continuity_tier, teacher_tier, attribution_tier)
 
     return {
         "detections": len(dets),
@@ -164,11 +199,19 @@ def assess(
         "mean_confidence": round(float(mean_conf), 3),
         "breaks": breaks,
         "longest_gap_ms": longest_gap,
+        # Additive, and describing the ROOM rather than her: how many adults the
+        # detector saw at once, and for how long. Present on every report so a
+        # reader can tell "measured, and there was one adult" from "this lesson
+        # predates the check", which a bare boolean could not express.
+        "multiple_adults_detected": multiple_adults,
+        "max_simultaneous_adults": max_simultaneous,
+        "co_presence_ms": co_presence_ms,
         "confidence": {
             "overall": overall,
             "coverage": coverage_tier,
             "continuity": continuity_tier,
             "teacher": teacher_tier,
+            "attribution": attribution_tier,
         },
         "notes": notes,
     }
