@@ -287,40 +287,49 @@ def test_handover_is_flagged_and_survives_the_response_model(monkeypatch):
     assert any("adults" in n.lower() for n in dq.notes)
 
 
-def test_the_handover_looks_perfect_on_every_other_signal(monkeypatch):
-    """Why a flag was needed rather than trusting the existing report.
+def test_the_handover_is_two_bodies_not_one_blend(monkeypatch):
+    """Phase 2: the two adults come out as two tracks, and neither is a blend.
 
-    There is always *a* teacher box in this lesson, so the timeline is
-    unbroken, fully covered and confidently detected. Every signal that existed
-    before this change reports a clean lesson — and the arrival time it reports
-    belongs to the teacher who was leaving.
+    Before the segment tracker this fixture produced ONE track with coverage
+    1.0, zero breaks and high confidence — there was always *a* box — while its
+    arrival time belonged to the teacher who was leaving. That perfect-looking
+    result was the bug. Now the primary is one real person with that person's
+    real gaps, so its coverage is honestly below 1.0, and the second adult is
+    its own numbered track for attribution to weigh.
     """
     meta, dets = _handover()
     monkeypatch.setattr(detector, "detect_video", lambda *a, **k: (meta, dets))
     result = jobs.run_pipeline(VIDEO_ID, "/fake.mp4", 5.0, [], write_db=False)
     parsed = AnalysisResult.model_validate(result)
 
+    assert [t.role for t in parsed.tracks] == ["teacher", "adult"]
+    teacher, adult = parsed.tracks
+    assert (teacher.track_no, adult.track_no) == (1, 2)
+    # Each track is one body. The fixture offsets the outgoing teacher by
+    # exactly +0.08 in x at every shared instant, so if the lanes never mix,
+    # the per-instant difference between the two tracks is a constant.
+    by_ts: dict = {}
+    for d in dets:
+        if d.cls == CLASS_TEACHER and d.track_no in (1, 2):
+            by_ts.setdefault(d.video_ts_ms, {})[d.track_no] = d.bbox["x"]
+    diffs = {round(x[1] - x[2], 3) for x in by_ts.values() if len(x) == 2}
+    assert len(diffs) == 1, f"lanes mixed: {sorted(diffs)[:6]}"
+    # The blend's false perfection is gone: coverage is the primary's own.
+    assert teacher.meta.coverage < 1.0
+    # The refusal still stands until attribution decides between them.
     dq = parsed.analytics.data_quality
-    assert dq is not None
-    assert dq.confidence.coverage == "high"
-    assert dq.confidence.continuity == "high"
-    assert dq.confidence.teacher == "high"
-    # And the number that would have been reported: present from frame one,
-    # which is the OUTGOING teacher's arrival, three minutes before the lesson's
-    # actual teacher walked in.
-    assert parsed.analytics.presence_intervals[0][0] == 0
+    assert dq is not None and dq.multiple_adults_detected is True
 
 
-def test_every_teacher_box_is_offered_for_storage_including_the_unclaimed(
-    monkeypatch,
-):
-    """Phase 1 end to end: the losing candidates reach db.replace_detections.
+def test_every_teacher_box_reaches_the_writer_with_its_segment(monkeypatch):
+    """Phase 1 + 2 end to end: both adults' boxes reach db.replace_detections,
+    each carrying its own segment number.
 
     Asserted on what run_pipeline HANDS the writer rather than on the writer's
-    own filter (test_db.py covers that), because the defect was upstream of
-    both: derive_result stamps track_no in place, and if it stamped only the
-    winners onto a list the writer then filtered by track_no, the second adult
-    was gone before any storage decision was made.
+    own filter (test_db.py covers that), because the original defect was
+    upstream of both: the single chain stamped only the winners onto a list the
+    writer then filtered by track_no, and the second adult was gone before any
+    storage decision was made.
     """
     meta, dets = _handover()
     monkeypatch.setattr(detector, "detect_video", lambda *a, **k: (meta, dets))
@@ -335,9 +344,13 @@ def test_every_teacher_box_is_offered_for_storage_including_the_unclaimed(
     jobs.run_pipeline(VIDEO_ID, "/fake.mp4", 5.0, [], write_db=True)
 
     teacher_boxes = [d for d in handed["all"] if d.cls == CLASS_TEACHER]
-    claimed = [d for d in teacher_boxes if d.track_no is not None]
-    unclaimed = [d for d in teacher_boxes if d.track_no is None]
+    by_no: dict = {}
+    for d in teacher_boxes:
+        by_no.setdefault(d.track_no, []).append(d)
 
-    assert claimed, "the timeline must still claim its own boxes"
-    assert unclaimed, "the second adult's boxes must survive to the writer"
-    assert len(teacher_boxes) == len(claimed) + len(unclaimed)
+    assert set(by_no) == {1, 2}, "both adults must reach the writer, each numbered"
+    assert len(by_no[1]) + len(by_no[2]) == len(teacher_boxes)
+    # And the numbering means something: the two are different bodies.
+    x1 = sum(d.bbox["x"] for d in by_no[1]) / len(by_no[1])
+    x2 = sum(d.bbox["x"] for d in by_no[2]) / len(by_no[2])
+    assert abs(x1 - x2) > 0.05

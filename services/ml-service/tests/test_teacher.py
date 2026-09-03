@@ -354,3 +354,135 @@ class TestSampleInterval:
         assert track.max_simultaneous == 2
         assert track.co_presence_ms == 4_000  # 20 x 200 ms, not 20 x 2,000
         assert track.multiple_adults is False
+
+
+class TestSegments:
+    """Phase 2: several bodies, several segments, and what counts as a body.
+
+    The old chain answered "which box is hers" at every instant. The tracker
+    answers "which box continues which body" and leaves "which body is hers" to
+    attribution. Everything below is one of: two bodies stay two; a flicker is
+    not a body; her return after an absence rejoins her; her return is NOT
+    guessed when someone else was around.
+    """
+
+    def _two_close_adults(self, end=60_000):
+        """Two bodies 0.08 apart in x with alternating confidence — the shape
+        of the real handover, where either box was reachable from either
+        body's last position and the old chain swapped on confidence."""
+        dets = []
+        for i, ts in enumerate(range(0, end + 1, 200)):
+            dets.append(_det(ts, x=0.20, conf=0.80 if i % 2 else 0.86))
+            dets.append(_det(ts, x=0.28, conf=0.86 if i % 2 else 0.80))
+        return dets
+
+    def test_two_adults_stay_two_bodies_with_no_swaps(self):
+        dets = self._two_close_adults()
+        track = T.build_teacher_track(dets, duration_ms=60_000)
+        subs = [s for s in track.segments if s.substantial]
+        assert len(subs) == 2
+        # Each segment lives in exactly one lane, every instant.
+        for seg in subs:
+            xs = {round(d.bbox["x"], 2) for d in seg.detections}
+            assert len(xs) == 1, xs
+        assert len(track.others) == 1
+        assert track.others[0].track_no == 2
+        assert {d.track_no for d in dets} == {1, 2}
+
+    def test_the_old_rule_would_have_blended_them(self):
+        """Same fixture, the confidence rule the chain used: it swaps lanes at
+        every other instant. Kept as a test so the failure this rewrite exists
+        for stays reproducible rather than becoming folklore."""
+        dets = self._two_close_adults()
+        by_ts = {}
+        for d in dets:
+            by_ts.setdefault(d.video_ts_ms, []).append(d)
+        prev = None
+        chosen = []
+        for ts in sorted(by_ts):
+            reachable = [d for d in by_ts[ts] if prev is None or T._plausible(prev, d)]
+            prev = max(reachable, key=lambda d: d.conf)
+            chosen.append(round(prev.bbox["x"], 2))
+        swaps = sum(1 for a, b in zip(chosen, chosen[1:]) if a != b)
+        assert swaps > 100  # 301 instants, alternating conf: it flips almost every one
+
+    def test_a_few_frames_of_student_is_a_flicker_not_a_body(self):
+        """The detector calls a student "teacher" for three frames. That is a
+        segment, but not a person: never numbered, never one of `others`,
+        never a reason to refuse anything."""
+        dets = _walk(end=20_000)
+        for ts in (8_000, 8_200, 8_400):
+            dets.append(_det(ts, x=0.7, conf=0.95))
+        track = T.build_teacher_track(dets, duration_ms=20_000)
+        flicker = [s for s in track.segments if s is not track.segments[0]]
+        assert len(flicker) == 1 and not flicker[0].substantial
+        assert flicker[0].track_no is None
+        assert track.others == []
+        assert track.coverage == 1.0
+        assert track.rejected_jumps == 0  # her box was there at those instants
+
+    def test_a_flicker_during_her_absence_does_not_split_her_timeline(self):
+        """She steps out for ten seconds; a student is misdetected for three
+        frames while she is gone; she returns. One track, not two — a noise
+        segment is not evidence that someone else was around."""
+        dets = _walk(end=5_000) + _walk(start=15_000, end=20_000, x0=0.8)
+        for ts in (9_000, 9_200, 9_400):
+            dets.append(_det(ts, x=0.5, conf=0.9))
+        track = T.build_teacher_track(dets, duration_ms=20_000)
+        assert track.first_ms == 0 and track.last_ms == 20_000
+        assert len(track.others) == 0
+        assert {d.track_no for d in track.detections} == {T.TEACHER_TRACK_NO}
+
+    def test_a_return_is_not_guessed_when_two_people_left_together(self):
+        """Two adults, both substantial, both stop being seen within five
+        seconds of each other. A box ten seconds later could be either one
+        returning. The old rule welded it to whichever chain it was walking;
+        now it starts a fresh segment and attribution gets to decide."""
+        dets = [_det(ts, x=0.2) for ts in range(0, 30_001, 200)]
+        dets += [_det(ts, x=0.6) for ts in range(0, 32_001, 200)]
+        dets += [_det(ts, x=0.4) for ts in range(42_000, 60_001, 200)]
+        track = T.build_teacher_track(dets, duration_ms=60_000)
+        subs = [s for s in track.segments if s.substantial]
+        assert len(subs) == 3
+        late = next(s for s in subs if s.first_ms == 42_000)
+        assert late.last_ms == 60_000
+        assert late.first_ms == 42_000  # welded onto nobody
+
+    def test_a_return_is_welded_when_the_other_adult_left_long_before(self):
+        """Contrast: the other adult was gone for ages before she stepped out,
+        so her return is unambiguous and rejoins her own segment — the same
+        outcome the old chain gave a one-adult lesson."""
+        dets = [_det(ts, x=0.6) for ts in range(0, 10_001, 200)]        # other adult, leaves early
+        dets += [_det(ts, x=0.2) for ts in range(0, 30_001, 200)]       # her
+        dets += [_det(ts, x=0.25) for ts in range(40_000, 60_001, 200)]  # her, back after 10 s
+        track = T.build_teacher_track(dets, duration_ms=60_000)
+        assert track.first_ms == 0 and track.last_ms == 60_000
+        assert len([s for s in track.segments if s.substantial]) == 2
+
+    def test_duplicate_boxes_on_one_body_collapse_to_the_confident_one(self):
+        """A second box overlapping the first by more than SAME_BODY_IOU is
+        the same body seen twice. One segment, the confident sighting kept —
+        which is also what the old chain chose, so a one-adult lesson keeps
+        exactly the boxes it had."""
+        dets = _walk(end=10_000)
+        twin = _det(5_000, x=0.21, conf=0.95)  # near-identical box, more confident
+        dets.append(twin)
+        track = T.build_teacher_track(dets, duration_ms=10_000)
+        assert track.duplicates == 1
+        assert len([s for s in track.segments if s.substantial]) == 1
+        assert track.others == []
+        chosen = next(d for d in track.detections if d.video_ts_ms == 5_000)
+        assert chosen is twin  # the higher confidence stands for the body
+        assert twin.track_no == T.TEACHER_TRACK_NO
+
+    def test_a_student_within_reach_during_her_occlusion_is_absorbed(self):
+        """DOCUMENTED LIMITATION, not a regression. She is occluded for one
+        second; a student stands where she was; the only continuation on
+        offer is the student's box, so it joins her segment. The old chain did
+        the same. Motion cannot tell them apart; appearance (Phase 3) can."""
+        dets = [_det(ts, x=0.2) for ts in range(0, 5_001, 200)]
+        dets += [_det(ts, x=0.22, conf=0.7) for ts in range(5_200, 6_001, 200)]  # "student"
+        dets += [_det(ts, x=0.2) for ts in range(6_200, 10_001, 200)]
+        track = T.build_teacher_track(dets, duration_ms=10_000)
+        assert len(track.segments) == 1
+        assert len(track.detections) == 51  # the five impostor boxes are in her chain

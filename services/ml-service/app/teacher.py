@@ -4,42 +4,45 @@ This module is what is left of a 2,750-line identity stack — an age model, a
 ground-plane fit, an appearance merge, a tracklet DP and a vision-model vote —
 once the detector started naming the teacher directly. Everything that stack
 existed to infer ("which of these thirty bodies is the adult?") is now a class
-id, so the only questions left are the two a tracker actually answers:
+id, so the questions left are the ones a tracker actually answers:
 
-  WHICH BOX IS HERS when the model offers more than one, and
+  WHICH BOX CONTINUES WHICH BODY when the model offers more than one, and
   IS SHE STILL HERE across a frame where it offered none.
 
-Both are settled by continuity, and on a room with ONE adult in it that is
-enough:
+Both are settled by continuity. Until 2026-09 that meant ONE chain: every
+instant's boxes were treated as competing guesses about a single body, and the
+most confident reachable one won. That is right for a room with one adult — the
+model emits at most one teacher box per frame across 583 scored frames of the
+held-out room — and wrong for a handover: a recording of period 3 that starts
+with the period 2 teacher still in the room offers two boxes at 64% of instants
+across the overlap, both 0.7-0.86, and the chain settled each one on confidence
+alone. The result was a frame-by-frame blend of two people that every quality
+signal scored high, because there was always *a* box.
 
-  - At the configured threshold the model emits at most one teacher box per
-    frame (0 frames with two, over 583 scored frames of the held-out room), so
-    the disambiguation path is a safety net rather than the common case.
-  - Its longest unbroken miss on that lesson is ~5.4 s, which a gap bridge
-    covers; there is no re-identification problem to solve because there is no
-    competing identity to confuse her with.
+So the chain became SEGMENTS. Two boxes at one instant that are not the same
+body are two people, and each continues its own segment by nearest reachable
+box — greedy assignment, one box per segment per instant, over the same motion
+model the single chain used. Nothing here decides which segment is the lesson's
+teacher; that is attribution (docs/teacher-attribution-plan.md, Phase 3). What
+this module hands over is (a) the segments, with the noise filtered out, and
+(b) an interim `primary` — the biggest one — which is exactly the old chain on
+a one-adult lesson and is refused downstream on a two-adult one until Phase 3
+can do better.
 
-THE ROOM WITH TWO ADULTS HAS NOW SHOWN UP, and it breaks that assumption in a
-way worth stating plainly, because the code below still makes it. A 45-minute
-recording of period 3 that starts while the period 2 teacher is still in the
-room offers two teacher boxes at 64% of the instants across the handover, both
-scoring 0.7-0.86. _pick_candidate resolves each of those instants on its own
-merits, so the resulting "track" is a frame-by-frame blend of two people rather
-than one person followed through the lesson — and because there is always *a*
-box, nothing downstream notices: coverage, continuity and confidence all read
-high on a timeline that belongs to nobody.
+Two things the segments do NOT fix, stated so nobody assumes they do:
 
-What this module does about that, for now, is COUNT it and say so
-(_co_presence). It does not yet split the blend into per-person segments, and
-it does not decide which person the lesson assesses; those are the tracking and
-attribution stages in docs/teacher-attribution-plan.md. Until they exist, a
-lesson with sustained co-presence is reported as Not Observed rather than
-measured against the wrong body — see app/quality.py and the punctuality DTO.
+- A student the detector calls "teacher" for a few frames is a short segment
+  and is dropped as noise, which is right. A student who stands still at the
+  front for thirty seconds is a substantial segment, which is also right — a
+  distinct body WAS tracked — and it is attribution's job to say it is not her.
+- While she is briefly occluded, a student box within reach of her last
+  position joins HER segment, because it is the only continuation on offer.
+  The old chain did the same. Appearance can catch it; motion alone cannot.
 
-That is also why there is still no ByteTrack/BoT-SORT here and no Re-ID
-encoder: the missing piece is not a better tracker, it is a rule for which
-tracked person is hers. When the split does get built, _pick_candidate is the
-single point where competing boxes meet and so the place it belongs.
+There is still no ByteTrack/BoT-SORT here and no Re-ID encoder. With two or
+three adults at 5 fps on a static camera, distance-gated greedy assignment is
+sufficient, and the day a room shows five adults is the day a real tracker
+earns its place.
 
 Pure function of detections, so /analyze, /rederive and the offline harness all
 produce identical timelines.
@@ -56,11 +59,8 @@ from app.models import CLASS_TEACHER, Detection
 
 logger = logging.getLogger(__name__)
 
-# The teacher is one person, so she gets one identity number.
-#
-# Note what this asserts: one tracked person per video, by construction. It
-# holds for a room with a single adult and is wrong for a handover, which is
-# why _co_presence measures the assumption instead of trusting it.
+# The attributed teacher's identity number. Other substantial segments take
+# 2, 3, ... in order of first appearance; noise segments take none.
 TEACHER_TRACK_NO = 1
 
 # --- plausible motion --------------------------------------------------------
@@ -95,6 +95,61 @@ FREE_GAP_MS = 5_000
 # first and comfortably below the second.
 CO_PRESENCE_MIN_MS = 30_000
 
+# --- what makes a segment a person ------------------------------------------
+# Two boxes at one instant where the smaller sits mostly INSIDE the larger are
+# one body seen twice, and the more confident sighting stands for both.
+#
+# Containment, not IoU, and the 37-minute baseline is why: the detector often
+# puts a half-height box on her upper body beside the full-body box — same x,
+# same top edge, half the height. Their IoU is 0.41-0.45, so an IoU gate at 0.5
+# called them two bodies, nearest-assignment gave each its own lane, and the
+# phantom lane then reached across the room and collected a student. The
+# smaller box is 100% inside the larger; two people side by side are not.
+SAME_BODY_OVERLAP = 0.7
+# A segment shorter than this is a misdetection, not a person: the detector
+# calling a student "teacher" for some frames. On the baseline the longest such
+# run is 0.8 s; three seconds is fifteen frames at 5 fps, well past a flicker
+# and well short of anyone who is actually in the room. A noise segment is
+# never numbered, never surfaced as another adult, and never a candidate for
+# the return-from-absence weld — any of those would let a flicker fracture or
+# hijack her timeline.
+SEGMENT_MIN_MS = 3_000
+SEGMENT_MIN_DETS = 8
+
+
+@dataclass
+class Segment:
+    """One continuously tracked body: detections the motion model accepts as a
+    single person, in time order, extended by nearest reachable box."""
+
+    detections: list[Detection]
+    track_no: Optional[int] = None
+
+    @property
+    def first_ms(self) -> int:
+        return self.detections[0].video_ts_ms
+
+    @property
+    def last_ms(self) -> int:
+        return self.detections[-1].video_ts_ms
+
+    @property
+    def last(self) -> Detection:
+        return self.detections[-1]
+
+    @property
+    def span_ms(self) -> int:
+        return self.last_ms - self.first_ms
+
+    @property
+    def mean_conf(self) -> float:
+        return sum(d.conf for d in self.detections) / len(self.detections)
+
+    @property
+    def substantial(self) -> bool:
+        """A person rather than a flicker. See SEGMENT_MIN_MS."""
+        return len(self.detections) >= SEGMENT_MIN_DETS and self.span_ms >= SEGMENT_MIN_MS
+
 
 @dataclass
 class TeacherTrack:
@@ -112,10 +167,24 @@ class TeacherTrack:
     contested_instants: int = 0
     max_simultaneous: int = 1
     co_presence_ms: int = 0
+    # Every body the tracker followed, primary included, in order of first
+    # appearance. `detections` above is the primary segment's list.
+    segments: list[Segment] = field(default_factory=list)
+    # Boxes discarded as a second sighting of the same body at one instant.
+    duplicates: int = 0
 
     @property
     def found(self) -> bool:
         return bool(self.detections)
+
+    @property
+    def others(self) -> list[Segment]:
+        """Substantial segments that are not the primary: the other adults the
+        tracker followed, numbered 2.. and handed to attribution."""
+        return [
+            s for s in self.segments
+            if s.track_no is not None and s.track_no != TEACHER_TRACK_NO
+        ]
 
     @property
     def multiple_adults(self) -> bool:
@@ -171,83 +240,121 @@ def _plausible(prev: Detection, cand: Detection) -> bool:
     return dist <= allowed
 
 
-def _pick_candidate(
-    candidates: list[Detection], prev: Optional[Detection]
-) -> Optional[Detection]:
-    """Which of this frame's teacher boxes continues the track.
+def _dist(a: Detection, b: Detection) -> float:
+    ax, ay = _center(a)
+    bx, by = _center(b)
+    return ((ax - bx) ** 2 + (ay - by) ** 2) ** 0.5
 
-    Continuity FIRST, confidence second. Taking the highest-confidence box every
-    frame is exactly the identity-switch bug this ordering exists to prevent: a
-    momentarily more confident box on somebody else would steal the track and
-    then keep it. A box that cannot be reached from the previous one is not her,
-    however confident the model is about it.
+
+def _containment(a: Detection, b: Detection) -> float:
+    """Share of the SMALLER box's area that lies inside the other.
+
+    1.0 for a half-body box on a full-body box (the smaller is entirely
+    inside); near 0 for two people side by side. IoU cannot make that
+    distinction — it penalises the size difference that is the whole tell.
     """
-    if not candidates:
-        return None
-    if prev is None:
-        return max(candidates, key=lambda d: d.conf)
-    reachable = [d for d in candidates if _plausible(prev, d)]
-    if not reachable:
-        return None
-    return max(reachable, key=lambda d: d.conf)
+    ax0, ay0 = a.bbox["x"], a.bbox["y"]
+    ax1, ay1 = ax0 + a.bbox["w"], ay0 + a.bbox["h"]
+    bx0, by0 = b.bbox["x"], b.bbox["y"]
+    bx1, by1 = bx0 + b.bbox["w"], by0 + b.bbox["h"]
+    iw = max(0.0, min(ax1, bx1) - max(ax0, bx0))
+    ih = max(0.0, min(ay1, by1) - max(ay0, by0))
+    smaller = min(a.bbox["w"] * a.bbox["h"], b.bbox["w"] * b.bbox["h"])
+    return (iw * ih) / smaller if smaller > 0 else 0.0
 
 
-def _seed_index(stamps: list[int], by_ts: dict[int, list[Detection]]) -> int:
-    """Index of the instant to start the chain from: the first UNCONTESTED one.
+def _dedup_instant(boxes: list[Detection]) -> list[Detection]:
+    """One box per body at this instant, most confident first.
 
-    Seeding on the first frame and breaking its tie by confidence looks
-    reasonable and is a trap: a single spurious box that happens to outscore her
-    on frame one captures the chain, and every real detection afterwards is then
-    rejected as an implausible jump back. The whole lesson follows the wrong
-    body from a one-frame accident.
-
-    An instant offering exactly one teacher box has no such ambiguity, so the
-    chain starts there and grows in both directions. On real footage this is
-    almost always the very first instant — the detector emits at most one
-    teacher box per frame at the configured threshold — so this costs nothing
-    in the normal case and only matters in the one it exists for.
+    A second box sitting mostly inside a kept one (SAME_BODY_OVERLAP) is the
+    same body seen twice, and the more confident sighting stands for it —
+    which is also what the old single chain chose when both were reachable, so
+    a one-adult lesson keeps exactly the boxes it had.
     """
-    for i, ts in enumerate(stamps):
-        if len(by_ts[ts]) == 1:
-            return i
-    return 0  # every instant contested: fall back to the first
+    kept: list[Detection] = []
+    for d in sorted(boxes, key=lambda d: d.conf, reverse=True):
+        if all(_containment(d, k) < SAME_BODY_OVERLAP for k in kept):
+            kept.append(d)
+    return kept
 
 
-def _chain(
-    stamps: list[int], by_ts: dict[int, list[Detection]], seed: int
-) -> tuple[list[Detection], int]:
-    """Grow the track outwards from `seed`. Returns (accepted, rejected count)."""
-    first = _pick_candidate(by_ts[stamps[seed]], None)
-    if first is None:  # unreachable: every instant carries at least one box
-        return [], 0
-    accepted = [first]
-    rejected = 0
+def _weld_target(segments: list[Segment], ts: int) -> Optional[Segment]:
+    """The person a box after a long gap belongs to, or None if that is unclear.
 
-    prev = first
-    for ts in stamps[seed + 1 :]:
-        chosen = _pick_candidate(by_ts[ts], prev)
-        if chosen is None:
-            rejected += 1
+    Replaces the old chain's rule that any box past FREE_GAP_MS simply continued
+    the chain wherever it reappeared. That rule is exactly right when there is
+    one adult — she stepped out and came back — and it is how two adults were
+    welded into one: the outgoing teacher's chain reached forward and claimed
+    the incoming one's first box.
+
+    So the weld happens only when it is UNAMBIGUOUS: there is a dormant person
+    to return to, and no other person was around at the end of their absence.
+    "Around" means any other substantial segment alive after, or within
+    FREE_GAP_MS before, the dormant one's last sighting — including one alive
+    right now. Noise segments do not count either way, or a three-frame
+    student misdetection during her absence would split her timeline in two.
+    When it IS ambiguous the box starts a new segment and the question of
+    whether that is her returning goes to attribution, which has evidence
+    (appearance, the timetable) that position after a five-second gap does not.
+    """
+    dormant = [
+        s for s in segments if ts - s.last_ms >= FREE_GAP_MS and s.substantial
+    ]
+    if not dormant:
+        return None
+    target = max(dormant, key=lambda s: s.last_ms)
+    for s in segments:
+        if s is target or not s.substantial:
             continue
-        accepted.append(chosen)
-        prev = chosen
+        if s.last_ms > target.last_ms - FREE_GAP_MS:
+            return None
+    return target
 
-    # Backwards from the seed. _plausible is symmetric in distance but reads the
-    # gap from its arguments' order, so the earlier detection stays first.
-    prev = first
-    before: list[Detection] = []
-    for ts in reversed(stamps[:seed]):
-        candidates = by_ts[ts]
-        reachable = [d for d in candidates if _plausible(d, prev)]
-        if not reachable:
-            rejected += 1
-            continue
-        chosen = max(reachable, key=lambda d: d.conf)
-        before.append(chosen)
-        prev = chosen
 
-    before.reverse()
-    return before + accepted, rejected
+def _track(stamps: list[int], by_ts: dict[int, list[Detection]]) -> tuple[list[Segment], int]:
+    """Follow every body through the lesson. Returns (segments, duplicates).
+
+    Per instant: drop same-body duplicates; match boxes to ACTIVE segments (a
+    sighting within FREE_GAP_MS) by nearest reachable box, one box per segment;
+    any box left over either welds onto the one person who is unambiguously
+    returning from an absence, or starts a new segment.
+
+    Nearest, not most confident. Confidence is a statement about whether this
+    is a teacher at all, which the class id has already settled; it says
+    nothing about WHICH teacher. Distance from where a body was 200 ms ago does.
+    Choosing on confidence is the identity swap this rewrite exists to end.
+    """
+    segments: list[Segment] = []
+    duplicates = 0
+    for ts in stamps:
+        boxes = _dedup_instant(by_ts[ts])
+        duplicates += len(by_ts[ts]) - len(boxes)
+
+        active = [s for s in segments if ts - s.last_ms < FREE_GAP_MS]
+        pairs = sorted(
+            (_dist(seg.last, box), si, bi)
+            for si, seg in enumerate(active)
+            for bi, box in enumerate(boxes)
+            if _plausible(seg.last, box)
+        )
+        taken_s: set[int] = set()
+        taken_b: set[int] = set()
+        for _, si, bi in pairs:
+            if si in taken_s or bi in taken_b:
+                continue
+            active[si].detections.append(boxes[bi])
+            taken_s.add(si)
+            taken_b.add(bi)
+
+        for bi, box in enumerate(boxes):
+            if bi in taken_b:
+                continue
+            target = _weld_target(segments, ts)
+            if target is not None:
+                target.detections.append(box)
+            else:
+                segments.append(Segment([box]))
+    return segments, duplicates
 
 
 def _sample_interval_ms(stamps: list[int]) -> int:
@@ -289,18 +396,17 @@ def build_teacher_track(
     duration_ms: int,
     conf_threshold: Optional[float] = None,
 ) -> TeacherTrack:
-    """Follow the teacher class through the lesson; stamps track_no in place.
+    """Follow every teacher-class body through the lesson; stamps track_no in place.
 
-    Returns the accepted detections in time order. Detections rejected as
-    implausible jumps keep their original class but are left without a
-    track_no, so nothing downstream mistakes them for her — since migration
-    0014 they are still PERSISTED, unattributed, which is what lets the
-    attribution rule change later without paying for another detector pass.
+    Returns the PRIMARY segment's detections as the track — the biggest body,
+    which on a one-adult lesson is her chain exactly — with every segment the
+    tracker built on `.segments` and the other substantial ones on `.others`,
+    numbered 2.. for attribution to choose between.
 
-    The returned track also carries how often the detector offered more than
-    one teacher box at once. On a lesson where that is sustained, "her accepted
-    detections" is the wrong description of the result and the caller must not
-    report it as one person's timeline; see TeacherTrack.multiple_adults.
+    track_no after this call: 1 on the primary's boxes, 2.. on other adults',
+    None on noise segments and same-body duplicates. All teacher-class boxes
+    are persisted whatever their number (migration 0014); None means
+    "detected as a teacher, attributed to nobody".
     """
     threshold = (
         conf_threshold if conf_threshold is not None else get_settings().teacher_conf
@@ -318,19 +424,40 @@ def build_teacher_track(
             notes=["The detector never found a teacher in this lesson."],
         )
 
-    # Group by sampled instant. The chain below treats several boxes at one
-    # timestamp as competing claims on ONE body and keeps the reachable one —
-    # which is right when the extra box is a duplicate or a false positive, and
-    # wrong when it is a second person. _co_presence measures which case this
-    # is; the chain itself does not yet act on the answer.
     by_ts: dict[int, list[Detection]] = {}
     for d in teacher_dets:
         by_ts.setdefault(d.video_ts_ms, []).append(d)
-
     stamps = sorted(by_ts)
-    accepted, rejected = _chain(stamps, by_ts, _seed_index(stamps, by_ts))
-    for d in accepted:
-        d.track_no = TEACHER_TRACK_NO
+
+    segments, duplicates = _track(stamps, by_ts)
+
+    # INTERIM attribution: the biggest segment is "the teacher". On a one-adult
+    # lesson that is her chain, unchanged. On a two-adult lesson it is a guess
+    # that Phase 0 refuses downstream (co-presence -> Not Observed) until
+    # attribution proper replaces this line. Ties broken by confidence, then
+    # by appearing first, so a lone contested instant is decided the way the
+    # old chain decided it.
+    primary = max(
+        segments,
+        key=lambda s: (len(s.detections), s.mean_conf, -s.first_ms),
+    )
+    primary.track_no = TEACHER_TRACK_NO
+    others = sorted(
+        (s for s in segments if s is not primary and s.substantial),
+        key=lambda s: s.first_ms,
+    )
+    for i, seg in enumerate(others, start=TEACHER_TRACK_NO + 1):
+        seg.track_no = i
+    for seg in segments:
+        for d in seg.detections:
+            d.track_no = seg.track_no  # None for noise: unattributed, still stored
+
+    accepted = primary.detections
+    # Instants that offered a teacher box her timeline could not reach. Same
+    # meaning the old chain gave the number; a box that went to ANOTHER person
+    # is not a rejection, it is a different person.
+    covered = {d.video_ts_ms for d in accepted}
+    rejected = sum(1 for ts in stamps if ts not in covered)
 
     # Over every instant the detector LOOKED at, not just the ones offering a
     # teacher box: the sampling interval is a property of the pass, not of how
@@ -388,16 +515,20 @@ def build_teacher_track(
         contested_instants=contested,
         max_simultaneous=max_simultaneous,
         co_presence_ms=co_presence_ms,
+        segments=segments,
+        duplicates=duplicates,
     )
     logger.info(
         "teacher track: %d detections %d-%dms of a %dms lesson "
-        "(mean conf %.2f, %d rejected jumps)",
+        "(mean conf %.2f, %d rejected jumps); %d segment(s), %d other adult(s)",
         len(accepted),
         track.first_ms,
         track.last_ms,
         span,
         mean_conf,
         rejected,
+        len(segments),
+        len(track.others),
     )
     if track.multiple_adults:
         logger.warning(

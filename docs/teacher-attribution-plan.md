@@ -1,6 +1,6 @@
 # Multi-teacher handover — diagnosis and fix plan
 
-**Status:** Phases 0 and 1 built and committed. Phases 2-5 not started.
+**Status:** Phases 0, 1 and 2 built and committed. Phases 3-5 not started.
 **Date:** diagnosed 2026-09-03; phases 0-1 landed 2026-09-03
 **Branch:** `feat/rfdetr-pipeline` (not pushed)
 
@@ -230,7 +230,7 @@ Cost: ~20% more rows on a compressed hypertable (1951 raw vs 1641 stored on the
 > regenerates hand-written `IF NOT EXISTS` columns it cannot see in its snapshot
 > (this broke 0012 against the live DB). Guard every statement.
 
-### Phase 2 — Multi-person tracking (medium, the real work)
+### Phase 2 — Multi-person tracking (medium, the real work) — BUILT
 
 `build_teacher_track` (one chain) becomes `build_teacher_tracks` (several).
 
@@ -249,6 +249,50 @@ already measured against ground truth on two annotated lessons.
 **No ByteTrack, no Re-ID encoder, no new dependency.** With 2–3 adults at 5 fps
 on a static camera, distance-gated greedy association is sufficient. If a room
 ever shows five adults, that is when a real tracker earns its place.
+
+#### What landed (2026-09-03)
+
+`build_teacher_track` now runs a greedy assignment tracker: per instant, drop
+same-body duplicates, match boxes to active segments by **nearest reachable
+box** (one box per segment), and a leftover box either welds onto the one
+person unambiguously returning from an absence or starts a new segment. Output
+is `.segments` (all), `.others` (substantial ones, numbered 2..), and an
+**interim primary** — the biggest segment — which is exactly the old chain on a
+one-adult lesson and is refused by Phase 0 on a two-adult one until Phase 3
+replaces it. Other adults reach the API as `TrackOut.role = "adult"`
+(`role_confidence: None`) with their own overlay; the player draws only
+`teacher`, so nothing new renders yet.
+
+**Verified on the real baseline, not just fixtures.** Phase 1 stored all
+10,604 teacher boxes for the 37-min lesson, so the old chain and the new
+tracker were run on the identical candidate set: **byte-identical primary**
+(10,561 detections, same span, same mean confidence, 0 boxes differ, notes
+identical) and identical `derive_result` output field for field, overlay
+included. The synthetic handover splits into two lane-pure bodies with zero
+swaps.
+
+**Two things the real data taught, both now in the code:**
+
+- **Dedup is containment, not IoU.** The first cut used IoU ≥ 0.5 and the
+  baseline broke by 3 detections: the detector often puts a half-height box on
+  her upper body beside the full-body box (same x, same top edge, IoU
+  0.41–0.45), so those became two lanes and the phantom lane then collected a
+  student across the room. The smaller box is 100% inside the larger; two
+  people side by side are not. `SAME_BODY_OVERLAP = 0.7` on
+  intersection/smaller-area.
+- **Noise floor is 3 s / 8 detections.** A student called "teacher" for some
+  frames is a segment but not a person — never numbered, never a weld
+  candidate. Longest such run on the baseline: 0.8 s.
+
+**Documented limitation, not fixed:** while she is briefly occluded, a student
+box within reach of her last position joins HER segment (only continuation on
+offer). The old chain did the same. Appearance (Phase 3) can catch it; motion
+cannot. Pinned as a test so nobody mistakes it for a regression later.
+
+**Not yet verified on the real handover.** Its 1,641 stored rows are
+pre-0014 winners-only, so the second teacher is not in the data and a
+`/rederive` cannot split it. That needs a fresh detector pass on the 6-minute
+clip — the same GPU run Phase 3 will need anyway.
 
 ### Phase 3 — Attribution (medium)
 
@@ -471,8 +515,9 @@ Phases **0 and 1** first: small, low-risk, independent of every open decision,
 and together they stop the wrong numbers reaching anyone and make everything
 after them free to iterate on. Then the baseline re-run (§6), then Phase 2.
 
-**Done: 0 and 1.** Next is the §6 baseline re-run — one GPU run on a known
-single-teacher lesson to freeze a fixture — before Phase 2 touches the tracker.
+**Done: 0, 1, the §6 baseline, and 2.** Next is Phase 3 (attribution), and
+the first thing it needs is a fresh GPU pass on the 6-minute handover clip so
+the second teacher's boxes exist in the database to attribute between.
 
 Two things learned while building them, worth knowing before Phase 2:
 

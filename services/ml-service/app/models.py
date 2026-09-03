@@ -167,11 +167,15 @@ class TrackMetaOut(BaseModel):
 
 
 class TrackOut(BaseModel):
-    # Only the teacher is tracked and only she is stored, so this is the one
-    # role a track can carry. Students are never detected, never persisted and
-    # never drawn.
+    # "teacher" is the attributed segment (track_no 1, exactly one). "adult" is
+    # any other substantial teacher-class segment the tracker followed — a
+    # second teacher during a handover, a student presenting at the front for
+    # long enough to be a body rather than a flicker — numbered 2.. and handed
+    # to attribution. Students as a class are still never detected, never
+    # persisted and never drawn; an "adult" here is a body the detector called
+    # a teacher and attribution has not (yet) called hers.
     track_no: int
-    role: Literal["teacher"]
+    role: Literal["teacher", "adult"]
     role_confidence: Optional[float]
     first_ms: int
     last_ms: int

@@ -382,6 +382,12 @@ def derive_result(
     if track.found:
         roles_map[teacher_mod.TEACHER_TRACK_NO] = ("teacher", track.confidence)
         dets_by_track[teacher_mod.TEACHER_TRACK_NO] = teacher_dets
+        # The other adults the tracker followed. events.derive only ever reads
+        # the "teacher" entry, so these change no KPI; they exist so attribution
+        # has segments to choose between and the review queue has people to show.
+        for seg in track.others:
+            roles_map[seg.track_no] = ("adult", None)
+            dets_by_track[seg.track_no] = seg.detections
 
     # `detections` (not just hers) so the action classes reach the KPI layer —
     # pointing/writing are separate classes, and only her boxes are persisted,
@@ -420,6 +426,26 @@ def derive_result(
                 },
             }
         )
+        # Same shape for each other adult, overlay included, so a reviewer can
+        # be shown who else was in the room. role_confidence is None: nothing
+        # has judged these yet, and a number here would read as a judgement.
+        for seg in track.others:
+            tracks.append(
+                {
+                    "track_no": seg.track_no,
+                    "role": "adult",
+                    "role_confidence": None,
+                    "first_ms": seg.first_ms,
+                    "last_ms": seg.last_ms,
+                    "meta": {
+                        "movement": _movement(seg.detections),
+                        "detections": len(seg.detections),
+                        "coverage": round(len(seg.detections) / max(sampled_frames, 1), 4),
+                        "mean_conf": round(seg.mean_conf, 4),
+                        "overlay": _track_overlay(seg.detections),
+                    },
+                }
+            )
 
     result = AnalysisResult.model_validate(
         {
