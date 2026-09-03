@@ -449,3 +449,90 @@ class TestRaggedLastBatch:
         frames = [np.zeros((4, 4, 3), dtype=np.uint8) for _ in range(3)]
         out = D._predict_batch(self._model(seen), frames)
         assert seen == [3] and len(out) == 3
+
+
+# --------------------------------------------------------------------------- #
+# DATA_DIR: one definition, shared by the downloader and the guard
+# --------------------------------------------------------------------------- #
+#
+# Regression for a defect that killed a paid GPU run six minutes in. The pod
+# env sets DATA_DIR=/workspace/data, the image never creates it, and the two
+# functions that read the variable disagreed about what a missing directory
+# means: the downloader called it "unconfigured" and used /tmp, the guard called
+# it "configured" and rejected /tmp. The failure surfaced as
+# "video_path must be inside DATA_DIR" — the symptom at the far end of the
+# pipeline, naming nothing about the missing mkdir at the near end.
+
+
+def test_data_dir_is_created_when_it_does_not_exist(tmp_path, monkeypatch):
+    from app import detector as D
+
+    missing = tmp_path / "workspace" / "data"
+    monkeypatch.setenv("DATA_DIR", str(missing))
+    assert not missing.exists()
+
+    base = D._data_dir()
+    assert base == missing.resolve()
+    assert missing.is_dir(), "a configured DATA_DIR must be created, not ignored"
+
+
+def test_data_dir_unset_is_none(monkeypatch):
+    from app import detector as D
+
+    monkeypatch.delenv("DATA_DIR", raising=False)
+    assert D._data_dir() is None
+
+
+def test_download_into_a_missing_data_dir_survives_the_guard(tmp_path, monkeypatch):
+    """THE REGRESSION. A fresh pod, verbatim: DATA_DIR configured, directory
+    absent, video fetched from an allowlisted object store.
+
+    Before the fix this downloaded to /tmp and then _validate_video_path
+    refused it. The two calls are asserted together because either one alone
+    passes on the broken code — it is their DISAGREEMENT that was the bug.
+    """
+    import io
+
+    from app import detector as D
+    from app.config import get_settings
+
+    missing = tmp_path / "workspace" / "data"
+    monkeypatch.setenv("DATA_DIR", str(missing))
+    monkeypatch.setenv("MEDIA_URL_ALLOWLIST", "host:1234")
+    get_settings.cache_clear()
+    payload = b"FAKE-VIDEO-BYTES" * 1000
+    monkeypatch.setattr(D._MEDIA_URL_OPENER, "open", lambda url, timeout=30: io.BytesIO(payload))
+
+    path, is_temp = D.resolve_video_source("http://host:1234/bucket/key.mp4")
+    try:
+        assert is_temp is True
+        assert Path(path).read_bytes() == payload
+        # Landed inside DATA_DIR, not /tmp...
+        assert Path(path).resolve().is_relative_to(missing.resolve())
+        # ...and therefore survives the re-validation the pipeline does next.
+        assert D._validate_video_path(path) == str(Path(path).resolve())
+    finally:
+        Path(path).unlink(missing_ok=True)
+    get_settings.cache_clear()
+
+
+def test_unusable_data_dir_fails_where_the_cause_is(tmp_path, monkeypatch):
+    """When DATA_DIR cannot be created, say so at download time rather than
+    letting it surface later as a containment rejection naming the wrong thing.
+    """
+    import io
+
+    from app import detector as D
+    from app.config import get_settings
+
+    # A file where the directory should be: mkdir cannot succeed.
+    blocked = tmp_path / "not-a-dir"
+    blocked.write_text("")
+    monkeypatch.setenv("DATA_DIR", str(blocked))
+    monkeypatch.setenv("MEDIA_URL_ALLOWLIST", "host:1234")
+    get_settings.cache_clear()
+    monkeypatch.setattr(D._MEDIA_URL_OPENER, "open", lambda url, timeout=30: io.BytesIO(b"x"))
+
+    with pytest.raises(ValueError, match="does not exist and could not be created"):
+        D.resolve_video_source("http://host:1234/bucket/key.mp4")
+    get_settings.cache_clear()

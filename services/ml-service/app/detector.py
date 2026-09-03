@@ -303,6 +303,37 @@ def _optimize(model, device: str) -> None:
         )
 
 
+def _data_dir() -> Optional[Path]:
+    """The configured DATA_DIR as a real directory, or None when unset.
+
+    ONE definition on purpose. Two independent readings of this variable is
+    exactly what broke a paid GPU run: _download_to_temp treated a
+    configured-but-ABSENT directory as "not configured" and fell back to /tmp,
+    while _validate_video_path treated the same value as configured and then
+    rejected the /tmp path the downloader had just chosen. Every fresh pod hit
+    it, because the image never creates the directory — and the error it
+    produced ("video_path must be inside DATA_DIR") named the symptom at the
+    far end rather than the missing mkdir at the near one.
+
+    It CREATES the directory rather than treating absence as "unconfigured".
+    This is the SSRF / arbitrary-read guard's boundary, and a guard that
+    switches itself off because a directory is missing is worse than no guard:
+    it still reads as protection in the code and in review.
+    """
+    raw = os.environ.get("DATA_DIR")
+    if not raw:
+        return None
+    base = Path(raw)
+    try:
+        base.mkdir(parents=True, exist_ok=True)
+    except OSError:
+        # Read-only mount or a racing container: containment is still enforced
+        # against the configured path below, so this degrades to a loud refusal
+        # rather than to a silently disabled check.
+        pass
+    return base.resolve()
+
+
 def _validate_video_path(video_path: str) -> str:
     """Constrain video_path to a real local video file before cv2 sees it.
 
@@ -320,13 +351,9 @@ def _validate_video_path(video_path: str) -> str:
     p = p.resolve()
     if not p.is_file():
         raise ValueError(f"video_path is not a regular file: {raw!r}")
-    data_dir = os.environ.get("DATA_DIR")
-    if data_dir:
-        base = Path(data_dir).resolve()
-        if not p.is_relative_to(base):
-            raise ValueError(
-                f"video_path must be inside DATA_DIR ({base}): {raw!r}"
-            )
+    base = _data_dir()
+    if base is not None and not p.is_relative_to(base):
+        raise ValueError(f"video_path must be inside DATA_DIR ({base}): {raw!r}")
     return str(p)
 
 
@@ -407,10 +434,21 @@ def _download_to_temp(url: str) -> str:
     can slip through. A stalled transfer resumes from the byte already written
     (Range request); a server that ignores the Range restarts cleanly. Placed
     inside DATA_DIR when configured so the downloaded copy also satisfies
-    _validate_video_path's DATA_DIR containment when the pipeline re-validates.
+    _validate_video_path's DATA_DIR containment when the pipeline re-validates
+    — the same _data_dir() both use, so they cannot disagree about it.
     """
-    data_dir = os.environ.get("DATA_DIR")
-    tmp_dir = data_dir if data_dir and os.path.isdir(data_dir) else tempfile.gettempdir()
+    base = _data_dir()
+    if base is not None and not base.is_dir():
+        # Only reachable when DATA_DIR could not be created. Say so HERE, where
+        # the cause is, instead of letting the download succeed into /tmp and
+        # surface minutes later as a containment rejection that names the wrong
+        # thing — which is how this cost a GPU run once.
+        raise ValueError(
+            f"DATA_DIR is set to {base} but does not exist and could not be "
+            "created; a download placed elsewhere would be refused by the path "
+            "guard"
+        )
+    tmp_dir = str(base) if base is not None else tempfile.gettempdir()
     fd, tmp = tempfile.mkstemp(prefix="mediacache_", suffix=".mp4", dir=tmp_dir)
     os.close(fd)
     written = 0
