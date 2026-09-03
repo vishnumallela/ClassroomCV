@@ -156,3 +156,27 @@ describe("toPunctuality", () => {
     expect(punctuality.arrivalMinutesLate).toBeNull();
   });
 });
+
+describe("toPunctuality with an attribution report (Phase 3)", () => {
+  const blended = (attribution: unknown) =>
+    quality({ multiple_adults_detected: true, attribution } as Partial<DataQuality>);
+
+  test("a HIGH-confidence attribution lifts the refusal", () => {
+    const p = toDetailDto(detail(blended({ confidence: "high", reason: "x" })), IST).punctuality;
+    expect(p.arrivalAt).not.toBeNull();
+    expect(p.notObservedReason).toBeNull();
+  });
+
+  test("a MEDIUM-confidence attribution keeps the numbers withheld, with ITS reason", () => {
+    const reason = "1 other adult left while this one remained; 24s is too little to grade on.";
+    const p = toDetailDto(detail(blended({ confidence: "medium", reason })), IST).punctuality;
+    expect(p.arrivalAt).toBeNull();
+    expect(p.notObservedReason).toBe(reason);
+  });
+
+  test("no attribution report at all falls back to the Phase 0 refusal", () => {
+    const p = toDetailDto(detail(blended(undefined)), IST).punctuality;
+    expect(p.arrivalAt).toBeNull();
+    expect(p.notObservedReason).toContain("adult");
+  });
+});

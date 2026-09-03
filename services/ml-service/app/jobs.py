@@ -39,7 +39,7 @@ import uuid
 from dataclasses import dataclass
 from typing import Callable, Optional
 
-from app import db, detector, events as events_mod, teacher as teacher_mod, zones as zones_mod
+from app import attribution as attribution_mod, db, detector, events as events_mod, teacher as teacher_mod, zones as zones_mod
 from app.geometry import rdp_indices
 from app.models import AnalysisResult, Detection, VideoMeta
 
@@ -98,6 +98,7 @@ def submit(
     zones: list[dict],
     idempotency_key: Optional[str] = None,
     run_tokens: Optional[list[str]] = None,
+    period_ms: Optional[tuple[int, int]] = None,
 ) -> Job:
     """Register + enqueue a job. Idempotent on `idempotency_key`.
 
@@ -139,6 +140,7 @@ def submit(
                 "sample_fps": sample_fps,
                 "zones": zones,
                 "run_tokens": list(run_tokens or []),
+                "period_ms": period_ms,
             },
         )
     )
@@ -169,6 +171,7 @@ def _worker_loop() -> None:  # pragma: no cover - exercised via smoke test
                 progress_cb=cb,
                 write_db=True,
                 run_tokens=params.get("run_tokens") or None,
+                period_ms=params.get("period_ms"),
             )
             job.result = result
             job.progress = 1.0
@@ -216,6 +219,7 @@ def run_pipeline(
     progress_cb: Optional[ProgressCb] = None,
     write_db: bool = True,
     run_tokens: Optional[list[str]] = None,
+    period_ms: Optional[tuple[int, int]] = None,
 ) -> dict:
     """detect -> derive -> (COPY to DB). Returns AnalysisResult dict.
 
@@ -255,7 +259,7 @@ def run_pipeline(
 
         cb("deriving", 0.9)
         stage_start = time.perf_counter()
-        result = derive_result(meta, detections, zones)
+        result = derive_result(meta, detections, zones, period_ms=period_ms)
         derive_s = time.perf_counter() - stage_start
         cb("deriving", 0.95)
     finally:
@@ -336,8 +340,12 @@ def derive_result(
     detections: list[Detection],
     zones: list[dict],
     actions_available: bool = True,
+    period_ms: Optional[tuple[int, int]] = None,
 ) -> dict:
     """Teacher timeline + events + analytics. Shared by analyze & rederive.
+
+    `period_ms` is the scheduled period as (start, end) offsets into the
+    video, when the caller knows it; attribution's primary rule needs it.
 
     Detection.track_no is rewritten IN PLACE (app/teacher.py stamps her
     accepted detections and clears everyone else's), because run_pipeline
@@ -375,6 +383,53 @@ def derive_result(
     # gated: she has the run of the room.
     detections = zones_mod.gate_static(detections, zones)
     track = teacher_mod.build_teacher_track(detections, meta.duration_ms)
+
+    # Phase 3: from the tracker's segments to PEOPLE, and from people to the
+    # one this lesson assesses. The tracker's interim primary (its biggest
+    # segment) is replaced by attribution's choice; when attribution cannot
+    # decide, the biggest person stands in as track 1 so the page has a
+    # timeline to show, and the low confidence keeps the numbers withheld.
+    attribution = None
+    people: list["attribution_mod.Person"] = []
+    if track.found:
+        attribution = attribution_mod.attribute(track.segments, meta.duration_ms, period_ms)
+        people = list(attribution.persons)
+        chosen = attribution.chosen or (
+            max(people, key=lambda p: len(p.detections)) if people else None
+        )
+        # Re-stamp track_no by PERSON: the chosen one is 1, the rest follow in
+        # order of first appearance; boxes belonging to nobody stay None.
+        for d in detections:
+            if d.cls == teacher_mod.CLASS_TEACHER:
+                d.track_no = None
+        ordered = ([chosen] if chosen else []) + sorted(
+            (p for p in people if p is not chosen), key=lambda p: p.first_ms
+        )
+        for n, person in enumerate(ordered, start=teacher_mod.TEACHER_TRACK_NO):
+            person.track_no = n
+            for d in person.detections:
+                d.track_no = n
+        if chosen is not None:
+            track = track.retarget(chosen.detections, sampled_frames)
+            if len(people) > 1:
+                # "Rejected as implausible jumps" was the single chain's count
+                # of instants it could not reach. With several people it means
+                # nothing: an instant the teacher is absent from is somebody
+                # else's, not a jump. Replace it with the one number that still
+                # has that meaning — teacher boxes attributed to NOBODY.
+                nobody = {
+                    d.video_ts_ms for d in detections
+                    if d.cls == teacher_mod.CLASS_TEACHER and d.track_no is None
+                } - {d.video_ts_ms for d in detections if d.track_no is not None}
+                track.rejected_jumps = len(nobody)
+                track.notes = [n for n in track.notes if "implausible jumps" not in n]
+                if nobody:
+                    track.notes.append(
+                        f"{len(nobody)} instant(s) offered a teacher box that was "
+                        "attributed to nobody (too brief to be a person, or a "
+                        "duplicate)."
+                    )
+        people = ordered
     teacher_dets = track.detections
 
     roles_map: dict[int, tuple[str, Optional[float]]] = {}
@@ -382,12 +437,12 @@ def derive_result(
     if track.found:
         roles_map[teacher_mod.TEACHER_TRACK_NO] = ("teacher", track.confidence)
         dets_by_track[teacher_mod.TEACHER_TRACK_NO] = teacher_dets
-        # The other adults the tracker followed. events.derive only ever reads
-        # the "teacher" entry, so these change no KPI; they exist so attribution
-        # has segments to choose between and the review queue has people to show.
-        for seg in track.others:
-            roles_map[seg.track_no] = ("adult", None)
-            dets_by_track[seg.track_no] = seg.detections
+        # The other adults. events.derive only ever reads the "teacher" entry,
+        # so these change no KPI; they are the candidates attribution chose
+        # between and the people a review queue would show.
+        for person in people[1:]:
+            roles_map[person.track_no] = ("adult", None)
+            dets_by_track[person.track_no] = person.detections
 
     # `detections` (not just hers) so the action classes reach the KPI layer —
     # pointing/writing are separate classes, and only her boxes are persisted,
@@ -406,7 +461,10 @@ def derive_result(
         zones,
         all_detections=detections if actions_available else None,
     )
-    analytics["data_quality"] = quality_report(track, sampled_frames, meta.duration_ms)
+    analytics["data_quality"] = quality_report(
+        track, sampled_frames, meta.duration_ms,
+        attribution=attribution.as_report() if attribution else None,
+    )
 
     tracks = []
     if track.found:
@@ -429,20 +487,21 @@ def derive_result(
         # Same shape for each other adult, overlay included, so a reviewer can
         # be shown who else was in the room. role_confidence is None: nothing
         # has judged these yet, and a number here would read as a judgement.
-        for seg in track.others:
+        for person in people[1:]:
+            pdets = person.detections
             tracks.append(
                 {
-                    "track_no": seg.track_no,
+                    "track_no": person.track_no,
                     "role": "adult",
                     "role_confidence": None,
-                    "first_ms": seg.first_ms,
-                    "last_ms": seg.last_ms,
+                    "first_ms": person.first_ms,
+                    "last_ms": person.last_ms,
                     "meta": {
-                        "movement": _movement(seg.detections),
-                        "detections": len(seg.detections),
-                        "coverage": round(len(seg.detections) / max(sampled_frames, 1), 4),
-                        "mean_conf": round(seg.mean_conf, 4),
-                        "overlay": _track_overlay(seg.detections),
+                        "movement": _movement(pdets),
+                        "detections": len(pdets),
+                        "coverage": round(len(pdets) / max(sampled_frames, 1), 4),
+                        "mean_conf": round(sum(d.conf for d in pdets) / max(len(pdets), 1), 4),
+                        "overlay": _track_overlay(pdets),
                     },
                 }
             )
@@ -465,7 +524,10 @@ def derive_result(
 
 
 def quality_report(
-    track: "teacher_mod.TeacherTrack", sampled_frames: int, duration_ms: int
+    track: "teacher_mod.TeacherTrack",
+    sampled_frames: int,
+    duration_ms: int,
+    attribution: Optional[dict] = None,
 ) -> dict:
     """The trust report, with the teacher track's own notes folded in."""
     from app import quality
@@ -476,6 +538,7 @@ def quality_report(
         duration_ms,
         teacher_confidence=track.confidence,
         mean_conf=track.mean_conf if track.found else None,
+        attribution=attribution,
         multiple_adults=track.multiple_adults,
         co_presence_ms=track.co_presence_ms,
         max_simultaneous=track.max_simultaneous,

@@ -167,3 +167,24 @@ export function minutesAgainstSchedule(
   const actual = offsetToInstant(clock.recordingStartedAt, offsetMs);
   return Math.round(((actual.getTime() - against.getTime()) / 60_000) * 10) / 10;
 }
+
+/**
+ * The scheduled period as offsets into the recording, for the ML service.
+ *
+ * Attribution's primary rule is about who was in the room during the PERIOD,
+ * and detections are offsets from the first frame — so the period has to be
+ * expressed the same way. Null when either the anchor or the timetable is
+ * missing; the service then judges the whole recording and says so.
+ */
+export function periodOffsets(
+  video: Parameters<typeof lessonClock>[0],
+  tz: string,
+): { startMs: number; endMs: number } | null {
+  const clock = lessonClock(video, tz);
+  if (!clock?.scheduledStartAt || !clock.scheduledEndAt) return null;
+  const base = clock.recordingStartedAt.getTime();
+  return {
+    startMs: clock.scheduledStartAt.getTime() - base,
+    endMs: clock.scheduledEndAt.getTime() - base,
+  };
+}

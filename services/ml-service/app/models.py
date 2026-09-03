@@ -61,6 +61,11 @@ class Detection:
     bbox: dict  # {x, y, w, h} normalized 0-1, top-left based
     conf: float
     track_no: Optional[int] = None
+    # Appearance descriptor (app/appearance.py), computed at detection time for
+    # teacher-class boxes and persisted in detection_events.meta so that
+    # attribution can be re-derived from stored rows. None when the box was
+    # too small to read, or the row predates descriptors.
+    app: Optional[list[float]] = None
 
 
 @dataclass
@@ -107,11 +112,20 @@ class AnalyzeRequest(BaseModel):
     # superseded by a newer reanalyze cannot clobber the current run's rows.
     # Empty list = fence disabled (tests / direct API use).
     run_tokens: list[str] = Field(default_factory=list)
+    # The scheduled period as offsets into the video, when the lesson's
+    # timetable and recording anchor are known. Attribution's primary rule
+    # (docs/teacher-attribution-plan.md, Phase 3) is about who was in the room
+    # during the PERIOD, not during the recording; without these it falls back
+    # to the whole recording and caps its confidence at medium.
+    period_start_ms: Optional[int] = None
+    period_end_ms: Optional[int] = None
 
 
 class RederiveRequest(BaseModel):
     video_id: str
     zones: list[ZoneIn] = Field(default_factory=list)
+    period_start_ms: Optional[int] = None
+    period_end_ms: Optional[int] = None
 
 
 class DetectBoardRequest(BaseModel):
@@ -231,6 +245,32 @@ class QualityTiers(BaseModel):
     attribution: Literal["high", "medium", "low"] = "high"
 
 
+class AttributionCandidateOut(BaseModel):
+    track_no: int
+    first_ms: int
+    last_ms: int
+    present_ms: int
+    in_period_ms: int
+    handed_over: bool
+    segments: int
+
+
+class AttributionOut(BaseModel):
+    """Which tracked adult the lesson assesses, how sure, and why (Phase 3).
+
+    `confidence` is the tier the dashboard withholds on: anything but "high"
+    keeps the punctuality numbers as Not Observed. `reason` is written to be
+    read by the person looking at the card, not by code.
+    """
+
+    confidence: Literal["high", "medium", "low"]
+    reason: str
+    chosen_track_no: Optional[int]
+    period_known: bool
+    splits: int
+    candidates: list[AttributionCandidateOut]
+
+
 class DataQualityOut(BaseModel):
     """Additive per-run trust report (app/quality.py). Annotates, never alters,
     the derived numbers: how much of the lesson the teacher was actually found
@@ -259,6 +299,9 @@ class DataQualityOut(BaseModel):
     multiple_adults_detected: bool = False
     max_simultaneous_adults: int = 1
     co_presence_ms: int = 0
+    # Optional so rows and tests predating Phase 3 still validate. Absent means
+    # "nothing decided" — the same rule as every other optional field here.
+    attribution: Optional[AttributionOut] = None
     confidence: QualityTiers
     notes: list[str]
 

@@ -15,6 +15,7 @@ from __future__ import annotations
 
 import logging
 import os
+from typing import Optional
 
 from fastapi import FastAPI, HTTPException
 
@@ -73,8 +74,16 @@ def analyze(req: AnalyzeRequest) -> AnalyzeAccepted:
         zones=[z.model_dump() for z in req.zones],
         idempotency_key=req.idempotency_key,
         run_tokens=req.run_tokens,
+        period_ms=_period(req.period_start_ms, req.period_end_ms),
     )
     return AnalyzeAccepted(job_id=job.id)
+
+
+def _period(start: Optional[int], end: Optional[int]) -> Optional[tuple[int, int]]:
+    """Both offsets or nothing: half a period is not a period."""
+    if start is None or end is None or end <= start:
+        return None
+    return (int(start), int(end))
 
 
 @app.get("/jobs/{job_id}", response_model=JobStatusOut)
@@ -166,7 +175,11 @@ async def rederive(req: RederiveRequest) -> dict:
     # null rather than being recomputed as zero. The API carries the previously
     # measured values forward.
     result = jobs.derive_result(
-        meta, detections, [z.model_dump() for z in req.zones], actions_available=False
+        meta,
+        detections,
+        [z.model_dump() for z in req.zones],
+        actions_available=False,
+        period_ms=_period(req.period_start_ms, req.period_end_ms),
     )
     if detections:
         # Persist the refreshed teacher assignment so detection_events matches

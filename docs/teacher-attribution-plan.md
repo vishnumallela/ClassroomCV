@@ -1,6 +1,6 @@
 # Multi-teacher handover — diagnosis and fix plan
 
-**Status:** Phases 0, 1 and 2 built and committed. Phases 3-5 not started.
+**Status:** Phases 0-3 built and committed. Phases 4-5 not started.
 **Date:** diagnosed 2026-09-03; phases 0-1 landed 2026-09-03
 **Branch:** `feat/rfdetr-pipeline` (not pushed)
 
@@ -338,7 +338,7 @@ has to catch the one remaining swap. The interim primary (biggest segment) is
 cream for 65–307 s and black after — wrong either way, and Phase 0 keeps it off
 the dashboard.
 
-### Phase 3 — Attribution (medium)
+### Phase 3 — Attribution (medium) — BUILT
 
 Pick the lesson's teacher from the segments, in this order:
 
@@ -354,6 +354,71 @@ Pick the lesson's teacher from the segments, in this order:
 
 Output is a choice **plus a confidence and the reason**, and `undetermined` is a
 permitted outcome that falls through to Phase 0's behaviour.
+
+#### What landed (2026-09-03) — `app/appearance.py`, `app/attribution.py`
+
+The order above survived contact with the data, with one correction: rule 1 is
+not "overlap with the period" (on any recording that starts before the bell the
+outgoing teacher has MORE overlap) but the observable fact behind it — **the
+teacher whose period it is stays to the end, and the one who hands over leaves
+while the other remains.** Presence within the period breaks ties among those
+who stayed.
+
+**Appearance** is a 16-float HSV histogram of the central 60% × 15–75% band of
+each teacher box, computed at detection time on the frame the model just saw
+and persisted in `detection_events.meta.app` (jsonb, additive; no migration),
+so attribution re-derives from rows alone. Colour, not an embedding: no
+dependency, and it is the *linker*, not the decider. Trimming the box sides
+mattered — the students standing beside her wear green and yellow.
+
+Three stages, each measured on both real lessons before any threshold was set:
+
+1. **Split at a change of person.** Mean descriptor of the 30 boxes before an
+   instant vs the 30 after; cut at ≥ 0.42. The handover's swap peaks at 0.48
+   and 0.52; the 37-minute baseline never exceeds 0.355 (0.44 at window 20 —
+   one occlusion event at 1034 s, which is why the window is 30).
+2. **Link pieces into people** — each piece, in start order, joins the ended
+   piece it most plausibly continues: appearance distance plus a position term
+   that is decisive for gaps under 5 s and neutral past that. **Neither signal
+   alone links the real clip.** A student in green stood in front of the black
+   teacher for 40 s and her descriptor went 0.33 from her own other pieces
+   (cross-person minimum is 0.21); continuity carries that seam (0.4 s, 0.046
+   apart). Across the swap, position says the wrong thing (black stood still)
+   and appearance says the right one (0.13 vs 0.34). A piece may speak for its
+   appearance only with ≥ 8 clean boxes making ≥ 50% of it — the seated
+   teacher's head-only lane manufactured a descriptor from 28 boxes and landed
+   0.23 from the doorway piece, making her "arrival" t = 0. Duplicate lanes
+   (a head box escaping the tracker's containment dedup) merge only when
+   nested in the same **column**; "same place" folded the black teacher into
+   the cream one for the 15 s they stood side by side.
+3. **Attribute.** Handed over = final sighting followed by ≥ 10 s of another
+   adult with you absent. High confidence needs ≥ 60 s of the remaining adult
+   alone; the 6-minute trim leaves 24 s → **medium**, which the dashboard still
+   withholds. The full recording leaves 39 minutes.
+
+**Results.** Baseline: one person, 10,561 boxes, **identical KPIs, tiers and
+notes** to the stored row; zero splits. Handover, re-derived through the app:
+the card that read "Teacher 100%, 1 in · 0 out" now has `teacher 246.9 →
+359.9 s` (the black teacher, from the doorway at 09:54:05), cream as an
+"adult" 7.8 → 335.8 s, attribution **medium**, R1–R6 withheld with the reason
+on the card: *"1 other adult left while this one remained; the adult who stayed
+is attributed. She then held the room alone for 24 s — too little to grade her
+on; the full recording would settle it."*
+
+**Known limits, all on the non-chosen person:** the seated teacher's head-only
+lane (0–33 s) survives as a phantom third adult, because the boy standing
+beside her desk was detected as "teacher" for 25 s at x = 0.61 and the tracker
+welded his lane onto her torso when she stood; her own arrival therefore reads
+7.8 s instead of 0. Nothing in the attributed timeline is affected.
+
+**The timetable still has to be typed in** for the handover lesson
+(`period_known: false` today): recording start 09:49:58 from the burned-in
+clock, lesson 2026-08-17, period 3 09:50–10:35 if that is the bell. With it the
+API passes `period_start_ms/period_end_ms` on both `/analyze` and `/rederive`.
+
+**Rows analysed before Phase 3 have no descriptors**; attribution then links by
+continuity alone and its reason says so. The two lessons here were backfilled
+locally from the videos. New GPU runs compute descriptors natively.
 
 ### Phase 4 — Review queue (small)
 
@@ -559,10 +624,11 @@ Phases **0 and 1** first: small, low-risk, independent of every open decision,
 and together they stop the wrong numbers reaching anyone and make everything
 after them free to iterate on. Then the baseline re-run (§6), then Phase 2.
 
-**Done: 0, 1, the §6 baseline, 2, and the real-handover pass.** Next is
-Phase 3: link the fragments, catch the occluded-crossing swap by appearance,
-then attribute by timetable overlap. The handover's timetable (recording start
-09:49:58 from the burned-in clock, period 09:50–10:35) still needs typing in.
+**Done: 0, 1, the §6 baseline, 2, the real-handover pass, and 3.** Next: type
+the handover's timetable in, then the honest end-to-end — the FULL 45-minute
+recording on the GPU, where the handover leaves 39 minutes of the period-3
+teacher alone and attribution should reach **high**, and R1 should finally
+read 09:54:05 rather than 09:49:58. Then Phase 5's loose ends.
 
 Two things learned while building them, worth knowing before Phase 2:
 

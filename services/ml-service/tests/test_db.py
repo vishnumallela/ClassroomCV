@@ -316,3 +316,30 @@ async def test_fetch_reads_an_unattributed_row_back_as_none(monkeypatch):
 
     assert [d.track_no for d in out] == [1, None]
     assert all(d.cls == CLASS_TEACHER for d in out)
+
+
+async def test_appearance_descriptor_round_trips_through_meta(monkeypatch):
+    """Phase 3 stores the descriptor beside the class id in meta (jsonb,
+    additive) so attribution can be re-derived from rows alone."""
+    import json
+
+    captured: list = []
+
+    class _Conn(_FakeConn):
+        async def copy_records_to_table(self, table, records=None, columns=None):
+            captured.extend(records)
+            await super().copy_records_to_table(table, records, columns)
+
+    conn = _Conn()
+
+    async def fake_connect(dsn=None):
+        return conn
+
+    monkeypatch.setattr(db, "_connect", fake_connect)
+    with_app = _det(0)
+    with_app.app = [0.1] * 16
+    without = _det(200)
+    await db.replace_detections("vid", [with_app, without])
+    metas = [json.loads(r[5]) for r in captured]
+    assert metas[0]["app"] == [0.1] * 16 and metas[0]["cls"] == CLASS_TEACHER
+    assert "app" not in metas[1], "no descriptor -> no key, not a null"

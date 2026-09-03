@@ -536,3 +536,34 @@ def test_unusable_data_dir_fails_where_the_cause_is(tmp_path, monkeypatch):
     with pytest.raises(ValueError, match="does not exist and could not be created"):
         D.resolve_video_source("http://host:1234/bucket/key.mp4")
     get_settings.cache_clear()
+
+
+# --------------------------------------------------------------------------- #
+# appearance descriptors are computed at detection time, for teacher boxes
+# --------------------------------------------------------------------------- #
+
+
+def test_to_detections_describes_teacher_boxes_on_their_frame():
+    """The descriptor is attached HERE because this is the only moment the
+    pixels are in hand; /rederive replays stored rows and never opens the video."""
+    import numpy as np
+
+    from app import detector as D
+    from app.models import CLASS_SCREEN, CLASS_TEACHER
+
+    class Det:
+        class_id = np.array([CLASS_TEACHER, CLASS_SCREEN, CLASS_TEACHER])
+        confidence = np.array([0.9, 0.9, 0.2])  # the last is below DESCRIBE_MIN_CONF
+        xyxy = np.array([[10, 10, 60, 150], [100, 100, 300, 200], [200, 20, 240, 120]], dtype=float)
+
+        def __len__(self):
+            return 3
+
+    frame = np.full((300, 400, 3), 128, np.uint8)
+    out = D._to_detections(Det(), 1000, 400, 300, frame=frame)
+    assert [d.cls for d in out] == [CLASS_TEACHER, CLASS_SCREEN, CLASS_TEACHER]
+    assert out[0].app is not None and len(out[0].app) == 16
+    assert out[1].app is None, "only teacher boxes are described"
+    assert out[2].app is None, "a box below DESCRIBE_MIN_CONF is never stored, so never described"
+    # without a frame (older call sites), nothing is described and nothing breaks
+    assert all(d.app is None for d in D._to_detections(Det(), 1000, 400, 300))

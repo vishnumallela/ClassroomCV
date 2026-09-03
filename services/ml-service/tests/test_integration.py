@@ -282,8 +282,8 @@ def test_handover_is_flagged_and_survives_the_response_model(monkeypatch):
     assert dq.multiple_adults_detected is True
     assert dq.max_simultaneous_adults == 2
     assert dq.co_presence_ms >= 30_000
-    assert dq.confidence.attribution == "low"
-    assert dq.confidence.overall == "low"
+    assert dq.confidence.attribution == "medium"  # Phase 3 decided, on a 10 s tail: still withheld
+    assert dq.confidence.overall == "medium"
     assert any("adults" in n.lower() for n in dq.notes)
 
 
@@ -354,3 +354,42 @@ def test_every_teacher_box_reaches_the_writer_with_its_segment(monkeypatch):
     x1 = sum(d.bbox["x"] for d in by_no[1]) / len(by_no[1])
     x2 = sum(d.bbox["x"] for d in by_no[2]) / len(by_no[2])
     assert abs(x1 - x2) > 0.05
+
+
+def test_attribution_picks_the_adult_who_stayed_and_reports_why(monkeypatch):
+    """Phase 3 through run_pipeline: the handover fixture, with the period.
+
+    The outgoing adult (0-50 s) has MORE presence; the incoming one (15-60 s)
+    is the one who remains. Attribution must pick the second, say so in words,
+    and — because only ten seconds of her alone follow the handover — call it
+    medium, which keeps the punctuality numbers withheld downstream. No
+    descriptors in this fixture: the two lanes never cross, so continuity
+    alone separates them, and the test pins that the rest of the machinery
+    (people -> track 1 -> data_quality.attribution -> the Pydantic gate) holds.
+    """
+    meta, dets = _handover()
+    monkeypatch.setattr(detector, "detect_video", lambda *a, **k: (meta, dets))
+    result = jobs.run_pipeline(
+        VIDEO_ID, "/fake.mp4", 5.0, [], write_db=False, period_ms=(0, 60_000)
+    )
+    parsed = AnalysisResult.model_validate(result)
+
+    teacher = parsed.tracks[0]
+    assert teacher.role == "teacher" and teacher.track_no == 1
+    assert 14_000 <= teacher.first_ms <= 16_000, "the adult who ARRIVED is the teacher"
+    assert teacher.last_ms >= 59_000
+    assert [t.role for t in parsed.tracks[1:]] == ["adult"]
+    assert parsed.tracks[1].first_ms == 0
+
+    dq = parsed.analytics.data_quality
+    assert dq is not None and dq.attribution is not None
+    assert dq.attribution.confidence == "medium"
+    assert dq.attribution.chosen_track_no == 1
+    assert dq.attribution.period_known is True
+    assert "left while this one remained" in dq.attribution.reason
+    assert dq.confidence.attribution == "medium"
+    assert dq.multiple_adults_detected is True
+    # The teacher's own timeline, not a blend: presence starts when SHE arrived.
+    assert 14_000 <= parsed.analytics.presence_intervals[0][0] <= 16_000
+    # And the outgoing adult's boxes reach the writer numbered 2, not dropped.
+    assert {d.track_no for d in dets if d.cls == CLASS_TEACHER} >= {1, 2}

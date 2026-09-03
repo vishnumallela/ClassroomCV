@@ -13,7 +13,7 @@ import {
 } from "@api/db/queries";
 import { mkdir } from "node:fs/promises";
 import { generateThumbnail, probeVideo } from "@api/lib/media";
-import { localDateInSchoolTz, schoolTimezone } from "@api/lib/school-time";
+import { localDateInSchoolTz, periodOffsets, schoolTimezone } from "@api/lib/school-time";
 import { logger } from "@api/lib/logger";
 import { mlGetJob, mlGetJobResult, mlHealth, mlStartAnalysis } from "@api/lib/ml";
 import { isS3, presignGet, putLocalFile } from "@api/lib/storage";
@@ -158,6 +158,7 @@ async function startAnalysisStep(
     videoPath: mediaSource(video.filePath),
     sampleFps: 5,
     zones,
+    period: periodOffsets(video, await schoolTimezone()),
     idempotencyKey: `${videoId}:${attemptId ?? "initial"}`,
     runTokens,
   });

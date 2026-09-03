@@ -52,7 +52,13 @@ function toPunctuality(v: Detail["video"], analytics: Analytics, timezone: strin
   // the check existed, and absent means "never looked", not "one adult". Those
   // rows keep reporting their numbers rather than being retroactively withheld
   // on evidence nobody gathered.
-  const blended = analytics?.dataQuality?.multiple_adults_detected === true;
+  // Phase 3 lifts the refusal only on a HIGH-confidence attribution. Medium
+  // means the answer is probably right but thinly evidenced (the 6-minute
+  // handover trim leaves 24 s to judge on), and a number that is probably
+  // right is still the thing this card exists not to show.
+  const dq = analytics?.dataQuality;
+  const blended =
+    dq?.multiple_adults_detected === true && dq?.attribution?.confidence !== "high";
 
   if (!clock || !first || !last || blended) {
     return {
@@ -63,7 +69,7 @@ function toPunctuality(v: Detail["video"], analytics: Analytics, timezone: strin
       arrivalMinutesLate: null,
       departureMinutesLate: null,
       presenceShareOfPeriod: null,
-      notObservedReason: blended ? MULTIPLE_ADULTS_REASON : null,
+      notObservedReason: blended ? (dq?.attribution?.reason ?? MULTIPLE_ADULTS_REASON) : null,
     };
   }
 

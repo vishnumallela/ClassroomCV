@@ -122,7 +122,7 @@ async def replace_detections(
                 d.track_no,
                 json.dumps(d.bbox),
                 float(d.conf),
-                json.dumps({"cls": int(d.cls)}),
+                json.dumps({"cls": int(d.cls), "app": d.app} if d.app is not None else {"cls": int(d.cls)}),
             )
             for d in detections
             if d.cls == CLASS_TEACHER and d.conf >= threshold
@@ -198,6 +198,9 @@ async def fetch_detections(
                 bbox=bbox,
                 conf=float(r["confidence"]),
                 track_no=None if track_no is None else int(track_no),
+                # Rows written before descriptors existed carry none; attribution then
+                # links by continuity alone and its confidence says so.
+                app=meta.get("app"),
             )
         )
     return detections

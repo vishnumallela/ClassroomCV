@@ -35,7 +35,9 @@ export function KpiCards({
    * anyone's door crossings. `=== true` because absence of the field means the
    * lesson predates the check, not that one adult was measured.
    */
-  const blended = analytics.dataQuality?.multiple_adults_detected === true;
+  const blended =
+    analytics.dataQuality?.multiple_adults_detected === true &&
+    analytics.dataQuality?.attribution?.confidence !== "high";
 
   /**
    * A duration KPI that can be genuinely unknown.

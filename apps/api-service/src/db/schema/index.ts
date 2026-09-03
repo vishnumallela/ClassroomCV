@@ -40,6 +40,14 @@ export type DataQuality = {
   multiple_adults_detected?: boolean;
   max_simultaneous_adults?: number;
   co_presence_ms?: number;
+  attribution?: {
+    confidence: QualityTier;
+    reason: string;
+    chosen_track_no: number | null;
+    period_known: boolean;
+    splits: number;
+    candidates: unknown[];
+  } | null;
   confidence: {
     overall: QualityTier;
     coverage: QualityTier;

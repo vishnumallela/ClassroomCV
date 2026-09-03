@@ -46,6 +46,7 @@ from typing import Callable, Iterator, Optional
 import cv2
 import numpy as np
 
+from app import appearance
 from app.config import get_settings
 from app.models import (
     CLASS_DOOR,
@@ -673,8 +674,22 @@ def _predict_batch(model, frames: list[np.ndarray]) -> list:
     return out[:n]
 
 
-def _to_detections(det, ts_ms: int, width: int, height: int) -> list[Detection]:
-    """One frame's supervision Detections -> our normalized Detection rows."""
+# Teacher-class boxes below this get no appearance descriptor: they are never
+# stored (db.py keeps >= teacher_conf), so describing them is wasted work.
+DESCRIBE_MIN_CONF = 0.3
+
+
+def _to_detections(
+    det, ts_ms: int, width: int, height: int, frame: Optional[np.ndarray] = None
+) -> list[Detection]:
+    """One frame's supervision Detections -> our normalized Detection rows.
+
+    With `frame`, each teacher-class box also gets its appearance descriptor
+    (app/appearance.py). Computed HERE, on the frame the model just saw, because
+    this is the only moment the pixels are in hand: /rederive replays stored
+    rows and never opens the video, so attribution can only re-run from what
+    was persisted alongside the box.
+    """
     out: list[Detection] = []
     if det is None or len(det) == 0:
         return out
@@ -683,13 +698,12 @@ def _to_detections(det, ts_ms: int, width: int, height: int) -> list[Detection]:
         if cls not in CLASS_NAMES:
             continue  # a class this build does not know about
         x0, y0, x1, y1 = (float(v) for v in box)
+        bbox = _clip_bbox(x0 / width, y0 / height, x1 / width, y1 / height)
+        app = None
+        if frame is not None and cls == CLASS_TEACHER and float(conf) >= DESCRIBE_MIN_CONF:
+            app = appearance.describe(frame, bbox)
         out.append(
-            Detection(
-                video_ts_ms=ts_ms,
-                cls=cls,
-                bbox=_clip_bbox(x0 / width, y0 / height, x1 / width, y1 / height),
-                conf=float(conf),
-            )
+            Detection(video_ts_ms=ts_ms, cls=cls, bbox=bbox, conf=float(conf), app=app)
         )
     return out
 
@@ -726,8 +740,8 @@ def detect_video(
         if not pending:
             return
         results = _predict_batch(model, [f for _ts, f in pending])
-        for (ts, _f), det in zip(pending, results):
-            detections.extend(_to_detections(det, ts, info.width, info.height))
+        for (ts, f), det in zip(pending, results):
+            detections.extend(_to_detections(det, ts, info.width, info.height, frame=f))
         processed += len(pending)
         pending.clear()
         if progress_cb and info.frames_to_process:

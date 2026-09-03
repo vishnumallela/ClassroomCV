@@ -98,6 +98,7 @@ def assess(
     multiple_adults: bool = False,
     co_presence_ms: int = 0,
     max_simultaneous: int = 1,
+    attribution: Optional[dict] = None,
 ) -> dict:
     """Additive data-quality report for one analysed video.
 
@@ -169,14 +170,19 @@ def assess(
             "is tentative."
         )
 
-    # --- attribution -------------------------------------------------------- #
-    # What counts as "more than one adult" is decided by the module that
-    # measured it (app/teacher.py owns the threshold and the evidence behind
-    # it); this one only reports the verdict. Taking the boolean rather than
-    # re-deriving it from co_presence_ms keeps ONE definition instead of two
-    # that drift apart the first time the threshold moves.
-    if multiple_adults:
-        attribution_tier: Tier = "low"
+    # --- attribution: is this timeline one person, and the right one? -------- #
+    # With Phase 3's report the tier IS its confidence: high means one adult, or
+    # several with a decided answer; medium means decided on thin evidence (the
+    # dashboard still withholds); low means undetermined. Without a report (rows
+    # predating Phase 3) the Phase 0 rule stands: two adults and no answer is
+    # low. multiple_adults itself is still app/teacher.py's verdict, not
+    # re-derived here, so there is one definition of it.
+    if attribution is not None:
+        attribution_tier: Tier = attribution["confidence"]
+        if multiple_adults or attribution_tier != "high":
+            notes.append(attribution["reason"])
+    elif multiple_adults:
+        attribution_tier = "low"
         notes.append(
             f"Two or more adults were in the room together for about "
             f"{co_presence_ms / 1000:.0f}s. Nothing yet decides which of them "
@@ -206,6 +212,7 @@ def assess(
         "multiple_adults_detected": multiple_adults,
         "max_simultaneous_adults": max_simultaneous,
         "co_presence_ms": co_presence_ms,
+        "attribution": attribution,
         "confidence": {
             "overall": overall,
             "coverage": coverage_tier,

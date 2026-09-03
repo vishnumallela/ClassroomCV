@@ -58,6 +58,24 @@ export interface DataQuality {
     teacher: QualityTier;
     attribution?: QualityTier;
   };
+  // Phase 3: which adult the lesson assesses, how sure, and why. Absent on
+  // rows analysed before attribution existed.
+  attribution?: {
+    confidence: QualityTier;
+    reason: string;
+    chosen_track_no: number | null;
+    period_known: boolean;
+    splits: number;
+    candidates: {
+      track_no: number;
+      first_ms: number;
+      last_ms: number;
+      present_ms: number;
+      in_period_ms: number;
+      handed_over: boolean;
+      segments: number;
+    }[];
+  } | null;
   notes: string[];
 }
 
@@ -172,6 +190,8 @@ export interface StartAnalysisInput {
   videoPath: string;
   sampleFps?: number;
   zones: MlZone[];
+  /** Scheduled period as video offsets (school-time.ts periodOffsets), when known. */
+  period?: { startMs: number; endMs: number } | null;
   idempotencyKey?: string;
   runTokens?: string[];
 }
@@ -184,6 +204,8 @@ export async function mlStartAnalysis(input: StartAnalysisInput): Promise<string
     video_path: input.videoPath,
     sample_fps: input.sampleFps ?? env.API_SERVICE__SAMPLE_FPS,
     zones: input.zones,
+    period_start_ms: input.period?.startMs ?? null,
+    period_end_ms: input.period?.endMs ?? null,
     idempotency_key: input.idempotencyKey,
     run_tokens: input.runTokens,
   });
@@ -207,6 +229,15 @@ export function mlDetectDoor(videoId: string, videoPath: string): Promise<BoardD
   return post("/detect-door", { video_id: videoId, video_path: videoPath });
 }
 
-export function mlRederive(videoId: string, zones: MlZone[]): Promise<AnalysisResult> {
-  return post("/rederive", { video_id: videoId, zones });
+export function mlRederive(
+  videoId: string,
+  zones: MlZone[],
+  period?: { startMs: number; endMs: number } | null,
+): Promise<AnalysisResult> {
+  return post("/rederive", {
+    video_id: videoId,
+    zones,
+    period_start_ms: period?.startMs ?? null,
+    period_end_ms: period?.endMs ?? null,
+  });
 }

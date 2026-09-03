@@ -209,6 +209,26 @@ class TeacherTrack:
     def found(self) -> bool:
         return bool(self.detections)
 
+    def retarget(self, detections: list[Detection], sampled_frames: int) -> "TeacherTrack":
+        """The same lesson-level signals (co-presence, notes, duplicates) with
+        the timeline replaced by `detections` — attribution's chosen person,
+        which may be several segments. Coverage and confidence are recomputed
+        over the new timeline; rejected_jumps keeps the tracker's count."""
+        dets = sorted(detections, key=lambda d: d.video_ts_ms)
+        mean_conf = sum(d.conf for d in dets) / max(len(dets), 1)
+        return TeacherTrack(
+            detections=dets,
+            coverage=round(min(1.0, len(dets) / max(sampled_frames, 1)), 4),
+            mean_conf=round(mean_conf, 4),
+            rejected_jumps=self.rejected_jumps,
+            notes=list(self.notes),
+            contested_instants=self.contested_instants,
+            max_simultaneous=self.max_simultaneous,
+            co_presence_ms=self.co_presence_ms,
+            segments=self.segments,
+            duplicates=self.duplicates,
+        )
+
     @property
     def others(self) -> list[Segment]:
         """Substantial segments that are not the primary: the other adults the
@@ -543,15 +563,10 @@ def build_teacher_track(
 
     notes: list[str] = []
     if co_presence_ms >= CO_PRESENCE_MIN_MS:
-        # First in the list on purpose. It outranks every other note because it
-        # says the timeline below may not describe one person, which changes how
-        # to read all of them.
         notes.append(
             f"Two or more adults were in the room together for about "
-            f"{co_presence_ms / 1000:.0f}s (up to {max_simultaneous} at once). "
-            "This timeline follows whichever of them scored highest frame by "
-            "frame, so it may blend them; nothing yet decides which adult the "
-            "lesson assesses."
+            f"{co_presence_ms / 1000:.0f}s (up to {max_simultaneous} at once); "
+            "each was tracked as a separate person."
         )
     if rejected:
         notes.append(
