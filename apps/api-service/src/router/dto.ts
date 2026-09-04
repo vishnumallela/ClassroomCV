@@ -141,6 +141,10 @@ const AT_BELL_TOLERANCE_MS = 10_000;
  */
 type PreviousTeacherState = "observed" | "not_observed" | "withheld" | "none";
 
+function numberOrNull(value: unknown): number | null {
+  return typeof value === "number" && Number.isFinite(value) ? value : null;
+}
+
 function noPreviousTeacher(state: Exclude<PreviousTeacherState, "observed">, reason: string) {
   return {
     state,
@@ -154,6 +158,9 @@ function noPreviousTeacher(state: Exclude<PreviousTeacherState, "observed">, rea
     previousPeriodEnd: null as string | null,
     departureMinutesAfterHerBell: null as number | null,
     breakMinutesBeforeThisPeriod: null as number | null,
+    trackNo: null as number | null,
+    presenceMsInThisFile: null as number | null,
+    boardMsInThisFile: null as number | null,
   };
 }
 
@@ -162,6 +169,7 @@ function toPreviousTeacher(
   analytics: Analytics,
   timezone: string,
   schedule: ResolvedSchedule,
+  tracks: Detail["tracks"] = [],
 ) {
   const clock = lessonClock(clockInput(v, schedule), timezone);
   if (!clock)
@@ -205,6 +213,7 @@ function toPreviousTeacher(
   // left_ms existed fall back to the last sighting.
   const leftMs = (c: AttributionCandidate) => c.left_ms ?? c.last_ms;
   const previous = atBell.reduce((a, b) => (leftMs(b) > leftMs(a) ? b : a));
+  const herTrack = tracks.find((t) => t.trackNo === previous.track_no);
   const departureAt = offsetToInstant(clock.recordingStartedAt, leftMs(previous));
   const minutesAfterBell = Math.round(((leftMs(previous) - bellMs) / 60_000) * 10) / 10;
 
@@ -248,6 +257,11 @@ function toPreviousTeacher(
     previousPeriodEnd: herEnd ? localTimeInSchoolTz(herEnd, timezone) : null,
     departureMinutesAfterHerBell: minutesAfterHerBell,
     breakMinutesBeforeThisPeriod: breakMinutes,
+    // Her own minutes in THIS file — presence and board time by the same
+    // rules as the teacher's — so her period can be credited with them.
+    trackNo: previous.track_no,
+    presenceMsInThisFile: numberOrNull(herTrack?.meta?.present_ms),
+    boardMsInThisFile: numberOrNull(herTrack?.meta?.board_ms),
   };
 }
 
@@ -361,7 +375,7 @@ export function toDetailDto(d: Detail, timezone: string) {
       setsTask: u.setsTask,
     })),
     punctuality,
-    previousTeacher: toPreviousTeacher(v, d.analytics, timezone, schedule),
+    previousTeacher: toPreviousTeacher(v, d.analytics, timezone, schedule, d.tracks),
     arc,
     // R22 and R23 over every measurement: what was observed, what is
     // provisional, and what is Not Observed and why.

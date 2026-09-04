@@ -178,6 +178,15 @@ class TrackMetaOut(BaseModel):
     coverage: float
     mean_conf: float
     overlay: Optional[TrackOverlayOut] = None
+    # Per-person presence and board time, so an adult who is NOT this lesson's
+    # teacher — the previous period's teacher overrunning into this file — can
+    # be credited to HER period by the API (docs/lesson-coverage-plan.md,
+    # Phase D). Same rules as the teacher's own KPIs; None on rows derived
+    # before these existed, and board_* None when the room has no board zone.
+    presence_intervals: Optional[list[list[int]]] = None
+    present_ms: Optional[int] = None
+    board_intervals: Optional[list[list[int]]] = None
+    board_ms: Optional[int] = None
 
 
 class TrackOut(BaseModel):

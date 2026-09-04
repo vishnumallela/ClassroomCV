@@ -338,12 +338,37 @@ Built (`0015_timetable_periods`, `lib/timetable.ts`, `classrooms.setTimetable`,
 - Seeded for the handover classroom: the 7B bells (C.T + periods 1–8) for
   Monday–Friday, subjects and teachers still to be filled from the sheets.
 
+**Register view — BUILT 2026-09-04** (`lib/register.ts`, `lessons.day`,
+`routes/classrooms.$id.register.tsx`, the "Register" tab). One row per period
+of the classroom's day, assembled from two kinds of evidence, on the user's
+rules:
+
+- a period's numbers come from its OWN file(s) — the recordings the timetable
+  places in it — and only from their attributed teacher. The previous period's
+  teacher, however long she stayed in that file, is never in them (period 3 is
+  the period-3 teacher's alone: her presence in the KPI equals track 1's
+  presence exactly);
+- a period's departure and over-run can also come from the NEXT period's file,
+  where an adult present at that bell left while the next teacher remained.
+  That is this period's teacher finishing: her departure there is credited
+  back to her period, with how far past her own bell she stayed (the over-run,
+  with the break named), and her minutes in that file — presence and board
+  time, which the ML derive now emits per person (`tracks[].meta
+  .presence_intervals/present_ms/board_intervals/board_ms`, same rules as the
+  teacher's).
+
+Verified on the real day (2026-08-17, only the period-3 file exists): period 2
+— no file, arrival Not Observed, **departure 09:55 from the period-3 file,
+over-ran her 09:25 bell by 30.6 min (25 of them the break), 6.9 min present
+and 4.5 min at the board in that file**; period 3 — arrived 09:54 (4.1 min
+late), left 10:34 on the bell, 88% present, nothing of the period-2 teacher in
+it. Every other period: Not Observed, "no recording covers this period".
+
 Still to build:
 
-- **Attendance register view**: one row per period per classroom-day, with the
-  three-state arrival and departure, and the files that cover it. This is the
-  page the school actually asked for; the per-video page becomes evidence
-  behind it. Depends on Phase B (three states) and, across files, on Phase C.
+- The three-state departure of Phase B (a file that stops before the bell is
+  a lower bound, not "left early") — the register currently shows observed /
+  not observed only.
 - A lesson is **derived**: classroom × date × period. Not a row until someone
   overrides something on it (an attribution choice, a corrected bell time).
 

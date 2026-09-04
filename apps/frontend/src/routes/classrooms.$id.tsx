@@ -1,6 +1,6 @@
 import { useQuery } from "@tanstack/react-query";
 import { Link, Outlet, createFileRoute } from "@tanstack/react-router";
-import { ArrowLeft, BarChart3, Clapperboard, MapPin, Settings2 } from "lucide-react";
+import { ArrowLeft, BarChart3, CalendarCheck, Clapperboard, MapPin, Settings2 } from "lucide-react";
 import { Card } from "@/components/ui/card";
 import { Skeleton } from "@/components/ui/skeleton";
 import { orpc } from "@/lib/orpc";
@@ -9,6 +9,7 @@ export const Route = createFileRoute("/classrooms/$id")({ component: ClassroomLa
 
 const TABS = [
   { to: "/classrooms/$id/videos" as const, label: "Lessons", icon: Clapperboard },
+  { to: "/classrooms/$id/register" as const, label: "Register", icon: CalendarCheck },
   { to: "/classrooms/$id/metrics" as const, label: "Metrics", icon: BarChart3 },
   { to: "/classrooms/$id/settings" as const, label: "Configuration", icon: Settings2 },
 ];

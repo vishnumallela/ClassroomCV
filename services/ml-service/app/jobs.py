@@ -39,7 +39,7 @@ import uuid
 from dataclasses import dataclass
 from typing import Callable, Optional
 
-from app import attribution as attribution_mod, db, detector, events as events_mod, teacher as teacher_mod, zones as zones_mod
+from app import attribution as attribution_mod, db, detector, events as events_mod, heuristics as heuristics_mod, teacher as teacher_mod, zones as zones_mod
 from app.geometry import rdp_indices
 from app.models import AnalysisResult, Detection, VideoMeta
 
@@ -481,6 +481,7 @@ def derive_result(
                     "coverage": track.coverage,
                     "mean_conf": track.mean_conf,
                     "overlay": _track_overlay(teacher_dets),
+                    **_person_analytics(teacher_dets, zones),
                 },
             }
         )
@@ -502,6 +503,7 @@ def derive_result(
                         "coverage": round(len(pdets) / max(sampled_frames, 1), 4),
                         "mean_conf": round(sum(d.conf for d in pdets) / max(len(pdets), 1), 4),
                         "overlay": _track_overlay(pdets),
+                        **_person_analytics(pdets, zones),
                     },
                 }
             )
@@ -521,6 +523,37 @@ def derive_result(
         }
     )
     return result.model_dump()
+
+
+def _person_analytics(dets: list[Detection], zones: list[dict]) -> dict:
+    """Presence and board time for ONE tracked person, by the teacher's own
+    rules (heuristics.py), so an adult who is not this lesson's teacher can
+    still be credited to her own period by the API — the period-2 teacher's
+    last minutes live in the period-3 file."""
+    if not dets:
+        return {}
+    sdets = sorted(dets, key=lambda d: d.video_ts_ms)
+    presence = heuristics_mod.presence_intervals([d.video_ts_ms for d in sdets])
+    doors = [z["polygon"] for z in zones if z.get("kind") == "door"]
+    presence = (
+        heuristics_mod.bridge_offscreen_gaps(presence, sdets, doors)
+        if doors
+        else heuristics_mod.bridge_short_gaps(presence)
+    )
+    board = next((z["polygon"] for z in zones if z.get("kind") == "board"), None)
+    board_iv = (
+        heuristics_mod.intervals_from_samples(
+            [(d.video_ts_ms, heuristics_mod.board_condition(d, board)) for d in sdets]
+        )
+        if board is not None
+        else []
+    )
+    return {
+        "presence_intervals": presence,
+        "present_ms": sum(end - start for start, end in presence),
+        "board_intervals": board_iv if board is not None else None,
+        "board_ms": sum(end - start for start, end in board_iv) if board is not None else None,
+    }
 
 
 def quality_report(

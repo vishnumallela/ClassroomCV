@@ -434,6 +434,29 @@ export async function listVideos(classroomId?: string): Promise<VideoListItem[]>
   });
 }
 
+/** A classroom's videos with the fields that place each in the timetable. */
+export async function listClassroomLessons(classroomId: string) {
+  if (!isUuid(classroomId)) return [];
+  return db
+    .select({
+      id: videos.id,
+      title: videos.title,
+      status: videos.status,
+      durationMs: videos.durationMs,
+      recordingStartedAt: videos.recordingStartedAt,
+      lessonDate: videos.lessonDate,
+      period: videos.period,
+      scheduledStart: videos.scheduledStart,
+      scheduledEnd: videos.scheduledEnd,
+      subject: videos.subject,
+      yearGroup: videos.yearGroup,
+      hasFollowingPeriod: videos.hasFollowingPeriod,
+    })
+    .from(videos)
+    .where(eq(videos.classroomId, classroomId))
+    .orderBy(desc(videos.uploadedAt));
+}
+
 export async function getVideoDetail(id: string) {
   const video = await getVideo(id);
   if (!video) return undefined;
