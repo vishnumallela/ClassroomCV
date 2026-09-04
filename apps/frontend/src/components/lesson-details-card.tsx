@@ -32,6 +32,20 @@ export interface LessonDetails {
   yearGroup: string | null;
   roomType: string | null;
   hasFollowingPeriod: boolean | null;
+  /** What the numbers were measured against: the lesson's own bells, or the
+   *  classroom timetable's row for this period. */
+  schedule: {
+    weekday: number | null;
+    period: string | null;
+    scheduledStart: string | null;
+    scheduledEnd: string | null;
+    subject: string | null;
+    yearGroup: string | null;
+    teacher: string | null;
+    hasFollowingPeriod: boolean | null;
+    previousPeriod: { label: string; scheduledEnd: string } | null;
+    source: "video" | "timetable" | null;
+  };
 }
 
 export interface PreviousTeacher {
@@ -42,6 +56,10 @@ export interface PreviousTeacher {
   adultsAtBell: number;
   periodStart: string | null;
   previousPeriodEndKnown: boolean;
+  previousPeriodLabel: string | null;
+  previousPeriodEnd: string | null;
+  departureMinutesAfterHerBell: number | null;
+  breakMinutesBeforeThisPeriod: number | null;
 }
 
 export interface Punctuality {
@@ -145,7 +163,9 @@ export function LessonDetailsCard({
     },
   });
 
-  const hasSchedule = Boolean(lesson.scheduledStart && lesson.scheduledEnd);
+  const schedule = lesson.schedule;
+  const hasSchedule = Boolean(schedule.scheduledStart && schedule.scheduledEnd);
+  const fromTimetable = schedule.source === "timetable";
   const anchored = punctuality.arrivalAt !== null;
   // The measurement was refused rather than missing an input. Every Group A row
   // reads "Not Observed" instead of an em dash, because the dash means "we have
@@ -159,8 +179,12 @@ export function LessonDetailsCard({
         <div className="space-y-1">
           <h2 className="font-display text-base font-semibold tracking-tight">Lesson details</h2>
           <p className="text-xs text-muted-foreground">
-            {lesson.subject || lesson.period ? (
-              <>{[lesson.period, lesson.subject, lesson.yearGroup].filter(Boolean).join(" · ")}</>
+            {schedule.subject || schedule.period ? (
+              <>
+                {[schedule.period, schedule.subject, schedule.yearGroup]
+                  .filter(Boolean)
+                  .join(" · ")}
+              </>
             ) : (
               "Not entered yet"
             )}
@@ -190,8 +214,9 @@ export function LessonDetailsCard({
             label="Scheduled"
             value={
               hasSchedule
-                ? `${toTimeInput(lesson.scheduledStart)} – ${toTimeInput(lesson.scheduledEnd)}`
-                : "Not entered"
+                ? `${toTimeInput(schedule.scheduledStart)} – ${toTimeInput(schedule.scheduledEnd)}` +
+                  (fromTimetable ? " · from the timetable" : "")
+                : "Not entered — and no timetable row covers this recording"
             }
             muted={!hasSchedule}
           />
@@ -248,11 +273,25 @@ export function LessonDetailsCard({
               label={`Against this period's ${previousTeacher.periodStart ?? ""} bell`}
               value={intoThePeriod(previousTeacher.departureMinutesIntoPeriod)}
             />
+            {previousTeacher.previousPeriodEndKnown && (
+              <Row
+                label={`Against her own ${previousTeacher.previousPeriodEnd ?? ""} bell (${previousTeacher.previousPeriodLabel ?? "previous period"})`}
+                value={
+                  previousTeacher.departureMinutesAfterHerBell === null
+                    ? "—"
+                    : `${previousTeacher.departureMinutesAfterHerBell} min after it` +
+                      (previousTeacher.breakMinutesBeforeThisPeriod
+                        ? `, ${previousTeacher.breakMinutesBeforeThisPeriod} min of that the break`
+                        : "")
+                }
+              />
+            )}
           </div>
           <p className="mt-2 text-[0.7rem] leading-relaxed text-muted-foreground">
-            {previousTeacher.reason} Only the end of her stay is in this recording. Whether she
-            stayed to her own bell needs her period&rsquo;s times (the timetable) and the previous
-            file.
+            {previousTeacher.reason} Only the end of her stay is in this recording; whether she was
+            there for the whole of her period needs the previous file.
+            {!previousTeacher.previousPeriodEndKnown &&
+              " Her own bell needs the classroom timetable."}
           </p>
         </div>
       )}
@@ -315,6 +354,13 @@ export function LessonDetailsCard({
                 onChange={(e) => setForm((f) => ({ ...f, scheduledEnd: e.target.value }))}
               />
             </label>
+            {fromTimetable && (
+              <p className="text-xs text-muted-foreground sm:col-span-2">
+                Left blank, the bells come from the classroom timetable: {schedule.period}{" "}
+                {toTimeInput(schedule.scheduledStart)} – {toTimeInput(schedule.scheduledEnd)}. Type
+                them here only to override this one lesson.
+              </p>
+            )}
             <label className="block space-y-1.5">
               <span className="text-sm font-medium">
                 Subject <span className="font-normal text-muted-foreground">(optional)</span>

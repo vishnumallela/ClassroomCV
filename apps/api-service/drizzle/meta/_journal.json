@@ -106,6 +106,13 @@
       "when": 1788425927299,
       "tag": "0014_unattributed_detections",
       "breakpoints": true
+    },
+    {
+      "idx": 15,
+      "version": "7",
+      "when": 1788512967913,
+      "tag": "0015_timetable_periods",
+      "breakpoints": true
     }
   ]
 }

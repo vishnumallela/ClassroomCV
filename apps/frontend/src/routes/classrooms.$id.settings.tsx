@@ -2,6 +2,7 @@ import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
 import { createFileRoute, useNavigate } from "@tanstack/react-router";
 import { PenLine } from "lucide-react";
 import { useEffect, useState } from "react";
+import { TimetableCard } from "@/components/timetable-card";
 import { ZoneEditor, type ZonePayload } from "@/components/zone-editor";
 import { Badge } from "@/components/ui/badge";
 import { Button } from "@/components/ui/button";
@@ -82,9 +83,7 @@ function ClassroomSettings() {
       <Card className="space-y-4 p-6">
         <div className="space-y-1">
           <h2 className="font-display text-lg font-medium">Details</h2>
-          <p className="text-sm text-muted-foreground">
-            How this room appears across Luminary.
-          </p>
+          <p className="text-sm text-muted-foreground">How this room appears across Luminary.</p>
         </div>
         <form
           className="grid gap-4 sm:grid-cols-2"
@@ -140,8 +139,8 @@ function ClassroomSettings() {
           <div className="space-y-1">
             <h2 className="font-display text-lg font-medium">Zones</h2>
             <p className="max-w-md text-sm text-muted-foreground">
-              The board and door template for this room's camera. Every lesson uploaded from now
-              on inherits it, so the GPU never has to guess where the board is.
+              The board and door template for this room's camera. Every lesson uploaded from now on
+              inherits it, so the GPU never has to guess where the board is.
             </p>
           </div>
           <Button
@@ -173,6 +172,13 @@ function ClassroomSettings() {
           </p>
         )}
       </Card>
+
+      {/* Remount when the saved week changes so the editor starts from what is stored. */}
+      <TimetableCard
+        key={JSON.stringify(data.timetable)}
+        classroomId={id}
+        initialRows={data.timetable}
+      />
 
       <Card className="space-y-3 border-destructive/40 p-6">
         <div className="space-y-1">
@@ -209,9 +215,7 @@ function ClassroomSettings() {
           videoId={reference.id}
           title="Configure classroom zones"
           frameSrc={reference.thumbnailUrl ? `${API_URL}${reference.thumbnailUrl}` : null}
-          aspect={
-            reference.width && reference.height ? reference.width / reference.height : 16 / 9
-          }
+          aspect={reference.width && reference.height ? reference.width / reference.height : 16 / 9}
           initialZones={data.zones.map((z) => ({ kind: z.kind, polygon: z.polygon }))}
           onSave={async (zones: ZonePayload[]) => {
             await orpcClient.classrooms.setZones({ id, zones });

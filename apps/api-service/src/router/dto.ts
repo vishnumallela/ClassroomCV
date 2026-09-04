@@ -1,11 +1,14 @@
 import type { getVideoDetail } from "@api/db/queries";
 import {
   lessonClock,
+  localDateInSchoolTz,
   localTimeInSchoolTz,
   minutesAgainstSchedule,
   offsetToInstant,
+  schoolTimeToInstant,
 } from "@api/lib/school-time";
 import type { AttributionCandidate } from "@api/db/schema";
+import { type ResolvedSchedule, clockInput, resolveSchedule } from "@api/lib/timetable";
 
 type Detail = NonNullable<Awaited<ReturnType<typeof getVideoDetail>>>;
 
@@ -43,8 +46,13 @@ const MULTIPLE_ADULTS_REASON =
  * empty date field explains itself), while a blended timeline looks exactly
  * like a clean one and has to be said out loud.
  */
-function toPunctuality(v: Detail["video"], analytics: Analytics, timezone: string) {
-  const clock = lessonClock(v, timezone);
+function toPunctuality(
+  v: Detail["video"],
+  analytics: Analytics,
+  timezone: string,
+  schedule: ResolvedSchedule,
+) {
+  const clock = lessonClock(clockInput(v, schedule), timezone);
   const presence = analytics?.presenceIntervals ?? [];
   const first = presence[0];
   const last = presence.at(-1);
@@ -137,14 +145,21 @@ function noPreviousTeacher(state: Exclude<PreviousTeacherState, "observed">, rea
     departureMinutesIntoPeriod: null as number | null,
     adultsAtBell: 0,
     periodStart: null as string | null,
-    // Her own bell is not known until timetable_periods exists (Phase D);
-    // nothing about it is claimed here.
     previousPeriodEndKnown: false,
+    previousPeriodLabel: null as string | null,
+    previousPeriodEnd: null as string | null,
+    departureMinutesAfterHerBell: null as number | null,
+    breakMinutesBeforeThisPeriod: null as number | null,
   };
 }
 
-function toPreviousTeacher(v: Detail["video"], analytics: Analytics, timezone: string) {
-  const clock = lessonClock(v, timezone);
+function toPreviousTeacher(
+  v: Detail["video"],
+  analytics: Analytics,
+  timezone: string,
+  schedule: ResolvedSchedule,
+) {
+  const clock = lessonClock(clockInput(v, schedule), timezone);
   if (!clock)
     return noPreviousTeacher(
       "not_observed",
@@ -188,6 +203,29 @@ function toPreviousTeacher(v: Detail["video"], analytics: Analytics, timezone: s
   const previous = atBell.reduce((a, b) => (leftMs(b) > leftMs(a) ? b : a));
   const departureAt = offsetToInstant(clock.recordingStartedAt, leftMs(previous));
   const minutesAfterBell = Math.round(((leftMs(previous) - bellMs) / 60_000) * 10) / 10;
+
+  // Her OWN bell, when the classroom's timetable knows the period before this
+  // one. Periods at this school are not back-to-back (period 2 ends 09:25,
+  // period 3 starts 09:50), so the two numbers differ by the break: "5.6 min
+  // into this period" is also "30.6 min after her bell, 25 of them break".
+  const date = v.lessonDate ?? localDateInSchoolTz(clock.recordingStartedAt, timezone);
+  const herEnd = schedule.previousPeriod
+    ? schoolTimeToInstant(date, schedule.previousPeriod.scheduledEnd, timezone)
+    : null;
+  const minutesAfterHerBell = herEnd
+    ? Math.round(((departureAt.getTime() - herEnd.getTime()) / 60_000) * 10) / 10
+    : null;
+  const breakMinutes = herEnd
+    ? Math.round(((clock.scheduledStartAt.getTime() - herEnd.getTime()) / 60_000) * 10) / 10
+    : null;
+  const herBellText =
+    herEnd && schedule.previousPeriod && minutesAfterHerBell !== null
+      ? ` Her own period (${schedule.previousPeriod.label}) ended at ` +
+        `${localTimeInSchoolTz(herEnd, timezone)}; she left ${minutesAfterHerBell} min after it` +
+        (breakMinutes && breakMinutes > 0
+          ? `, ${breakMinutes} min of which was the break before this period.`
+          : ".")
+      : "";
   return {
     state: "observed" as const,
     reason:
@@ -195,17 +233,25 @@ function toPreviousTeacher(v: Detail["video"], analytics: Analytics, timezone: s
       `${localTimeInSchoolTz(departureAt, timezone)} while this period's teacher remained` +
       (atBell.length > 1
         ? ` (${atBell.length} such adults were tracked; the last to leave is taken).`
-        : "."),
+        : ".") +
+      herBellText,
     departureAt: localTimeInSchoolTz(departureAt, timezone),
     departureMinutesIntoPeriod: minutesAfterBell,
     adultsAtBell: atBell.length,
     periodStart: bellLocal,
-    previousPeriodEndKnown: false,
+    previousPeriodEndKnown: herEnd !== null,
+    previousPeriodLabel: schedule.previousPeriod?.label ?? null,
+    previousPeriodEnd: herEnd ? localTimeInSchoolTz(herEnd, timezone) : null,
+    departureMinutesAfterHerBell: minutesAfterHerBell,
+    breakMinutesBeforeThisPeriod: breakMinutes,
   };
 }
 
 export function toDetailDto(d: Detail, timezone: string) {
   const v = d.video;
+  // The lesson placed in its classroom's week: the video's own bells win,
+  // else the timetable's row for its period (lib/timetable.ts).
+  const schedule = resolveSchedule(v, d.timetable ?? [], timezone);
   return {
     classroom: d.classroom ? { id: d.classroom.id, name: d.classroom.name } : null,
     video: {
@@ -233,9 +279,22 @@ export function toDetailDto(d: Detail, timezone: string) {
       yearGroup: v.yearGroup,
       roomType: v.roomType,
       hasFollowingPeriod: v.hasFollowingPeriod,
+      // What the numbers were actually measured against, and where it came from.
+      schedule: {
+        weekday: schedule.weekday,
+        period: schedule.period,
+        scheduledStart: schedule.scheduledStart,
+        scheduledEnd: schedule.scheduledEnd,
+        subject: schedule.subject,
+        yearGroup: schedule.yearGroup,
+        teacher: schedule.teacher,
+        hasFollowingPeriod: schedule.hasFollowingPeriod,
+        previousPeriod: schedule.previousPeriod,
+        source: schedule.source,
+      },
     },
-    punctuality: toPunctuality(v, d.analytics, timezone),
-    previousTeacher: toPreviousTeacher(v, d.analytics, timezone),
+    punctuality: toPunctuality(v, d.analytics, timezone, schedule),
+    previousTeacher: toPreviousTeacher(v, d.analytics, timezone, schedule),
     zones: d.zones.map((z) => ({
       id: z.id,
       kind: z.kind,

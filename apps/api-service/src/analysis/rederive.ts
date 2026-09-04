@@ -1,7 +1,8 @@
 import { getVideo, getZones, replaceDerived, type ZoneInput } from "@api/db/queries";
 import { mlRederive } from "@api/lib/ml";
 import type { AnalysisResult } from "@api/lib/ml";
-import { periodOffsets, schoolTimezone } from "@api/lib/school-time";
+import { schoolTimezone } from "@api/lib/school-time";
+import { periodOffsetsFor } from "@api/lib/timetable";
 
 export async function applyRederive(
   videoId: string,
@@ -11,7 +12,7 @@ export async function applyRederive(
   // The timetable is read-time data, so a re-derive after someone types the
   // bell times in is exactly how attribution gets its primary rule.
   const video = await getVideo(videoId);
-  const period = video ? periodOffsets(video, await schoolTimezone()) : null;
+  const period = video ? await periodOffsetsFor(video, await schoolTimezone()) : null;
   const result = await mlRederive(videoId, zones, period);
   await replaceDerived(videoId, result, opts);
   return result;

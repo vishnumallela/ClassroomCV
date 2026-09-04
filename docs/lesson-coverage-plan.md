@@ -1,6 +1,6 @@
 # The lesson is the period, not the file — recording protocol and coverage plan
 
-**Status:** Diagnosed 2026-09-03. Phase B′ (below) built 2026-09-04; A–E not started. School bell times confirmed from the 7B timetable 2026-09-04 (§2 of the attribution plan's 09:50 guess was right; periods are not contiguous).
+**Status:** Diagnosed 2026-09-03. Phase B′ built 2026-09-04. **Phase D's table, resolver and editor built 2026-09-04** (register view still to do); A, B, C, E not started. School bell times confirmed from the 7B timetable 2026-09-04 (§2 of the attribution plan's 09:50 guess was right; periods are not contiguous).
 **Branch:** `feat/rfdetr-pipeline` (not pushed)
 **Companion:** `docs/teacher-attribution-plan.md` — that plan fixes *who* the
 timeline belongs to. This one fixes *when the timeline is allowed to say
@@ -104,9 +104,9 @@ that was never recorded. Hand the school this list; it is short on purpose.
    them.** An empty file is evidence: it proves the room had no teacher between
    two clock times. Skipping it turns "absent" into "Not Observed".
 5. **Fill in the timetable once, not per file.** Bell times are a property of
-   the classroom's week, not of a video. Until Phase D lands they still have to
-   be typed per video; the upload form should default them from the previous
-   file on the same classroom.
+   the classroom's week, not of a video. Since Phase D (2026-09-04) they are
+   typed once on the classroom's Settings page and every lesson in the room
+   resolves its bells from there; typing them on a video is now an override.
 
 Folder and file names are **not** anchors. The folder this recording came in is
 named `20082026`; the lesson is 17 August.
@@ -307,21 +307,45 @@ Merging rule, until attribution segments exist (trap 1):
 Also needed: the classroom-day listing query, and disagreement handling for
 trap 4.
 
-### Phase D — Lessons as a first-class thing (medium-large)
+### Phase D — Lessons as a first-class thing (medium-large) — TABLE, RESOLVER AND EDITOR BUILT 2026-09-04
 
-The schema comment on `videos.period` already anticipates this: *"A
+The schema comment on `videos.period` already anticipated this: *"A
 per-classroom period table can fill this in later without a rewrite."*
 
-- `timetable_periods(classroom_id, weekday, period, scheduled_start,
-  scheduled_end, subject, year_group, has_following_period)` — typed once.
-- A lesson is **derived**: classroom × date × period. Not a row until someone
-  overrides something on it (an attribution choice, a corrected bell time).
+Built (`0015_timetable_periods`, `lib/timetable.ts`, `classrooms.setTimetable`,
+`components/timetable-card.tsx`):
+
+- `timetable_periods(classroom_id, weekday, slot, label, scheduled_start,
+  scheduled_end, subject, teacher, year_group)` — one row per teaching period
+  per ISO weekday, typed once on the classroom's Settings page (weekday tabs,
+  "copy this day to Mon–Sat"). **Breaks are the gaps between rows**, so
+  `has_following_period` and "when did the previous period end" are derived,
+  not typed — which is what §Phase B′ was waiting for.
+- `resolveSchedule(video, timetable, tz)` places a lesson in its week: the
+  video's own bells win when present (an override, or a lesson from before the
+  table); else the day's row named by the video's period label ("Period 3",
+  "P3", "3" all match); else the row the recording's wall-clock window overlaps
+  most (needs the anchor and the duration — i.e. no typing at all once the
+  clock is known). The detail DTO exposes the result as `lesson.schedule` with
+  its `source`, and both the analyze job and `/rederive` hand the ML service
+  the period from it. Verified on the full handover recording with its bells
+  cleared: `source: timetable`, same numbers (09:54, 4.1 min late), and the
+  previous teacher's departure now reads **"30.6 min after her own 09:25 bell,
+  25 of which was the break"** — her R3 against her own period, off the
+  period-3 file, with no typing.
+- The per-video timetable columns stay as the override and as the only source
+  for lessons recorded before the table existed.
+- Seeded for the handover classroom: the 7B bells (C.T + periods 1–8) for
+  Monday–Friday, subjects and teachers still to be filled from the sheets.
+
+Still to build:
+
 - **Attendance register view**: one row per period per classroom-day, with the
   three-state arrival and departure, and the files that cover it. This is the
   page the school actually asked for; the per-video page becomes evidence
-  behind it.
-- The per-video timetable columns become a fallback for lessons recorded before
-  the table existed, then go.
+  behind it. Depends on Phase B (three states) and, across files, on Phase C.
+- A lesson is **derived**: classroom × date × period. Not a row until someone
+  overrides something on it (an attribution choice, a corrected bell time).
 
 ### Phase E — Anchor fallback: OCR the burned-in clock (small, shared)
 

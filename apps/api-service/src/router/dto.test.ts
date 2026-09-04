@@ -13,7 +13,11 @@ const IST = "Asia/Kolkata";
  * her arrival as this lesson's makes a teacher who was ~4.5 minutes late read
  * as on time.
  */
-function detail(dataQuality: DataQuality | null, presenceMs = 2_700_000) {
+function detail(
+  dataQuality: DataQuality | null,
+  presenceMs = 2_700_000,
+  timetable: unknown[] = [],
+) {
   return {
     video: {
       id: "v1",
@@ -43,6 +47,7 @@ function detail(dataQuality: DataQuality | null, presenceMs = 2_700_000) {
     zones: [],
     tracks: [],
     events: [],
+    timetable,
     analytics: {
       teacherPresentMs: presenceMs,
       teacherBoardMs: null,
@@ -216,6 +221,66 @@ describe("previousTeacher: the other lesson in this file", () => {
         ...over,
       },
     } as Partial<DataQuality>);
+
+  // Monday on the 7B sheet: period 2 ends 09:25, a 25-minute break, period 3 at 09:50.
+  const MONDAY = [
+    {
+      weekday: 1,
+      slot: 2,
+      label: "Period 2",
+      scheduledStart: "08:40:00",
+      scheduledEnd: "09:25:00",
+      subject: null,
+      teacher: null,
+      yearGroup: null,
+    },
+    {
+      weekday: 1,
+      slot: 3,
+      label: "Period 3",
+      scheduledStart: "09:50:00",
+      scheduledEnd: "10:35:00",
+      subject: "english",
+      teacher: null,
+      yearGroup: null,
+    },
+    {
+      weekday: 1,
+      slot: 4,
+      label: "Period 4",
+      scheduledStart: "10:35:00",
+      scheduledEnd: "11:20:00",
+      subject: null,
+      teacher: null,
+      yearGroup: null,
+    },
+  ];
+
+  test("with the classroom's timetable, her departure is also measured against HER bell", () => {
+    const dto = toDetailDto(detail(handover(), 2_700_000, MONDAY), IST);
+    const p = dto.previousTeacher;
+    expect(p.state).toBe("observed");
+    expect(p.previousPeriodEndKnown).toBe(true);
+    expect(p.previousPeriodLabel).toBe("Period 2");
+    expect(p.previousPeriodEnd).toBe("09:25");
+    // 09:55:35.8 against a 09:25 bell, 25 minutes of which was the break
+    expect(p.departureMinutesAfterHerBell).toBe(30.6);
+    expect(p.breakMinutesBeforeThisPeriod).toBe(25);
+    expect(p.reason).toContain("Her own period (Period 2) ended at 09:25");
+    // the lesson itself is placed in the week, with the video's own bells winning
+    expect(dto.lesson.schedule.source).toBe("video");
+    expect(dto.lesson.schedule.hasFollowingPeriod).toBe(true);
+    expect(dto.lesson.schedule.previousPeriod).toEqual({
+      label: "Period 2",
+      scheduledEnd: "09:25:00",
+    });
+  });
+
+  test("without a timetable nothing is claimed about her bell", () => {
+    const p = toDetailDto(detail(handover()), IST).previousTeacher;
+    expect(p.previousPeriodEndKnown).toBe(false);
+    expect(p.previousPeriodEnd).toBeNull();
+  });
 
   test("her departure is when she LEFT, not her last sighting after a re-link", () => {
     // Full recording: a colleague in white came in at 2373 s and linked to the

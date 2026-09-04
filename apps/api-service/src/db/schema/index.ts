@@ -6,9 +6,11 @@ import {
   jsonb,
   pgTable,
   real,
+  smallint,
   text,
   time,
   timestamp,
+  uniqueIndex,
   uuid,
 } from "drizzle-orm/pg-core";
 
@@ -108,6 +110,47 @@ export const classroomZones = pgTable("classroom_zones", {
   meta: jsonb("meta").$type<ZoneMeta | null>(),
   createdAt: timestamp("created_at", { withTimezone: true }).defaultNow(),
 });
+
+// The classroom's week, typed once (docs/lesson-coverage-plan.md, Phase D).
+//
+// A lesson is a period on a classroom's wall-clock day, and a file is only
+// coverage of it, so bell times are a fact about the room's week rather than
+// about a video. One row per teaching period per weekday; breaks are the gaps
+// between rows, which is what makes "does a period follow this one" and "when
+// did the previous period end" derivable instead of typed. The per-video
+// columns on `videos` stay as the override — and as the only source for
+// lessons recorded before this table existed.
+//
+// `weekday` is ISO (1 = Monday … 7 = Sunday). `slot` orders periods within a
+// day; `label` is what the school calls it ("Period 3", "C.T"). `teacher` is
+// the roster name from the sheet, kept for a later attribution cross-check.
+export const timetablePeriods = pgTable(
+  "timetable_periods",
+  {
+    id: uuid("id").primaryKey().defaultRandom(),
+    classroomId: uuid("classroom_id")
+      .notNull()
+      .references(() => classrooms.id, { onDelete: "cascade" }),
+    weekday: smallint("weekday").notNull(),
+    slot: smallint("slot").notNull(),
+    label: text("label").notNull(),
+    scheduledStart: time("scheduled_start").notNull(),
+    scheduledEnd: time("scheduled_end").notNull(),
+    subject: text("subject"),
+    teacher: text("teacher"),
+    yearGroup: text("year_group"),
+    createdAt: timestamp("created_at", { withTimezone: true }).notNull().defaultNow(),
+  },
+  (t) => ({
+    classroomWeekdaySlot: uniqueIndex("timetable_periods_classroom_weekday_slot").on(
+      t.classroomId,
+      t.weekday,
+      t.slot,
+    ),
+  }),
+);
+
+export type TimetablePeriodRow = typeof timetablePeriods.$inferSelect;
 
 export const videos = pgTable("videos", {
   id: uuid("id").primaryKey().defaultRandom(),

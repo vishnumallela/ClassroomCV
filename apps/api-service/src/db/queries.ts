@@ -12,6 +12,8 @@ import {
   videos,
   type ZoneMeta,
   zones,
+  timetablePeriods,
+  type TimetablePeriodRow,
 } from "@api/db/schema";
 import type { AnalysisResult } from "@api/lib/ml";
 
@@ -150,6 +152,38 @@ export async function replaceClassroomZones(
         .values(
           newZones.map((z) => ({ classroomId, kind: z.kind, polygon: z.polygon, meta: null })),
         );
+    }
+  });
+}
+
+export interface TimetableInput {
+  weekday: number;
+  slot: number;
+  label: string;
+  scheduledStart: string;
+  scheduledEnd: string;
+  subject: string | null;
+  teacher: string | null;
+  yearGroup: string | null;
+}
+
+/** The classroom's week, ordered by weekday then slot. */
+export async function getTimetable(classroomId: string): Promise<TimetablePeriodRow[]> {
+  if (!isUuid(classroomId)) return [];
+  return db
+    .select()
+    .from(timetablePeriods)
+    .where(eq(timetablePeriods.classroomId, classroomId))
+    .orderBy(timetablePeriods.weekday, timetablePeriods.slot);
+}
+
+/** Replace the classroom's whole week. The editor works on the week as one
+ *  document, so a partial update would only invite two clients to interleave. */
+export async function replaceTimetable(classroomId: string, rows: TimetableInput[]): Promise<void> {
+  await db.transaction(async (tx) => {
+    await tx.delete(timetablePeriods).where(eq(timetablePeriods.classroomId, classroomId));
+    if (rows.length > 0) {
+      await tx.insert(timetablePeriods).values(rows.map((r) => ({ classroomId, ...r })));
     }
   });
 }
@@ -401,12 +435,13 @@ export async function listVideos(classroomId?: string): Promise<VideoListItem[]>
 export async function getVideoDetail(id: string) {
   const video = await getVideo(id);
   if (!video) return undefined;
-  const [zoneRows, trackRows, eventRows, analyticsRows, classroom] = await Promise.all([
+  const [zoneRows, trackRows, eventRows, analyticsRows, classroom, timetable] = await Promise.all([
     db.select().from(zones).where(eq(zones.videoId, id)).orderBy(zones.createdAt),
     db.select().from(tracks).where(eq(tracks.videoId, id)).orderBy(tracks.trackNo),
     db.select().from(events).where(eq(events.videoId, id)).orderBy(events.videoTsMs),
     db.select().from(videoAnalytics).where(eq(videoAnalytics.videoId, id)),
     video.classroomId ? getClassroom(video.classroomId) : Promise.resolve(undefined),
+    video.classroomId ? getTimetable(video.classroomId) : Promise.resolve([]),
   ]);
   return {
     video,
@@ -415,6 +450,8 @@ export async function getVideoDetail(id: string) {
     tracks: trackRows,
     events: eventRows,
     analytics: analyticsRows[0] ?? null,
+    // The classroom's week, so the DTO can place this lesson in it.
+    timetable,
   };
 }
 
