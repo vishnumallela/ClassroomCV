@@ -97,16 +97,25 @@ describe("voiceReport", () => {
     expect(r.questions).toMatchObject({ state: "provisional", toClass: 2, checkIns: 2 });
   });
 
-  test("languages: the set, the share of each, and the switch rate", () => {
+  test("languages: the share of each by the sentence's words, and the switch rate", () => {
     const r = voiceReport(input);
     expect(r.languages?.count).toBe(2);
     const en = r.languages?.shares.find((s) => s.language === "en");
     const hi = r.languages?.shares.find((s) => s.language === "hi");
     expect((en?.share ?? 0) + (hi?.share ?? 0)).toBeCloseTo(1);
+    expect(en!.share).toBeGreaterThan(hi!.share);
     // hi, en, hi, hi, en, en across her sentences: three switches
     expect(r.languages?.switchesPerMinute).toBe(
       Math.round((3 / (r.speech!.teacherMs / 60_000)) * 10) / 10,
     );
+  });
+
+  test("her questions to the class are listed, oldest first, without the check-ins", () => {
+    const r = voiceReport(input);
+    expect(r.questions?.list.map((q) => q.text)).toEqual([
+      "Page number twenty. Who can read the first line?",
+      "What is the past tense of go?",
+    ]);
   });
 
   test("audio that was skipped reports Not Observed with the reason, not zeros", () => {

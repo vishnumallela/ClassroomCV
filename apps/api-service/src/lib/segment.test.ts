@@ -1,5 +1,12 @@
 import { describe, expect, test } from "bun:test";
-import { languageOf, MAX_WORDS, PAUSE_MS, segmentSentences, type Word } from "@api/lib/segment";
+import {
+  languageMix,
+  languageOf,
+  MAX_WORDS,
+  PAUSE_MS,
+  segmentSentences,
+  type Word,
+} from "@api/lib/segment";
 
 function words(spec: [string, number, number, string?][], speaker = "B"): Word[] {
   return spec.map(([text, start, end, sp]) => ({
@@ -12,11 +19,22 @@ function words(spec: [string, number, number, string?][], speaker = "B"): Word[]
 }
 
 describe("languageOf", () => {
-  test("reads the script", () => {
+  test("Hindi is its function words, not its script", () => {
     expect(languageOf("अब हम वर्कशीट देखेंगे।")).toBe("hi");
+    expect(languageOf("आप कल कर लेना, मैंने आज आपका नहीं माना।")).toBe("hi");
     expect(languageOf("Take out your literacy companion.")).toBe("en");
-    expect(languageOf("अब worksheet का page open करो")).toBe("mixed");
+    // English written in Devanagari by the transcriber is English
+    expect(languageOf("आई विल साइन एंड देन रिटर्न।")).toBe("en");
+    expect(languageOf("वर्कशीट नंबर फोर्टी वन नाउ,")).toBe("en");
     expect(languageOf("...")).toBeNull();
+  });
+
+  test("a Hindi frame with English nouns is Hindi; an English frame with Hindi words is English", () => {
+    expect(languageOf("अब worksheet का page open करो")).toBe("hi");
+    expect(languageOf("आज आई आज हम चेकिंग इट हियर।")).toBe("en");
+    const mix = languageMix("अब worksheet का page open करो");
+    expect(mix.hi).toBe(3);
+    expect(mix.en).toBe(3);
   });
 });
 

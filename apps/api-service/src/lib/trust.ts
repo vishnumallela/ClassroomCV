@@ -77,7 +77,6 @@ export function trustItems(input: {
     ["R13", "Closure, and its type", m(arc.closure)],
     ["R14", "Continuation", m(arc.continuation)],
     ["R15", "Homework set", m(arc.homework)],
-    ["R16", "Pack-up instruction", m(arc.packUpMin)],
     [
       "R17",
       "Raised-voice events",
@@ -123,7 +122,7 @@ export function trustItems(input: {
     id: "R23",
     name: "Not Observed",
     state: "observed",
-    reason: `${notObserved} of 22 measurements withheld rather than guessed.`,
+    reason: `${notObserved} of ${items.length} measurements withheld rather than guessed.`,
   });
   return {
     observed: items.filter((i) => i.state === "observed").length,

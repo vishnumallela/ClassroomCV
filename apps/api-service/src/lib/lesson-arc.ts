@@ -67,8 +67,6 @@ export interface LessonArc {
   closure: Measure<ClosureType | "none">;
   continuation: Measure<boolean>;
   homework: Measure<boolean> & { atMs: number | null };
-  /** Minutes of the first pack-up instruction against the end bell (negative = before it). */
-  packUpMin: Measure<number> & { atMs: number | null };
   attentionRequests: Measure<number> & { perTenMinutes: number | null };
   drift: Measure<{ episodes: number; totalMs: number }>;
 }
@@ -79,8 +77,6 @@ export const CORROBORATE_MS = 120_000;
 export const CLOSURE_WINDOW_MS = 5 * 60_000;
 /** Tolerance on either bell before a lesson "does not fit". */
 export const FIT_TOLERANCE_MS = 60_000;
-/** A pack-up instruction is looked for only this close to the end. */
-export const PACK_UP_WINDOW_MS = 15 * 60_000;
 /** Consecutive procedural sentences within this gap are one episode. */
 export const DRIFT_GAP_MS = 30_000;
 
@@ -268,7 +264,7 @@ export function lessonArc(input: ArcInput): LessonArc {
           "No review, reflection, exit question or summary found in the last five minutes.",
         );
 
-  // --- R14 continuation, R15 homework, R16 pack-up -------------------------
+  // --- R14 continuation, R15 homework -------------------------------------
   const cont = labelled.filter(({ l }) => l.continuation);
   const continuation = !hasAudio
     ? measure<boolean>(null, "not_observed", NO)
@@ -290,29 +286,6 @@ export function lessonArc(input: ArcInput): LessonArc {
         ),
         atMs: hw[0]?.s.startMs ?? null,
       };
-  // A pack-up instruction belongs to the closing minutes; "keep your books
-  // away" in the middle of a lesson is housekeeping, and on the real lesson a
-  // dictation-era sentence matched. Look only in the last PACK_UP_WINDOW_MS
-  // before the end (the departure or the file end when the end is unknown).
-  const packFrom = endRef - PACK_UP_WINDOW_MS;
-  const pack = labelled.find(({ s, l }) => l.packUp && s.startMs >= packFrom);
-  const packUpMin: LessonArc["packUpMin"] = !hasAudio
-    ? { ...measure<number>(null, "not_observed", NO), atMs: null }
-    : !pack
-      ? { ...measure<number>(null, "provisional", "No pack-up instruction was found in the last fifteen minutes."), atMs: null }
-      : input.bellEndMs === null
-        ? {
-            ...measure<number>(null, "not_observed", "The end bell is not known for this lesson.", [
-              ev(pack.s),
-            ]),
-            atMs: pack.s.startMs,
-          }
-        : {
-            ...measure(minutes(pack.s.startMs - input.bellEndMs), "provisional", null, [
-              ev(pack.s),
-            ]),
-            atMs: pack.s.startMs,
-          };
 
   // --- R18 attention requests -----------------------------------------------
   const attention = labelled.filter(({ l }) => l.attentionCue);
@@ -376,7 +349,6 @@ export function lessonArc(input: ArcInput): LessonArc {
     closure,
     continuation,
     homework,
-    packUpMin,
     attentionRequests,
     drift,
   };

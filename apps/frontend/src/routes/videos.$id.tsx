@@ -166,7 +166,7 @@ function VideoDetail() {
 
       {/* The audio half runs independently of the GPU, so its card is not
           gated on the video analysis either. */}
-      <VoiceCard videoId={video.id} voice={data.voice} />
+      <VoiceCard videoId={video.id} voice={data.voice} onSeek={seek} />
 
       <LessonArcCard
         arc={data.arc}

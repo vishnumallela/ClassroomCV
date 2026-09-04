@@ -143,7 +143,7 @@ export function LessonArcCard({
                 ? signedMinutes(arc.startDelayMin.value, "after the bell", "before the bell")
                 : "—"
             }
-            measure={{ ...arc.startDelayMin, evidence: [] }}
+            measure={{ ...arc.startDelayMin, reason: null, evidence: [] }}
             onSeek={onSeek}
             clock={clock}
           />
@@ -231,20 +231,6 @@ export function LessonArcCard({
                   : "No"
             }
             measure={arc.homework}
-            onSeek={onSeek}
-            clock={clock}
-          />
-          <Row
-            id="R16"
-            label="Pack-up instruction"
-            value={
-              arc.packUpMin.value !== null
-                ? signedMinutes(arc.packUpMin.value, "after the end bell", "before the end bell")
-                : arc.packUpMin.state === "provisional"
-                  ? "None found"
-                  : "—"
-            }
-            measure={arc.packUpMin}
             onSeek={onSeek}
             clock={clock}
           />

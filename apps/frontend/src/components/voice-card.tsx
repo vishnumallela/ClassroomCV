@@ -9,7 +9,7 @@ import { orpcClient } from "@/lib/orpc";
 
 type Voice = RouterOutputs["videos"]["get"]["voice"];
 
-const LANGUAGE_LABEL: Record<string, string> = { hi: "Hindi", en: "English", mixed: "Mixed" };
+const LANGUAGE_LABEL: Record<string, string> = { hi: "Hindi", en: "English" };
 
 function pct(share: number): string {
   return `${Math.round(share * 100)}%`;
@@ -59,7 +59,15 @@ function Tile({
  * Questions are provisional until the labelling pass exists, and the card
  * lists what that pass still owes rather than showing zeros for it.
  */
-export function VoiceCard({ videoId, voice }: { videoId: string; voice: Voice }) {
+export function VoiceCard({
+  videoId,
+  voice,
+  onSeek,
+}: {
+  videoId: string;
+  voice: Voice;
+  onSeek: (ms: number) => void;
+}) {
   const queryClient = useQueryClient();
   const rerun = useMutation({
     mutationFn: () => orpcClient.analysis.reanalyzeAudio({ id: videoId }),
@@ -136,15 +144,6 @@ export function VoiceCard({ videoId, voice }: { videoId: string; voice: Voice })
               sub="words per minute of her speech"
             />
             <Tile
-              label="Turns"
-              value={
-                voice.teacherTurns !== null
-                  ? `${voice.teacherTurns} / ${voice.otherTurns ?? 0}`
-                  : "—"
-              }
-              sub="teacher / others"
-            />
-            <Tile
               label="Questions to the class"
               value={voice.questions ? `${voice.questions.toClass}` : "—"}
               sub={
@@ -165,7 +164,7 @@ export function VoiceCard({ videoId, voice }: { videoId: string; voice: Voice })
               }
               sub={
                 voice.languages
-                  ? `${voice.languages.switchesPerMinute} switches per minute of her speech`
+                  ? `${voice.languages.count} used · ${voice.languages.switchesPerMinute} switches per minute of her speech`
                   : undefined
               }
             />
@@ -197,13 +196,36 @@ export function VoiceCard({ videoId, voice }: { videoId: string; voice: Voice })
               muted={!voice.coverage}
             />
           </div>
+
+          {voice.questions && voice.questions.list.length > 0 && (
+            <details className="mt-3 rounded-lg border border-border/60 bg-muted/20 p-3">
+              <summary className="cursor-pointer text-xs font-medium">
+                Her {voice.questions.list.length} questions to the class
+              </summary>
+              <ol className="mt-2 max-h-64 space-y-1 overflow-y-auto text-xs">
+                {voice.questions.list.map((q) => (
+                  <li key={q.idx} className="flex gap-2">
+                    <button
+                      type="button"
+                      onClick={() => onSeek(q.atMs)}
+                      className="shrink-0 font-mono text-muted-foreground tabular-nums hover:text-foreground"
+                    >
+                      {msToClock(q.atMs)}
+                    </button>
+                    <span className="leading-snug">{q.text}</span>
+                  </li>
+                ))}
+              </ol>
+            </details>
+          )}
         </>
       )}
 
       <p className="mt-4 text-[0.7rem] leading-relaxed text-muted-foreground">
         Phrase patterns stand in for the labelling pass on: {voice.pendingLabels.join("; ")} — those
-        numbers are provisional and show their sentence. Hindi is read from its script, so romanised
-        Hindi counts as English, and the transcriber writes some English in Devanagari.
+        numbers are provisional and show their sentence. A sentence's language is read from its
+        Hindi function words, so English the transcriber wrote in Devanagari still counts as
+        English.
       </p>
     </Card>
   );

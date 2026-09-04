@@ -102,13 +102,11 @@ describe("lessonArc", () => {
     expect(arc.overrunMin.value).toBe(-0.5);
   });
 
-  test("the ending: no closure found, homework yes, no pack-up, continuation no", () => {
+  test("the ending: no closure found, homework yes, continuation no", () => {
     const arc = lessonArc({ ...base, sentences });
     expect(arc.closure.value).toBe("none");
     expect(arc.homework.value).toBe(true);
     expect(arc.homework.atMs).toBe(2_332_000);
-    expect(arc.packUpMin.value).toBeNull();
-    expect(arc.packUpMin.state).toBe("provisional");
     expect(arc.continuation.value).toBe(false);
   });
 

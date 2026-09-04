@@ -106,7 +106,7 @@ labelling pass replaces both.
 | **R13** | **Closure, and its type** — review, reflection, exit question, summary, or none | Mic | Teacher utterances near the end labelled as closing | **Provisional** (2026-09-04): review / reflection / exit question / summary by phrase in the last five minutes; "none" is a reported outcome |
 | **R14** | **Continuation** — did she say the lesson carries on next time | Mic + P5 | An explicit statement that the topic continues, e.g. "we'll finish this next class" | **Provisional** (2026-09-04), by phrase |
 | **R15** | **Homework set** — whether homework was given, and when | Mic | Teacher utterance assigning work beyond the lesson | **Provisional** (2026-09-04), by phrase incl. "होमवर्क", "ब्रिंग इट टुमारो" |
-| **R16** | **Pack-up instruction** — when the class was told to pack up, against the bell | Mic + P2 | First pack-up instruction, minus P2 | **Provisional** (2026-09-04): imperative phrases only, looked for in the last fifteen minutes |
+| **R16** | **Pack-up instruction** — when the class was told to pack up, against the bell | Mic + P2 | First pack-up instruction, minus P2 | **Removed from the page** at the user's request 2026-09-04: by phrase it matched housekeeping ("keep your almanac on the table"); the `packUp` label survives only to exclude such sentences from R9 |
 
 R13 and R14 answer the same question from two directions: a lesson can end
 properly with a summary, end properly by being explicitly carried over, or just
@@ -122,7 +122,7 @@ stop. All three are different outcomes and the report should name which.
 | **R18** | **Attention requests** — how many times she called for the class's attention | Mic | Teacher utterances flagged as an attention cue | **Provisional** (2026-09-04), by phrase in both scripts |
 | **R19** | **Off-lesson drift** — how many episodes, and total minutes | Mic | Runs of teacher speech labelled as unrelated to the lesson | **Provisional** (2026-09-04): runs of administrative talk (notebooks, planners, signatures, fees) stand in |
 | **R20** | **Questions asked** — count and rate, split into questions put to the class and rhetorical check-ins | Mic | Teacher utterances labelled as asking | **Provisional** (2026-09-04): question marks on the teacher's sentences, with check-ins set aside by a word list incl. tagged-on "…, ओके?"; reported as provisional until the labelling pass |
-| **R21** | **Languages used** — which, how many, the share of speech in each, and switches per minute | Mic | Per-utterance language, normalised before counting | **Built** (2026-09-04) from each sentence's script — an upper bound on Hindi, since the transcriber writes some English in Devanagari |
+| **R21** | **Languages used** — which, how many, the share of speech in each, and switches per minute | Mic | Per-utterance language, normalised before counting | **Built** (2026-09-04). A sentence's language is read from its Hindi FUNCTION words (है, की, को, में, और, नहीं…), not its script, because the transcriber writes English in Devanagari; a code-switched sentence splits its time by its words; a language counts as used at ≥ 5% of her speech |
 
 Three notes that decide whether these numbers are worth anything:
 
@@ -144,11 +144,15 @@ she is in the room (`lib/voice.ts`): speaker B, 88% of in-presence speech,
 which is also what separates her from the period-2 teacher's opening minutes.
 Read off that lesson: teacher talk 59%, others 14%, silence 27%; longest
 stretch 3:21; 133 words/min; 70 teacher turns; ~50 questions to the class
-(provisional); Hindi script 72% / English 26% / mixed 3%, 1.6 switches a
-minute; 73% of the recording transcribed at 0.89 confidence. Two limits
-found there: the transcriber renders some English in Devanagari ("आई विल साइन
-एंड देन रिटर्न"), so script is an upper bound on Hindi; and question marks
-alone overstate R20 by roughly a third even after tag questions are set aside.
+(provisional); 73% of the recording transcribed at 0.89 confidence. The
+first language reading was WRONG: by script the lesson read 72% Hindi, and the
+user pointed out the teacher taught in English. The transcriber renders her
+English in Devanagari ("आई विल साइन एंड देन रिटर्न"); read by Hindi function
+words instead, she is 348 English sentences to 1 Hindi, and the Hindi on the
+page is the period-2 teacher's opening minutes. Question marks alone still
+overstate R20 by roughly a third even after tag questions are set aside. Also
+at the user's request: the turns tile and R16 were taken off the page, and her
+questions to the class are listed under the count, each seekable.
 R7-R16 and R17-R19 need the labelling pass (an LLM key) and the loudness
 pass; the card names them as pending rather than showing zeros.
 

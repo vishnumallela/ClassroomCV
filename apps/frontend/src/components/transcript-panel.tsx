@@ -6,7 +6,7 @@ import { msToClock } from "@/lib/format";
 
 type Transcript = RouterOutputs["videos"]["get"]["transcript"];
 
-const LANGUAGE_LABEL: Record<string, string> = { hi: "hi", en: "en", mixed: "hi+en" };
+const LANGUAGE_LABEL: Record<string, string> = { hi: "hi", en: "en" };
 
 type Filter = "all" | "teacher" | "others";
 

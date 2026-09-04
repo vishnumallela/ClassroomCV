@@ -1,5 +1,5 @@
 import { RAISED_DB, raisedVoiceEvents, type RaisedVoiceEvent } from "@api/lib/loudness";
-import type { Language } from "@api/lib/segment";
+import { languageMix, type Language } from "@api/lib/segment";
 
 /**
  * Group D of docs/teacher-measurements.md, as arithmetic over stored
@@ -73,16 +73,17 @@ export interface VoiceReport {
    *  and nobody else speaking. */
   longestStretchMs: number | null;
   wordsPerMinute: number | null;
-  teacherTurns: number | null;
-  otherTurns: number | null;
-  /** R20, provisional: from question marks with check-ins filtered by a word list. */
+  /** R20, provisional: from question marks with check-ins filtered by a word
+   *  list. `list` is her questions to the class, oldest first, for the reader. */
   questions: {
     state: "provisional";
     toClass: number;
     checkIns: number;
     perTenMinutes: number;
+    list: { idx: number; atMs: number; text: string }[];
   } | null;
-  /** R21: the set of languages, the share of each, and switches per minute. */
+  /** R21: the languages she used, the share of her speech in each (a
+   *  code-switched sentence splits by its words), and switches per minute. */
   languages: {
     shares: { language: Language; speechMs: number; share: number }[];
     count: number;
@@ -111,6 +112,8 @@ export interface VoiceReport {
   pendingLabels: string[];
 }
 
+/** A language counts as used at this share of her speech. */
+export const LANGUAGE_MIN_SHARE = 0.05;
 /** Sentences of one speaker closer than this are one stretch of speech. */
 export const MONOLOGUE_GAP_MS = 2_000;
 /** Below this share of in-presence speech, the dominant voice is a guess. */
@@ -292,8 +295,6 @@ function notObserved(input: VoiceInput, teacher: TeacherVoice, reason: string): 
     speech: null,
     longestStretchMs: null,
     wordsPerMinute: null,
-    teacherTurns: null,
-    otherTurns: null,
     questions: null,
     languages: null,
     raisedVoice: null,
@@ -358,39 +359,38 @@ export function voiceReport(input: VoiceInput): VoiceReport {
     }
   }
 
-  const turns = (list: VoiceUtterance[]) => {
-    let n = 0;
-    let end = -Infinity;
-    for (const u of list) {
-      if (u.startMs - end >= MONOLOGUE_GAP_MS) n++;
-      end = Math.max(end, u.endMs);
-    }
-    return n;
-  };
-
   const words = hers.reduce((s, u) => s + countWords(u.text), 0);
   const wordsPerMinute =
     teacherMs > 0 ? Math.round((words / (teacherMs / 60_000)) * 10) / 10 : null;
 
   let toClass = 0;
   let checkIns = 0;
+  const questionList: { idx: number; atMs: number; text: string }[] = [];
   for (const u of hers) {
     if (!/\?["'”’)]*$/u.test(u.text.trim())) continue;
     if (isCheckIn(u.text)) checkIns++;
-    else toClass++;
+    else {
+      toClass++;
+      questionList.push({ idx: u.idx, atMs: u.startMs, text: u.text });
+    }
   }
 
+  // A sentence's time is split between the languages by its words, so a
+  // Hindi frame carrying English nouns is not booked wholly to either.
   const byLanguage = new Map<Language, number>();
   for (const u of hers) {
-    const lang = u.language as Language | null;
-    if (!lang) continue;
-    byLanguage.set(lang, (byLanguage.get(lang) ?? 0) + Math.max(0, u.endMs - u.startMs));
+    const { hi, en } = languageMix(u.text);
+    const total = hi + en;
+    if (total === 0) continue;
+    const len = Math.max(0, u.endMs - u.startMs);
+    if (hi > 0) byLanguage.set("hi", (byLanguage.get("hi") ?? 0) + (len * hi) / total);
+    if (en > 0) byLanguage.set("en", (byLanguage.get("en") ?? 0) + (len * en) / total);
   }
   const languageTotal = [...byLanguage.values()].reduce((s, x) => s + x, 0);
   let switches = 0;
   let prevLang: Language | null = null;
   for (const u of hers) {
-    const lang = u.language as Language | null;
+    const lang = u.language === "hi" || u.language === "en" ? u.language : null;
     if (!lang) continue;
     if (prevLang && lang !== prevLang) switches++;
     prevLang = lang;
@@ -449,23 +449,25 @@ export function voiceReport(input: VoiceInput): VoiceReport {
     },
     longestStretchMs: longest,
     wordsPerMinute,
-    teacherTurns: turns(hers),
-    otherTurns: turns(others),
     questions: {
       state: "provisional",
       toClass,
       checkIns,
       perTenMinutes: teacherMs > 0 ? Math.round((toClass / (teacherMs / 600_000)) * 10) / 10 : 0,
+      list: questionList.slice(0, 200),
     },
     languages: {
       shares: [...byLanguage.entries()]
         .map(([language, speechMs]) => ({
           language,
-          speechMs,
+          speechMs: Math.round(speechMs),
           share: languageTotal > 0 ? speechMs / languageTotal : 0,
         }))
         .sort((a, b) => b.speechMs - a.speechMs),
-      count: byLanguage.size,
+      // A language she used, not one that appeared: at least LANGUAGE_MIN_SHARE of her speech.
+      count: [...byLanguage.values()].filter(
+        (ms) => languageTotal > 0 && ms / languageTotal >= LANGUAGE_MIN_SHARE,
+      ).length,
       switchesPerMinute:
         teacherMs > 0 ? Math.round((switches / (teacherMs / 60_000)) * 10) / 10 : 0,
     },
