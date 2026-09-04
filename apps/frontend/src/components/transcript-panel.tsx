@@ -3,10 +3,9 @@ import { useState } from "react";
 import { Badge } from "@/components/ui/badge";
 import { Card } from "@/components/ui/card";
 import { msToClock } from "@/lib/format";
+import { englishOf, languageNote } from "@/lib/transcript";
 
 type Transcript = RouterOutputs["videos"]["get"]["transcript"];
-
-const LANGUAGE_LABEL: Record<string, string> = { hi: "hi", en: "en" };
 
 type Filter = "all" | "teacher" | "others";
 
@@ -26,6 +25,7 @@ export function TranscriptPanel({
   onSeek: (ms: number) => void;
 }) {
   const [filter, setFilter] = useState<Filter>("all");
+  const [original, setOriginal] = useState(false);
   const rows = transcript.filter((u) =>
     filter === "all" ? true : filter === "teacher" ? u.isTeacher === true : u.isTeacher !== true,
   );
@@ -38,10 +38,22 @@ export function TranscriptPanel({
         <div className="space-y-1">
           <h2 className="font-display text-base font-semibold tracking-tight">Transcript</h2>
           <p className="text-xs text-muted-foreground">
-            {transcript.length} sentences. Click a time to jump the video there.
+            {transcript.length} sentences, shown in English. Click a time to jump the video there.
           </p>
         </div>
         <div className="flex gap-1">
+          <button
+            type="button"
+            onClick={() => setOriginal((v) => !v)}
+            className={
+              "mr-2 rounded-md border px-2 py-0.5 text-xs transition-colors " +
+              (original
+                ? "border-primary bg-primary text-primary-foreground"
+                : "border-input bg-background text-muted-foreground hover:text-foreground")
+            }
+          >
+            Original
+          </button>
           {(["all", "teacher", "others"] as Filter[]).map((f) => (
             <button
               key={f}
@@ -79,11 +91,11 @@ export function TranscriptPanel({
                 {u.isTeacher ? "Teacher" : `Other ${u.speaker}`}
               </Badge>
             </span>
-            <span className="min-w-0 flex-1 leading-snug">
-              {u.text}
-              {u.language && (
-                <span className="ml-1.5 align-middle text-[0.6rem] uppercase text-muted-foreground/70">
-                  {LANGUAGE_LABEL[u.language] ?? u.language}
+            <span className="min-w-0 flex-1 leading-snug" title={original ? undefined : u.text}>
+              {original ? u.text : englishOf(u)}
+              {languageNote(u, u.isTeacher) && (
+                <span className="ml-1.5 text-[0.7rem] text-muted-foreground">
+                  {languageNote(u, u.isTeacher)}
                 </span>
               )}
             </span>

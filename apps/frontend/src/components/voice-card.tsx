@@ -6,6 +6,7 @@ import { Button } from "@/components/ui/button";
 import { Card } from "@/components/ui/card";
 import { msToClock } from "@/lib/format";
 import { orpcClient } from "@/lib/orpc";
+import { displayLine } from "@/lib/transcript";
 
 type Voice = RouterOutputs["videos"]["get"]["voice"];
 
@@ -164,7 +165,10 @@ export function VoiceCard({
               }
               sub={
                 voice.languages
-                  ? `${voice.languages.count} used · ${voice.languages.switchesPerMinute} switches per minute of her speech`
+                  ? (voice.languages.teacherUsedHindi
+                      ? `The teacher used Hindi during the lesson (${voice.languages.hindiSentences} sentence${voice.languages.hindiSentences === 1 ? "" : "s"}). `
+                      : "The teacher taught in English. ") +
+                    `${voice.languages.switchesPerMinute} switches per minute of her speech.`
                   : undefined
               }
             />
@@ -212,7 +216,9 @@ export function VoiceCard({
                     >
                       {msToClock(q.atMs)}
                     </button>
-                    <span className="leading-snug">{q.text}</span>
+                    <span className="leading-snug" title={q.text}>
+                      {displayLine(q, true)}
+                    </span>
                   </li>
                 ))}
               </ol>
@@ -223,8 +229,8 @@ export function VoiceCard({
 
       <p className="mt-4 text-[0.7rem] leading-relaxed text-muted-foreground">
         Phrase patterns stand in for the labelling pass on: {voice.pendingLabels.join("; ")} — those
-        numbers are provisional and show their sentence. A sentence's language is read from its
-        Hindi function words, so English the transcriber wrote in Devanagari still counts as
+        numbers are provisional and show their sentence. Sentences are shown in English; where the
+        original was Hindi, the note says so. English the transcriber wrote in Devanagari counts as
         English.
       </p>
     </Card>

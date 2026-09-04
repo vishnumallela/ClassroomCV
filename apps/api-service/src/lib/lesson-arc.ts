@@ -25,6 +25,9 @@ export interface Evidence {
   idx: number;
   atMs: number;
   text: string;
+  /** English, when the sentence was not already English. */
+  textEn: string | null;
+  language: string | null;
 }
 
 export interface Measure<T> {
@@ -39,6 +42,8 @@ export interface ArcSentence {
   startMs: number;
   endMs: number;
   text: string;
+  textEn?: string | null;
+  language?: string | null;
 }
 
 export interface ArcInput {
@@ -92,7 +97,13 @@ function measure<T>(
 }
 
 function ev(s: ArcSentence): Evidence {
-  return { idx: s.idx, atMs: s.startMs, text: s.text };
+  return {
+    idx: s.idx,
+    atMs: s.startMs,
+    text: s.text,
+    textEn: s.textEn ?? null,
+    language: s.language ?? null,
+  };
 }
 
 function minutes(ms: number): number {

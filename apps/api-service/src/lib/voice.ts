@@ -31,6 +31,8 @@ export interface VoiceUtterance {
   language: string | null;
   /** Mean RMS of the sentence's audio in dBFS, from the loudness pass; null until it runs. */
   rmsDb?: number | null;
+  /** English, when the sentence was not already English. */
+  textEn?: string | null;
 }
 
 export type Interval = [number, number];
@@ -80,7 +82,13 @@ export interface VoiceReport {
     toClass: number;
     checkIns: number;
     perTenMinutes: number;
-    list: { idx: number; atMs: number; text: string }[];
+    list: {
+      idx: number;
+      atMs: number;
+      text: string;
+      textEn: string | null;
+      language: string | null;
+    }[];
   } | null;
   /** R21: the languages she used, the share of her speech in each (a
    *  code-switched sentence splits by its words), and switches per minute. */
@@ -88,6 +96,9 @@ export interface VoiceReport {
     shares: { language: Language; speechMs: number; share: number }[];
     count: number;
     switchesPerMinute: number;
+    /** She used Hindi at all: for the reader's note, whatever the share. */
+    teacherUsedHindi: boolean;
+    hindiSentences: number;
   } | null;
   /** R17: her sentences RAISED_DB above her own median, sustained; merged into episodes. */
   raisedVoice: {
@@ -365,13 +376,25 @@ export function voiceReport(input: VoiceInput): VoiceReport {
 
   let toClass = 0;
   let checkIns = 0;
-  const questionList: { idx: number; atMs: number; text: string }[] = [];
+  const questionList: {
+    idx: number;
+    atMs: number;
+    text: string;
+    textEn: string | null;
+    language: string | null;
+  }[] = [];
   for (const u of hers) {
     if (!/\?["'”’)]*$/u.test(u.text.trim())) continue;
     if (isCheckIn(u.text)) checkIns++;
     else {
       toClass++;
-      questionList.push({ idx: u.idx, atMs: u.startMs, text: u.text });
+      questionList.push({
+        idx: u.idx,
+        atMs: u.startMs,
+        text: u.text,
+        textEn: u.textEn ?? null,
+        language: u.language,
+      });
     }
   }
 
@@ -470,6 +493,8 @@ export function voiceReport(input: VoiceInput): VoiceReport {
       ).length,
       switchesPerMinute:
         teacherMs > 0 ? Math.round((switches / (teacherMs / 60_000)) * 10) / 10 : 0,
+      teacherUsedHindi: hers.some((u) => u.language === "hi"),
+      hindiSentences: hers.filter((u) => u.language === "hi").length,
     },
     raisedVoice,
     coverage: {

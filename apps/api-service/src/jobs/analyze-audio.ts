@@ -1,10 +1,17 @@
 import { type Job, UnrecoverableError } from "bullmq";
 import { dirname, join } from "node:path";
-import { getVideo, replaceUtterances, setAudioStatus, type UtteranceInput } from "@api/db/queries";
+import {
+  getUtterances,
+  getVideo,
+  replaceUtterances,
+  setAudioStatus,
+  type UtteranceInput,
+} from "@api/db/queries";
 import { isS3 } from "@api/lib/storage";
 import { audioQualityNote, extractAudio, probeAudio } from "@api/lib/audio";
 import { logger } from "@api/lib/logger";
 import { measureLoudness, sentenceLoudness } from "@api/lib/loudness";
+import { TranslateNotConfiguredError, translateSentences } from "@api/lib/translate";
 import { languageOf, segmentSentences } from "@api/lib/segment";
 import { mediaSource } from "@api/jobs/analyze-video";
 import type { AudioJobData } from "@api/lib/queue";
@@ -141,6 +148,32 @@ export async function processAudioJob(job: Job<AudioJobData>): Promise<void> {
       for (const r of rows) Object.assign(r, sentenceLoudness(windows, r.startMs, r.endMs));
     } catch (err) {
       logger.warn({ err, videoId }, "loudness pass failed (non-fatal)");
+    }
+    // English for what is not already English (lib/translate.ts). Re-used
+    // from the previous run by exact sentence text, so a re-cut of the same
+    // transcript never pays to translate the same sentence twice; non-fatal,
+    // because a lesson without translations still has every number.
+    try {
+      const known = new Map(
+        (await getUtterances(videoId))
+          .filter((u) => u.textEn)
+          .map((u) => [u.text, u.textEn as string] as const),
+      );
+      for (const r of rows) r.textEn = known.get(r.text) ?? null;
+      const fresh = await translateSentences(
+        rows.filter((r) => !r.textEn).map((r) => ({ idx: r.idx, text: r.text })),
+      );
+      for (const r of rows) {
+        const t = fresh.get(r.idx);
+        if (t) r.textEn = t.en;
+      }
+      logger.info({ videoId, reused: known.size, translated: fresh.size }, "translations ready");
+    } catch (err) {
+      if (err instanceof TranslateNotConfiguredError) {
+        logger.warn({ videoId }, "translation skipped: no key configured");
+      } else {
+        logger.warn({ err, videoId }, "translation failed (non-fatal)");
+      }
     }
     await replaceUtterances(videoId, rows);
 

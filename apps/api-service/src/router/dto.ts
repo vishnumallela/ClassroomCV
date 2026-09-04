@@ -286,6 +286,7 @@ export function toDetailDto(d: Detail, timezone: string) {
       confidence: u.confidence,
       language: u.language,
       rmsDb: u.rmsDb,
+      textEn: u.textEn,
     })),
     durationMs: v.durationMs,
     presenceIntervals:
@@ -303,7 +304,14 @@ export function toDetailDto(d: Detail, timezone: string) {
     sentences: voice.teacher.speaker
       ? utterances
           .filter((u) => u.speaker === voice.teacher.speaker)
-          .map((u) => ({ idx: u.idx, startMs: u.startMs, endMs: u.endMs, text: u.text }))
+          .map((u) => ({
+            idx: u.idx,
+            startMs: u.startMs,
+            endMs: u.endMs,
+            text: u.text,
+            textEn: u.textEn,
+            language: u.language,
+          }))
       : [],
     noSentencesReason:
       utterances.length > 0 && !voice.teacher.speaker
@@ -368,6 +376,7 @@ export function toDetailDto(d: Detail, timezone: string) {
       startMs: u.startMs,
       endMs: u.endMs,
       text: u.text,
+      textEn: u.textEn,
       confidence: u.confidence,
       language: u.language,
       intent: u.intent,

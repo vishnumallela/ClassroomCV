@@ -264,6 +264,12 @@ export const utterances = pgTable("utterances", {
   // compares her sentences against her own baseline at read time.
   rmsDb: real("rms_db"),
   peakDb: real("peak_db"),
+
+  // --- English (null until the translation pass runs, or when the sentence
+  // was already in Latin script). The transcriber writes much of the
+  // teacher's English in Devanagari, so this is as often a de-transliteration
+  // as a translation (lib/translate.ts).
+  textEn: text("text_en"),
 });
 
 export const zones = pgTable("zones", {

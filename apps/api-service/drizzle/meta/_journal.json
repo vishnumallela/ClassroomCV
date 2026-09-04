@@ -120,6 +120,13 @@
       "when": 1788517553807,
       "tag": "0016_utterance_loudness",
       "breakpoints": true
+    },
+    {
+      "idx": 17,
+      "version": "7",
+      "when": 1788546656217,
+      "tag": "0017_utterance_translation",
+      "breakpoints": true
     }
   ]
 }

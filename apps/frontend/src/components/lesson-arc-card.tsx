@@ -2,13 +2,20 @@ import type { RouterOutputs } from "@classroom/api-contracts";
 import { Badge } from "@/components/ui/badge";
 import { Card } from "@/components/ui/card";
 import { msToClock } from "@/lib/format";
+import { displayLine } from "@/lib/transcript";
 
 type Arc = RouterOutputs["videos"]["get"]["arc"];
 type Measure = {
   value: unknown;
   state: "observed" | "provisional" | "not_observed";
   reason: string | null;
-  evidence: { idx: number; atMs: number; text: string }[];
+  evidence: {
+    idx: number;
+    atMs: number;
+    text: string;
+    textEn?: string | null;
+    language?: string | null;
+  }[];
 };
 
 const CLOSURE_LABEL: Record<string, string> = {
@@ -75,7 +82,9 @@ function Row({
                 {msToClock(e.atMs)}
                 {clock(e.atMs) ? ` · ${clock(e.atMs)}` : ""}
               </button>
-              <span className="truncate text-muted-foreground">“{e.text}”</span>
+              <span className="truncate text-muted-foreground" title={e.text}>
+                “{displayLine(e, true)}”
+              </span>
             </li>
           ))}
         </ul>

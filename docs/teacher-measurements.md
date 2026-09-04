@@ -156,6 +156,23 @@ questions to the class are listed under the count, each seekable.
 R7-R16 and R17-R19 need the labelling pass (an LLM key) and the loudness
 pass; the card names them as pending rather than showing zeros.
 
+**Everything reads in English (2026-09-05).** Every sentence that is not
+already in Latin script — Hindi, and the teacher's English that the
+transcriber wrote in Devanagari — is translated by a language model through
+AssemblyAI's LLM gateway (`lib/translate.ts`), which runs on the transcription
+key already configured; this account is entitled to `qwen3.5-4b-32k-fast`
+there (its Claude and Gemini models return "no access"). Stored per sentence
+as `text_en` and re-used by exact text on re-runs, so a re-cut never pays
+twice. The transcript, the question list and every evidence sentence show the
+English, with the original on hover or a toggle; where the original was Hindi
+by the function-word rule, the line carries "(Teacher used Hindi)" — or
+"(Hindi)" for another speaker — and the Languages tile says "The teacher used
+Hindi during the lesson (N sentences)" or "The teacher taught in English".
+The gateway rate-limits per minute: batches of 40 with retries and a pause
+between them; a batch that still fails is skipped and the next run fills it
+from the cache. On the real lesson: 279 Devanagari sentences, all translated
+across two runs, a few garbled originals translating to garble.
+
 ---
 
 ## Group E — Trust
