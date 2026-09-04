@@ -305,7 +305,7 @@ function notObserved(input: VoiceInput, teacher: TeacherVoice, reason: string): 
 
 const PENDING_LABELS = [
   "R7-R12 lesson start and end",
-  "R13-R16 closure, continuation, homework, pack-up",
+  "R13-R15 closure, continuation, homework",
   "R18 attention requests",
   "R19 off-lesson drift",
   "R20 questions",
