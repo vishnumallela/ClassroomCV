@@ -318,6 +318,10 @@ export function toDetailDto(d: Detail, timezone: string) {
         ? `The teacher's voice could not be told apart: ${voice.teacher.reason}`
         : undefined,
     boardIntervals: (d.analytics?.boardIntervals as [number, number][] | undefined) ?? [],
+    actionIntervals: [
+      ...((d.analytics?.pointingIntervals as [number, number][] | undefined) ?? []),
+      ...((d.analytics?.writingIntervals as [number, number][] | undefined) ?? []),
+    ],
     durationMs: v.durationMs ?? 0,
     bellStartMs: bells?.startMs ?? null,
     bellEndMs: bells?.endMs ?? null,

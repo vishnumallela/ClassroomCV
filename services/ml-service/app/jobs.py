@@ -340,6 +340,7 @@ def derive_result(
     detections: list[Detection],
     zones: list[dict],
     actions_available: bool = True,
+    propose_zones: Optional[bool] = None,
     period_ms: Optional[tuple[int, int]] = None,
 ) -> dict:
     """Teacher timeline + events + analytics. Shared by analyze & rederive.
@@ -369,7 +370,9 @@ def derive_result(
     # now means the first analysis already reports board time rather than
     # needing a second rederive pass to pick it up.
     proposed: list[dict] = []
-    if actions_available:  # a fresh detector pass; stored rows are teacher-only
+    if propose_zones is None:
+        propose_zones = actions_available
+    if propose_zones:  # a fresh detector pass: screen/door boxes are in hand
         for kind in ("board", "door"):
             if any(z.get("kind") == kind for z in zones):
                 continue

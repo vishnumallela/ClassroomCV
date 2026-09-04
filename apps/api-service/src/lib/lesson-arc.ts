@@ -49,7 +49,10 @@ export interface ArcSentence {
 export interface ArcInput {
   /** The teacher's sentences, in time order. */
   sentences: ArcSentence[];
+  /** Presence at the board (for the lesson's END). */
   boardIntervals: Interval[];
+  /** Writing or pointing at the board (the START's video signal). */
+  actionIntervals: Interval[];
   durationMs: number;
   /** Scheduled start and end as offsets into the recording, when known. */
   bellStartMs: number | null;
@@ -62,7 +65,13 @@ export interface ArcInput {
 }
 
 export interface LessonArc {
-  start: Measure<number> & { corroboratedByBoard: boolean; boardAtMs: number | null };
+  /** R7: the earliest of her first task-setting sentence and her first writing
+   *  or pointing at the board; observed when both agree, provisional on one. */
+  start: Measure<number> & {
+    corroborated: boolean;
+    voiceMs: number | null;
+    actionMs: number | null;
+  };
   startDelayMin: Measure<number>;
   end: Measure<number> & { corroboratedByBoard: boolean; boardLeftMs: number | null };
   durationMin: Measure<number>;
@@ -116,54 +125,60 @@ export function lessonArc(input: ArcInput): LessonArc {
     .sort((a, b) => a.startMs - b.startMs || a.idx - b.idx)
     .map((s) => ({ s, l: labelSentence(s.text) }));
   const hasAudio = labelled.length > 0;
-  const firstBoard =
-    input.boardIntervals.length > 0 ? Math.min(...input.boardIntervals.map((b) => b[0])) : null;
+  input.boardIntervals.length > 0 ? Math.min(...input.boardIntervals.map((b) => b[0])) : null;
   const lastBoard =
     input.boardIntervals.length > 0 ? Math.max(...input.boardIntervals.map((b) => b[1])) : null;
 
   // --- R7 start ------------------------------------------------------------
-  const afterArrival = (s: ArcSentence) => input.arrivalMs === null || s.endMs >= input.arrivalMs;
-  const firstTask = labelled.find(({ s, l }) => l.setsTask && afterArrival(s));
+  // Two independent signals, either of which starts the lesson: her first
+  // task-setting sentence (voice) and her first writing or pointing at the
+  // board (video — standing at the board is not enough). The earlier of the
+  // two is the start; when both are present and agree within CORROBORATE_MS
+  // the start is OBSERVED, on one alone it is provisional.
+  const afterArrival = (ms: number) =>
+    input.arrivalMs === null || ms >= input.arrivalMs - CORROBORATE_MS;
+  const firstTask = labelled.find(({ s, l }) => l.setsTask && afterArrival(s.endMs));
+  const voiceMs = firstTask?.s.startMs ?? null;
+  const actionStarts = input.actionIntervals
+    .map((a) => a[0])
+    .filter(afterArrival)
+    .sort((a, b) => a - b);
+  const actionMs = actionStarts[0] ?? null;
   let start: LessonArc["start"];
-  if (firstTask) {
-    const near =
-      firstBoard !== null && Math.abs(firstBoard - firstTask.s.startMs) <= CORROBORATE_MS;
+  if (voiceMs !== null || actionMs !== null) {
+    const both = voiceMs !== null && actionMs !== null;
+    const agree = both && Math.abs(voiceMs - actionMs) <= CORROBORATE_MS;
+    const value = Math.min(...[voiceMs, actionMs].filter((v): v is number => v !== null));
+    const reason = agree
+      ? "Her first task-setting sentence and her first writing or pointing at the board agree."
+      : both
+        ? `Task-setting sentence and board writing/pointing ${Math.round(Math.abs(voiceMs - actionMs) / 60_000)} min apart; the earlier is taken.`
+        : voiceMs !== null
+          ? "First task-setting sentence; no writing or pointing at the board near it."
+          : "First writing or pointing at the board; no task-setting sentence found.";
     start = {
       ...measure(
-        firstTask.s.startMs,
-        "provisional",
-        near
-          ? "First task-setting sentence, with the first board interaction near it."
-          : "First task-setting sentence; no board interaction near it.",
-        [ev(firstTask.s)],
+        value,
+        agree ? "observed" : "provisional",
+        reason,
+        firstTask ? [ev(firstTask.s)] : [],
       ),
-      corroboratedByBoard: near,
-      boardAtMs: firstBoard,
-    };
-  } else if (firstBoard !== null) {
-    start = {
-      ...measure(
-        firstBoard,
-        "provisional",
-        hasAudio
-          ? "No task-setting sentence found; the first board interaction stands in."
-          : "No transcript; the first board interaction stands in.",
-      ),
-      corroboratedByBoard: false,
-      boardAtMs: firstBoard,
+      corroborated: agree,
+      voiceMs,
+      actionMs,
     };
   } else {
     start = {
       ...measure<number>(
         null,
         "not_observed",
-        hasAudio ? "No task-setting sentence and no board interaction found." : NO,
+        hasAudio ? "No task-setting sentence and no writing or pointing at the board." : NO,
       ),
-      corroboratedByBoard: false,
-      boardAtMs: null,
+      corroborated: false,
+      voiceMs: null,
+      actionMs: null,
     };
   }
-
   // --- R8 start delay -----------------------------------------------------
   const startDelayMin =
     start.value !== null && input.bellStartMs !== null

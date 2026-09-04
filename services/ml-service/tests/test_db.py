@@ -249,14 +249,16 @@ async def test_unattributed_teacher_boxes_are_persisted(monkeypatch):
     ]
 
 
-async def test_only_the_teacher_class_is_ever_stored(monkeypatch):
+async def test_only_the_teacher_and_her_gestures_are_ever_stored(monkeypatch):
     """Regression guard for the tempting one-character fix.
 
     Before 0014, `track_no is not None` was ALSO what kept every other class
-    out, because only teacher boxes were ever stamped. Loosening that check
-    instead of testing the class would have started persisting screen, door,
-    pointing and writing rows — silently, with no test failing, and with the
-    privacy claim in this module's docstring no longer true of the data.
+    out, because only teacher boxes were ever stamped. The filter tests the
+    CLASS: her `teacher` box and her `pointing`/`writing` boxes (her own
+    gestures, kept since 2026-09-05 so the lesson-start signal survives a
+    re-derive). Screen and door rows never land here, and neither does any
+    student — the privacy claim in this module's docstring is a property of
+    the data.
     """
     dets = [
         _det(0, cls=CLASS_TEACHER, track_no=None),
@@ -267,8 +269,12 @@ async def test_only_the_teacher_class_is_ever_stored(monkeypatch):
     ]
     conn, n = await _write(monkeypatch, dets)
 
-    assert n == 1
-    assert {cls for _, _, cls in _copied_columns(conn)} == {CLASS_TEACHER}
+    assert n == 3
+    assert {cls for _, _, cls in _copied_columns(conn)} == {
+        CLASS_TEACHER,
+        CLASS_POINTING,
+        CLASS_WRITING,
+    }
 
 
 async def test_sub_threshold_teacher_boxes_are_not_stored(monkeypatch):

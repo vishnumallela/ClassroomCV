@@ -25,6 +25,8 @@ from app.models import (
     AnalysisResult,
     AnalyzeAccepted,
     AnalyzeRequest,
+    CLASS_POINTING,
+    CLASS_WRITING,
     DetectBoardRequest,
     DetectBoardResponse,
     JobStatusOut,
@@ -170,15 +172,19 @@ async def rederive(req: RederiveRequest) -> dict:
         width=int(info.get("width") or 0),
         height=int(info.get("height") or 0),
     )
-    # actions_available=False: these rows came from detection_events, which is
-    # teacher-only, so the pointing/writing KPIs are unknown here and must stay
-    # null rather than being recomputed as zero. The API carries the previously
-    # measured values forward.
+    # Stored rows carry her pointing/writing boxes only since 2026-09-05, so
+    # the action KPIs (and the lesson-start signal) are recomputed only when
+    # such rows exist; a lesson analysed before that keeps them null rather
+    # than recomputed as zero, and the API carries the measured values
+    # forward. Zones are never re-proposed here: screen and door boxes are
+    # not stored.
+    has_actions = any(d.cls in (CLASS_POINTING, CLASS_WRITING) for d in detections)
     result = jobs.derive_result(
         meta,
         detections,
         [z.model_dump() for z in req.zones],
-        actions_available=False,
+        actions_available=has_actions,
+        propose_zones=False,
         period_ms=_period(req.period_start_ms, req.period_end_ms),
     )
     if detections:

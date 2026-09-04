@@ -10,10 +10,12 @@
 - fetch_video_info: best-effort read of the dashboard's videos row (duration
   etc.) for the /rederive response; returns None when unavailable.
 
-ONLY THE TEACHER CLASS IS STORED. Every persisted row is a box the detector
-labelled `teacher`, so "students are never displayed" is a property of the data
-rather than of the renderer — there is no student box in the database to leak
-into an overlay by mistake. The board and door live in `zones` (one polygon
+ONLY THE TEACHER IS STORED: her `teacher` boxes, and her `pointing` and
+`writing` boxes (her own gestures at the board, at action_conf) since
+2026-09-05 so the lesson-start signal survives a re-derive. Every persisted
+row is therefore a box on the teacher, so "students are never displayed" is a
+property of the data rather than of the renderer — there is no student box in
+the database to leak into an overlay by mistake. The board and door live in `zones` (one polygon
 each, not one row per frame) and their derived numbers in `video_analytics`, so
 nothing is lost.
 
@@ -36,7 +38,7 @@ from typing import Optional
 import asyncpg
 
 from app.config import get_settings
-from app.models import CLASS_TEACHER, Detection
+from app.models import CLASS_POINTING, CLASS_TEACHER, CLASS_WRITING, Detection
 
 COPY_COLUMNS = ["video_ts_ms", "video_id", "track_no", "bbox", "confidence", "meta"]
 COPY_BATCH_SIZE = 5_000
@@ -114,7 +116,9 @@ async def replace_detections(
         # would be storing noise no attribution rule would ever consult. Both
         # read the setting rather than a local constant, so there is one
         # definition of "a teacher box worth considering", not two.
-        threshold = get_settings().teacher_conf
+        settings = get_settings()
+        threshold = settings.teacher_conf
+        action_threshold = settings.action_conf
         records = [
             (
                 d.video_ts_ms,
@@ -125,7 +129,8 @@ async def replace_detections(
                 json.dumps({"cls": int(d.cls), "app": d.app} if d.app is not None else {"cls": int(d.cls)}),
             )
             for d in detections
-            if d.cls == CLASS_TEACHER and d.conf >= threshold
+            if (d.cls == CLASS_TEACHER and d.conf >= threshold)
+            or (d.cls in (CLASS_POINTING, CLASS_WRITING) and d.conf >= action_threshold)
         ]
         async with conn.transaction():
             row = await conn.fetchrow(

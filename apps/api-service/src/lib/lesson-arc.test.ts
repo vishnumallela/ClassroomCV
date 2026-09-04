@@ -62,6 +62,10 @@ describe("lessonArc", () => {
       [255_000, 336_000],
       [2_507_000, 2_672_000],
     ] as [number, number][],
+    actionIntervals: [
+      [262_000, 275_000],
+      [1_300_000, 1_320_000],
+    ] as [number, number][],
     durationMs: 2_700_922,
     bellStartMs: 2_000,
     bellEndMs: 2_702_000,
@@ -84,20 +88,47 @@ describe("lessonArc", () => {
     s(2_695_000, 2_698_000, "हु इज़ द मॉनिटर ऑफ़ दिस बोर्ड?"),
   ];
 
-  test("start is the first task-setting sentence after her arrival, corroborated by the board", () => {
+  test("start is the earlier of her first task-setting sentence and her first board writing or pointing; both agreeing makes it observed", () => {
     const arc = lessonArc({ ...base, sentences });
+    // writing at 262 s, the sentence at 289 s: 27 s apart, so the start is observed at 262 s
+    expect(arc.start.value).toBe(262_000);
+    expect(arc.start.state).toBe("observed");
+    expect(arc.start.corroborated).toBe(true);
+    expect(arc.start.voiceMs).toBe(289_000);
+    expect(arc.start.actionMs).toBe(262_000);
+    expect(arc.start.evidence[0]?.text).toContain("take out your literacy companion");
+    expect(arc.startDelayMin.value).toBe(4.3);
+  });
+
+  test("one signal alone starts the lesson, provisionally", () => {
+    const voiceOnly = lessonArc({ ...base, sentences, actionIntervals: [] });
+    expect(voiceOnly.start.value).toBe(289_000);
+    expect(voiceOnly.start.state).toBe("provisional");
+    expect(voiceOnly.start.reason).toContain("no writing or pointing");
+    const boardOnly = lessonArc({ ...base, sentences: [], actionIntervals: [[262_000, 275_000]] });
+    expect(boardOnly.start.value).toBe(262_000);
+    expect(boardOnly.start.state).toBe("provisional");
+    expect(boardOnly.start.reason).toContain("no task-setting sentence");
+  });
+
+  test("standing at the board is not a start signal; neither signal means Not Observed", () => {
+    const arc = lessonArc({ ...base, sentences: [], actionIntervals: [] });
+    expect(arc.start.value).toBeNull();
+    expect(arc.start.state).toBe("not_observed");
+  });
+
+  test("two signals far apart take the earlier, provisionally", () => {
+    const arc = lessonArc({ ...base, sentences, actionIntervals: [[900_000, 920_000]] });
     expect(arc.start.value).toBe(289_000);
     expect(arc.start.state).toBe("provisional");
-    expect(arc.start.corroboratedByBoard).toBe(true);
-    expect(arc.start.evidence[0]?.text).toContain("take out your literacy companion");
-    expect(arc.startDelayMin.value).toBe(4.8);
+    expect(arc.start.reason).toContain("apart");
   });
 
   test("end is the later of the last teaching sentence and leaving the board, capped at departure", () => {
     const arc = lessonArc({ ...base, sentences });
     // last teaching sentence ends 2571 s; board left at 2672 s; departure 2700.8 s
     expect(arc.end.value).toBe(2_672_000);
-    expect(arc.durationMin.value).toBe(39.7);
+    expect(arc.durationMin.value).toBe(40.2);
     expect(arc.fitsPeriod.value).toBe(true);
     expect(arc.overrunMin.value).toBe(-0.5);
   });
@@ -141,10 +172,10 @@ describe("lessonArc", () => {
     expect(arc.closure.evidence[0]?.atMs).toBe(2_660_000);
   });
 
-  test("no transcript: start falls back to the board, the rest is Not Observed with a reason", () => {
+  test("no transcript: start comes from writing or pointing alone, the rest is Not Observed with a reason", () => {
     const arc = lessonArc({ ...base, sentences: [] });
-    expect(arc.start.value).toBe(255_000);
-    expect(arc.start.reason).toContain("first board interaction");
+    expect(arc.start.value).toBe(262_000);
+    expect(arc.start.reason).toContain("no task-setting sentence");
     expect(arc.closure.state).toBe("not_observed");
     expect(arc.homework.state).toBe("not_observed");
     expect(arc.attentionRequests.state).toBe("not_observed");
@@ -152,7 +183,7 @@ describe("lessonArc", () => {
 
   test("no bells: the delays are Not Observed, the times still stand", () => {
     const arc = lessonArc({ ...base, sentences, bellStartMs: null, bellEndMs: null });
-    expect(arc.start.value).toBe(289_000);
+    expect(arc.start.value).toBe(262_000);
     expect(arc.startDelayMin.state).toBe("not_observed");
     expect(arc.fitsPeriod.state).toBe("not_observed");
     expect(arc.overrunMin.state).toBe("not_observed");

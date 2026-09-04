@@ -132,14 +132,24 @@ export function LessonArcCard({
       <Card className="p-5">
         <h2 className="font-display text-base font-semibold tracking-tight">The lesson</h2>
         <p className="text-xs text-muted-foreground">
-          Start from the first task-setting sentence, corroborated by the first board interaction;
-          end from the last teaching sentence or the last time she left the board.
+          Start from her first task-setting sentence or her first writing or pointing at the board,
+          whichever comes first — both together make it observed; end from the last teaching
+          sentence or the last time she left the board.
         </p>
         <div className="mt-2 divide-y divide-border/60">
           <Row
             id="R7"
             label="Lesson start"
-            value={at(arc.start.value) + (arc.start.corroboratedByBoard ? " · board confirms" : "")}
+            value={
+              at(arc.start.value) +
+              (arc.start.corroborated
+                ? " · voice and board agree"
+                : arc.start.actionMs !== null && arc.start.voiceMs === null
+                  ? " · from writing/pointing at the board"
+                  : arc.start.voiceMs !== null && arc.start.actionMs === null
+                    ? " · from her words alone"
+                    : "")
+            }
             measure={arc.start}
             onSeek={onSeek}
             clock={clock}
