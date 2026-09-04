@@ -7,8 +7,10 @@ import { DataQualityCard } from "@/components/data-quality-card";
 import { EventsTable } from "@/components/events-table";
 import { HeatmapCard } from "@/components/heatmap-card";
 import { KpiCards } from "@/components/kpi-cards";
+import { LessonArcCard } from "@/components/lesson-arc-card";
 import { LessonDetailsCard } from "@/components/lesson-details-card";
 import { TranscriptPanel } from "@/components/transcript-panel";
+import { TrustCard } from "@/components/trust-card";
 import { VoiceCard } from "@/components/voice-card";
 import { StatusBadge } from "@/components/status-badge";
 import { TimelineStrip } from "@/components/timeline-strip";
@@ -165,6 +167,15 @@ function VideoDetail() {
       {/* The audio half runs independently of the GPU, so its card is not
           gated on the video analysis either. */}
       <VoiceCard videoId={video.id} voice={data.voice} />
+
+      <LessonArcCard
+        arc={data.arc}
+        recordingStartedAt={data.lesson.recordingStartedAt}
+        timezone={data.punctuality.timezone}
+        onSeek={seek}
+      />
+
+      <TrustCard trust={data.trust} />
 
       {!done ? (
         <Card className="p-6 text-sm text-muted-foreground">

@@ -4,6 +4,7 @@ import { getVideo, replaceUtterances, setAudioStatus, type UtteranceInput } from
 import { isS3 } from "@api/lib/storage";
 import { audioQualityNote, extractAudio, probeAudio } from "@api/lib/audio";
 import { logger } from "@api/lib/logger";
+import { measureLoudness, sentenceLoudness } from "@api/lib/loudness";
 import { languageOf, segmentSentences } from "@api/lib/segment";
 import { mediaSource } from "@api/jobs/analyze-video";
 import type { AudioJobData } from "@api/lib/queue";
@@ -132,6 +133,15 @@ export async function processAudioJob(job: Job<AudioJobData>): Promise<void> {
       confidence: u.confidence ?? null,
       language: u.language,
     }));
+    // R17 needs volume, which the transcript does not carry: one pass over the
+    // FLAC, folded onto each sentence (lib/loudness.ts). Non-fatal — a lesson
+    // whose loudness pass fails still has every other voice number.
+    try {
+      const windows = await measureLoudness(audio.path);
+      for (const r of rows) Object.assign(r, sentenceLoudness(windows, r.startMs, r.endMs));
+    } catch (err) {
+      logger.warn({ err, videoId }, "loudness pass failed (non-fatal)");
+    }
     await replaceUtterances(videoId, rows);
 
     await setAudioStatus(videoId, {

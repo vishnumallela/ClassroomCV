@@ -170,6 +170,20 @@ export function VoiceCard({ videoId, voice }: { videoId: string; voice: Voice })
               }
             />
             <Tile
+              label="Raised voice"
+              value={
+                voice.raisedVoice?.state === "observed"
+                  ? `${voice.raisedVoice.count}`
+                  : "Not Observed"
+              }
+              sub={
+                voice.raisedVoice?.state === "observed"
+                  ? `${voice.raisedVoice.perTenMinutes ?? 0} per 10 min · ${voice.raisedVoice.thresholdDb} dB over her own ${voice.raisedVoice.baselineDb} dB baseline`
+                  : (voice.raisedVoice?.reason ?? undefined)
+              }
+              muted={voice.raisedVoice?.state !== "observed"}
+            />
+            <Tile
               label="Heard"
               value={voice.coverage ? pct(voice.coverage.transcribedShare) : "—"}
               sub={
@@ -187,8 +201,9 @@ export function VoiceCard({ videoId, voice }: { videoId: string; voice: Voice })
       )}
 
       <p className="mt-4 text-[0.7rem] leading-relaxed text-muted-foreground">
-        Not yet measured, pending the labelling pass: {voice.pendingLabels.join("; ")}. Hindi is
-        read from its script, so romanised Hindi counts as English.
+        Phrase patterns stand in for the labelling pass on: {voice.pendingLabels.join("; ")} — those
+        numbers are provisional and show their sentence. Hindi is read from its script, so romanised
+        Hindi counts as English, and the transcriber writes some English in Devanagari.
       </p>
     </Card>
   );

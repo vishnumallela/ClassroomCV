@@ -1,3 +1,4 @@
+import { RAISED_DB, raisedVoiceEvents, type RaisedVoiceEvent } from "@api/lib/loudness";
 import type { Language } from "@api/lib/segment";
 
 /**
@@ -28,6 +29,8 @@ export interface VoiceUtterance {
   text: string;
   confidence: number | null;
   language: string | null;
+  /** Mean RMS of the sentence's audio in dBFS, from the loudness pass; null until it runs. */
+  rmsDb?: number | null;
 }
 
 export type Interval = [number, number];
@@ -85,6 +88,16 @@ export interface VoiceReport {
     count: number;
     switchesPerMinute: number;
   } | null;
+  /** R17: her sentences RAISED_DB above her own median, sustained; merged into episodes. */
+  raisedVoice: {
+    state: "observed" | "not_observed";
+    reason: string | null;
+    events: RaisedVoiceEvent[];
+    count: number;
+    perTenMinutes: number | null;
+    baselineDb: number | null;
+    thresholdDb: number;
+  } | null;
   /** R22 for the microphone. */
   coverage: {
     transcribedMs: number;
@@ -93,8 +106,8 @@ export interface VoiceReport {
     sentences: number;
     words: number;
   } | null;
-  /** What still needs the labelling pass, spelled out so nobody reads a
-   *  missing number as zero. */
+  /** What rests on phrase patterns until the labelling pass exists, spelled
+   *  out so a provisional number is never read as a fact. */
   pendingLabels: string[];
 }
 
@@ -283,6 +296,7 @@ function notObserved(input: VoiceInput, teacher: TeacherVoice, reason: string): 
     otherTurns: null,
     questions: null,
     languages: null,
+    raisedVoice: null,
     coverage: null,
     pendingLabels: PENDING_LABELS,
   };
@@ -291,10 +305,9 @@ function notObserved(input: VoiceInput, teacher: TeacherVoice, reason: string): 
 const PENDING_LABELS = [
   "R7-R12 lesson start and end",
   "R13-R16 closure, continuation, homework, pack-up",
-  "R17 raised voice",
   "R18 attention requests",
   "R19 off-lesson drift",
-  "R20 questions (proper)",
+  "R20 questions",
 ];
 
 export function voiceReport(input: VoiceInput): VoiceReport {
@@ -385,6 +398,42 @@ export function voiceReport(input: VoiceInput): VoiceReport {
 
   const confs = utts.map((u) => u.confidence).filter((c): c is number => c !== null);
 
+  const measured = hers.filter((u) => u.rmsDb !== null && u.rmsDb !== undefined);
+  const rv = raisedVoiceEvents(
+    hers.map((u) => ({ startMs: u.startMs, endMs: u.endMs, rmsDb: u.rmsDb ?? null })),
+  );
+  const raisedVoice: VoiceReport["raisedVoice"] =
+    measured.length === 0
+      ? {
+          state: "not_observed",
+          reason: "The loudness pass has not run for this lesson; re-run the audio analysis.",
+          events: [],
+          count: 0,
+          perTenMinutes: null,
+          baselineDb: null,
+          thresholdDb: RAISED_DB,
+        }
+      : rv.baselineDb === null
+        ? {
+            state: "not_observed",
+            reason: "Too few of her sentences carry a loudness reading to know her baseline.",
+            events: [],
+            count: 0,
+            perTenMinutes: null,
+            baselineDb: null,
+            thresholdDb: RAISED_DB,
+          }
+        : {
+            state: "observed",
+            reason: null,
+            events: rv.events,
+            count: rv.events.length,
+            perTenMinutes:
+              duration > 0 ? Math.round((rv.events.length / (duration / 600_000)) * 10) / 10 : null,
+            baselineDb: rv.baselineDb,
+            thresholdDb: RAISED_DB,
+          };
+
   return {
     state: "observed",
     reason: null,
@@ -420,6 +469,7 @@ export function voiceReport(input: VoiceInput): VoiceReport {
       switchesPerMinute:
         teacherMs > 0 ? Math.round((switches / (teacherMs / 60_000)) * 10) / 10 : 0,
     },
+    raisedVoice,
     coverage: {
       transcribedMs: spokenMs,
       transcribedShare: duration > 0 ? spokenMs / duration : 0,

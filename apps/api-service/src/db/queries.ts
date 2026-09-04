@@ -324,6 +324,8 @@ export interface UtteranceInput {
   text: string;
   confidence: number | null;
   language: string | null;
+  rmsDb?: number | null;
+  peakDb?: number | null;
 }
 
 /**

@@ -258,6 +258,12 @@ export const utterances = pgTable("utterances", {
   intent: text("intent"),
   attentionCue: boolean("attention_cue"),
   setsTask: boolean("sets_task"),
+
+  // --- loudness (null until the pass over the FLAC runs) --------------------
+  // Mean and peak RMS of the sentence's audio in dBFS (lib/loudness.ts). R17
+  // compares her sentences against her own baseline at read time.
+  rmsDb: real("rms_db"),
+  peakDb: real("peak_db"),
 });
 
 export const zones = pgTable("zones", {

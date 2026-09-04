@@ -5,10 +5,13 @@ import {
   localTimeInSchoolTz,
   minutesAgainstSchedule,
   offsetToInstant,
+  periodOffsets,
   schoolTimeToInstant,
 } from "@api/lib/school-time";
 import type { AttributionCandidate } from "@api/db/schema";
 import { type ResolvedSchedule, clockInput, resolveSchedule } from "@api/lib/timetable";
+import { lessonArc } from "@api/lib/lesson-arc";
+import { trustItems } from "@api/lib/trust";
 import { voiceReport } from "@api/lib/voice";
 
 type Detail = NonNullable<Awaited<ReturnType<typeof getVideoDetail>>>;
@@ -268,6 +271,7 @@ export function toDetailDto(d: Detail, timezone: string) {
       text: u.text,
       confidence: u.confidence,
       language: u.language,
+      rmsDb: u.rmsDb,
     })),
     durationMs: v.durationMs,
     presenceIntervals:
@@ -275,6 +279,30 @@ export function toDetailDto(d: Detail, timezone: string) {
     audioStatus: v.audioStatus,
     audioError: v.audioError,
   });
+  // Groups B and C: when the lesson started and ended, and how it ended — the
+  // teacher's sentences against the video's board and presence intervals and
+  // the bells (lib/lesson-arc.ts).
+  const presence =
+    d.analytics && !blended ? (d.analytics.presenceIntervals as [number, number][]) : null;
+  const bells = periodOffsets(clockInput(v, schedule), timezone);
+  const arc = lessonArc({
+    sentences: voice.teacher.speaker
+      ? utterances
+          .filter((u) => u.speaker === voice.teacher.speaker)
+          .map((u) => ({ idx: u.idx, startMs: u.startMs, endMs: u.endMs, text: u.text }))
+      : [],
+    noSentencesReason:
+      utterances.length > 0 && !voice.teacher.speaker
+        ? `The teacher's voice could not be told apart: ${voice.teacher.reason}`
+        : undefined,
+    boardIntervals: (d.analytics?.boardIntervals as [number, number][] | undefined) ?? [],
+    durationMs: v.durationMs ?? 0,
+    bellStartMs: bells?.startMs ?? null,
+    bellEndMs: bells?.endMs ?? null,
+    arrivalMs: presence?.[0]?.[0] ?? null,
+    departureMs: presence?.[presence.length - 1]?.[1] ?? null,
+  });
+  const punctuality = toPunctuality(v, d.analytics, timezone, schedule);
   return {
     classroom: d.classroom ? { id: d.classroom.id, name: d.classroom.name } : null,
     video: {
@@ -332,8 +360,19 @@ export function toDetailDto(d: Detail, timezone: string) {
       attentionCue: u.attentionCue,
       setsTask: u.setsTask,
     })),
-    punctuality: toPunctuality(v, d.analytics, timezone, schedule),
+    punctuality,
     previousTeacher: toPreviousTeacher(v, d.analytics, timezone, schedule),
+    arc,
+    // R22 and R23 over every measurement: what was observed, what is
+    // provisional, and what is Not Observed and why.
+    trust: trustItems({
+      punctuality,
+      videoAnalysed: d.analytics !== null && !blended,
+      videoQuality: dq?.confidence?.overall ?? null,
+      videoCoverage: dq?.coverage ?? null,
+      arc,
+      voice,
+    }),
     zones: d.zones.map((z) => ({
       id: z.id,
       kind: z.kind,

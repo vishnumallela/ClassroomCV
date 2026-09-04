@@ -73,17 +73,29 @@ machine learning, and four punctuality numbers appear immediately.
 
 | ID | The number | Sensor | How | Status |
 | --- | --- | --- | --- | --- |
-| **R7** | **Lesson start** — when the first learning task was set | Mic | First teacher utterance that launches a task (starter, do-now, retrieval, discussion) | Not built |
-| **R8** | **Start delay** — minutes from the bell to the first task | Mic + P1 | R7 − P1 | Not built |
-| **R9** | **Lesson end** — when teaching stopped | Mic + Camera | Last teaching utterance, corroborated by the teacher leaving the board / the room | Not built |
-| **R10** | **Lesson duration** | Mic + Camera | R9 − R7 | Not built |
-| **R11** | **Did the lesson fit the period?** | Mic + Camera + P1/P2 | Whether [R7, R9] sits inside [P1, P2] | Not built |
-| **R12** | **Overrun or underrun** — minutes past the bell, or minutes of the period left unused | Mic + Camera + P1/P2 | (R9 − P2) and (P2 − R9) | Not built |
+| **R7** | **Lesson start** — when the first learning task was set | Mic + Camera | First teacher utterance that launches a task (starter, do-now, retrieval, discussion), corroborated by the first board interaction | **Provisional** (2026-09-04): phrase patterns in both scripts (`lib/phrases.ts`), board corroboration from the video (`lib/lesson-arc.ts`) |
+| **R8** | **Start delay** — minutes from the bell to the first task | Mic + P1 | R7 − P1 | **Provisional** (2026-09-04), from R7 and the timetable |
+| **R9** | **Lesson end** — when teaching stopped | Mic + Camera | Last teaching utterance, corroborated by the teacher leaving the board / the room | **Provisional** (2026-09-04): the later of the last teaching sentence and the last board interaction, capped at her departure |
+| **R10** | **Lesson duration** | Mic + Camera | R9 − R7 | **Provisional** (2026-09-04) |
+| **R11** | **Did the lesson fit the period?** | Mic + Camera + P1/P2 | Whether [R7, R9] sits inside [P1, P2] | **Provisional** (2026-09-04), one-minute tolerance |
+| **R12** | **Overrun or underrun** — minutes past the bell, or minutes of the period left unused | Mic + Camera + P1/P2 | (R9 − P2) and (P2 − R9) | **Provisional** (2026-09-04) |
 
 R8 is the number that grades punctuality. Everything else in this group is
 reported alongside it so the figure can be read honestly — a lesson that
 started on time and ended fifteen minutes early is not the same as one that ran
 the full period.
+
+**Read off the first real lesson (2026-09-04, `760713c7`):** start 09:54:49,
+4.8 min after the bell — the first task-setting sentence ("take out your
+literacy companion") with the first board interaction 34 s before it; end
+10:34:53, on the bell; 40.1 min taught; the lesson fit the period. Every one
+of these is PROVISIONAL: the sentence is found by phrase (`lib/phrases.ts`),
+shown beside the number, and clickable to the video. Two limits met on the
+way: "keep your almanac on the table" matched the pack-up cue (now the cue
+needs the object put away and is only looked for in the last fifteen minutes),
+and "teaching sentence" is by exclusion (not procedure, attention, pack-up,
+homework or continuation), so the last one can be a behaviour remark. The
+labelling pass replaces both.
 
 ---
 
@@ -91,10 +103,10 @@ the full period.
 
 | ID | The number | Sensor | How | Status |
 | --- | --- | --- | --- | --- |
-| **R13** | **Closure, and its type** — review, reflection, exit question, summary, or none | Mic | Teacher utterances near the end labelled as closing | Not built |
-| **R14** | **Continuation** — did she say the lesson carries on next time | Mic + P5 | An explicit statement that the topic continues, e.g. "we'll finish this next class" | Not built |
-| **R15** | **Homework set** — whether homework was given, and when | Mic | Teacher utterance assigning work beyond the lesson | Not built |
-| **R16** | **Pack-up instruction** — when the class was told to pack up, against the bell | Mic + P2 | First pack-up instruction, minus P2 | Not built |
+| **R13** | **Closure, and its type** — review, reflection, exit question, summary, or none | Mic | Teacher utterances near the end labelled as closing | **Provisional** (2026-09-04): review / reflection / exit question / summary by phrase in the last five minutes; "none" is a reported outcome |
+| **R14** | **Continuation** — did she say the lesson carries on next time | Mic + P5 | An explicit statement that the topic continues, e.g. "we'll finish this next class" | **Provisional** (2026-09-04), by phrase |
+| **R15** | **Homework set** — whether homework was given, and when | Mic | Teacher utterance assigning work beyond the lesson | **Provisional** (2026-09-04), by phrase incl. "होमवर्क", "ब्रिंग इट टुमारो" |
+| **R16** | **Pack-up instruction** — when the class was told to pack up, against the bell | Mic + P2 | First pack-up instruction, minus P2 | **Provisional** (2026-09-04): imperative phrases only, looked for in the last fifteen minutes |
 
 R13 and R14 answer the same question from two directions: a lesson can end
 properly with a summary, end properly by being explicitly carried over, or just
@@ -106,9 +118,9 @@ stop. All three are different outcomes and the report should name which.
 
 | ID | The number | Sensor | How | Status |
 | --- | --- | --- | --- | --- |
-| **R17** | **Raised-voice events** — count, and rate per ten minutes | Mic | Loudness of the teacher's own speech against her own rolling baseline, sustained past a minimum duration | Not built |
-| **R18** | **Attention requests** — how many times she called for the class's attention | Mic | Teacher utterances flagged as an attention cue | Not built |
-| **R19** | **Off-lesson drift** — how many episodes, and total minutes | Mic | Runs of teacher speech labelled as unrelated to the lesson | Not built |
+| **R17** | **Raised-voice events** — count, and rate per ten minutes | Mic | Loudness of the teacher's own speech against her own rolling baseline, sustained past a minimum duration | **Built** (2026-09-04): `lib/loudness.ts` — ffmpeg RMS per 0.5 s folded onto each sentence and stored; an event is 6 dB over her median for ≥ 1.5 s, episodes merged within 5 s |
+| **R18** | **Attention requests** — how many times she called for the class's attention | Mic | Teacher utterances flagged as an attention cue | **Provisional** (2026-09-04), by phrase in both scripts |
+| **R19** | **Off-lesson drift** — how many episodes, and total minutes | Mic | Runs of teacher speech labelled as unrelated to the lesson | **Provisional** (2026-09-04): runs of administrative talk (notebooks, planners, signatures, fees) stand in |
 | **R20** | **Questions asked** — count and rate, split into questions put to the class and rhetorical check-ins | Mic | Teacher utterances labelled as asking | **Provisional** (2026-09-04): question marks on the teacher's sentences, with check-ins set aside by a word list incl. tagged-on "…, ओके?"; reported as provisional until the labelling pass |
 | **R21** | **Languages used** — which, how many, the share of speech in each, and switches per minute | Mic | Per-utterance language, normalised before counting | **Built** (2026-09-04) from each sentence's script — an upper bound on Hindi, since the transcriber writes some English in Devanagari |
 
@@ -147,7 +159,7 @@ pass; the card names them as pending rather than showing zeros.
 | ID | The number | Sensor | How | Status |
 | --- | --- | --- | --- | --- |
 | **R22** | **Observation coverage** — how much of the lesson the system could see and hear, and how confident it is | Camera + Mic | Coverage, continuity and detection confidence, per sensor | **Built** for video and audio (transcribed share, transcription confidence) |
-| **R23** | **Not Observed** — the system says so rather than guessing | — | Any requirement below its evidence threshold reports Not Observed | Partly built |
+| **R23** | **Not Observed** — the system says so rather than guessing | — | Any requirement below its evidence threshold reports Not Observed | **Built** (2026-09-04): every measurement carries observed / provisional / not observed with its reason; the Trust card lists all 23 |
 
 ---
 
