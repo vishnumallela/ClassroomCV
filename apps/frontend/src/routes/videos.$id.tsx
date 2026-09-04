@@ -9,6 +9,7 @@ import { HeatmapCard } from "@/components/heatmap-card";
 import { KpiCards } from "@/components/kpi-cards";
 import { LessonArcCard } from "@/components/lesson-arc-card";
 import { LessonDetailsCard } from "@/components/lesson-details-card";
+import { LessonSummary } from "@/components/lesson-summary";
 import { TranscriptPanel } from "@/components/transcript-panel";
 import { TrustCard } from "@/components/trust-card";
 import { VoiceCard } from "@/components/voice-card";
@@ -153,6 +154,8 @@ function VideoDetail() {
         onTimeUpdate={setCurrentMs}
       />
 
+      <LessonSummary data={data} />
+
       {/* Outside the done/not-done branch on purpose: the whole reason the
           details form is not a gate on upload is that someone can fill the
           timetable in while the GPU works. Hiding it until analysis finishes
@@ -162,11 +165,20 @@ function VideoDetail() {
         lesson={data.lesson}
         punctuality={data.punctuality}
         previousTeacher={data.previousTeacher}
+        absences={
+          analytics
+            ? {
+                exits: analytics.exits,
+                seenAtDoor: analytics.entryExit.filter(
+                  (e) => e.kind === "exit" && e.method === "door",
+                ).length,
+                inferred: analytics.entryExit.filter(
+                  (e) => e.kind === "exit" && e.method === "buffer",
+                ).length,
+              }
+            : null
+        }
       />
-
-      {/* The audio half runs independently of the GPU, so its card is not
-          gated on the video analysis either. */}
-      <VoiceCard videoId={video.id} voice={data.voice} onSeek={seek} />
 
       <LessonArcCard
         arc={data.arc}
@@ -175,7 +187,9 @@ function VideoDetail() {
         onSeek={seek}
       />
 
-      <TrustCard trust={data.trust} />
+      {/* The audio half runs independently of the GPU, so its card is not
+          gated on the video analysis either. */}
+      <VoiceCard videoId={video.id} voice={data.voice} onSeek={seek} />
 
       {!done ? (
         <Card className="p-6 text-sm text-muted-foreground">
@@ -183,39 +197,50 @@ function VideoDetail() {
         </Card>
       ) : analytics ? (
         <div className="space-y-6">
-          <KpiCards
-            analytics={analytics}
-            durationMs={video.durationMs}
-            teacherConfidence={
-              data.tracks.find((t) => t.role === "teacher")?.roleConfidence ?? null
-            }
-          />
-          <DataQualityCard analytics={analytics} />
-          <TimelineStrip
-            durationMs={video.durationMs}
-            presenceIntervals={analytics.presenceIntervals}
-            boardIntervals={analytics.boardIntervals}
-            events={events}
-            currentMs={currentMs}
-            onSeek={seek}
-          />
-          <CirculationCard analytics={analytics} />
-          <HeatmapCard
-            analytics={analytics}
-            thumbnailUrl={video.thumbnailUrl ? `${API_URL}${video.thumbnailUrl}` : null}
-            aspect={video.width && video.height ? video.width / video.height : 16 / 9}
-          />
-          <BoardSessions boardIntervals={analytics.boardIntervals} onSeek={seek} />
-          <div>
-            <h2 className="mb-3 text-sm font-medium text-muted-foreground">Teacher events</h2>
+          <section className="space-y-3">
+            <h2 className="text-sm font-medium text-muted-foreground">At the board</h2>
+            <KpiCards
+              analytics={analytics}
+              durationMs={video.durationMs}
+              teacherConfidence={
+                data.tracks.find((t) => t.role === "teacher")?.roleConfidence ?? null
+              }
+            />
+            <BoardSessions boardIntervals={analytics.boardIntervals} onSeek={seek} />
+          </section>
+          <section className="space-y-3">
+            <h2 className="text-sm font-medium text-muted-foreground">Movement</h2>
+            <TimelineStrip
+              durationMs={video.durationMs}
+              presenceIntervals={analytics.presenceIntervals}
+              boardIntervals={analytics.boardIntervals}
+              events={events}
+              currentMs={currentMs}
+              onSeek={seek}
+            />
+            <CirculationCard analytics={analytics} />
+            <HeatmapCard
+              analytics={analytics}
+              thumbnailUrl={video.thumbnailUrl ? `${API_URL}${video.thumbnailUrl}` : null}
+              aspect={video.width && video.height ? video.width / video.height : 16 / 9}
+            />
+          </section>
+          <section className="space-y-3">
+            <h2 className="text-sm font-medium text-muted-foreground">Evidence</h2>
             <EventsTable events={events} entryExit={analytics.entryExit} onSeek={seek} />
-          </div>
+          </section>
         </div>
       ) : (
         <Card className="p-6 text-sm text-muted-foreground">No analytics available.</Card>
       )}
 
       <TranscriptPanel transcript={data.transcript} onSeek={seek} />
+
+      <section className="space-y-3">
+        <h2 className="text-sm font-medium text-muted-foreground">Reliability</h2>
+        {analytics && <DataQualityCard analytics={analytics} />}
+        <TrustCard trust={data.trust} />
+      </section>
 
       {editorOpen && (
         <ZoneEditor

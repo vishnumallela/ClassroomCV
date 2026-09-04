@@ -1,21 +1,18 @@
 import type { RouterOutputs } from "@classroom/api-contracts";
-import { Badge } from "@/components/ui/badge";
+import { useState } from "react";
 import { Card } from "@/components/ui/card";
+import { Stat, StateChip, type MeasureState } from "@/components/ui/stat";
 import { msToClock } from "@/lib/format";
+import { againstBell, clockAt } from "@/lib/measures";
 import { displayLine } from "@/lib/transcript";
 
 type Arc = RouterOutputs["videos"]["get"]["arc"];
-type Measure = {
-  value: unknown;
-  state: "observed" | "provisional" | "not_observed";
-  reason: string | null;
-  evidence: {
-    idx: number;
-    atMs: number;
-    text: string;
-    textEn?: string | null;
-    language?: string | null;
-  }[];
+type Evidence = {
+  idx: number;
+  atMs: number;
+  text: string;
+  textEn?: string | null;
+  language?: string | null;
 };
 
 const CLOSURE_LABEL: Record<string, string> = {
@@ -23,87 +20,14 @@ const CLOSURE_LABEL: Record<string, string> = {
   reflection: "Reflection",
   exit_question: "Exit question",
   summary: "Summary",
-  none: "None — the lesson just stopped",
+  none: "None",
 };
 
-function StateBadge({ state }: { state: Measure["state"] }) {
-  if (state === "observed") return null;
-  return (
-    <Badge variant={state === "provisional" ? "secondary" : "outline"} className="text-[0.6rem]">
-      {state === "provisional" ? "provisional" : "not observed"}
-    </Badge>
-  );
-}
-
-function Row({
-  id,
-  label,
-  value,
-  measure,
-  onSeek,
-  clock,
-}: {
-  id: string;
-  label: string;
-  value: string;
-  measure: Measure;
-  onSeek: (ms: number) => void;
-  clock: (ms: number) => string | null;
-}) {
-  const withheld = measure.state === "not_observed";
-  return (
-    <div className="py-2">
-      <div className="flex items-start justify-between gap-3">
-        <div className="min-w-0">
-          <p className="text-xs text-muted-foreground">
-            <span className="mr-1.5 font-mono text-[0.65rem]">{id}</span>
-            {label}
-          </p>
-          <p className={`text-sm font-medium ${withheld ? "text-muted-foreground" : ""}`}>
-            {withheld ? "Not Observed" : value}
-          </p>
-        </div>
-        <StateBadge state={measure.state} />
-      </div>
-      {measure.reason && (
-        <p className="mt-0.5 text-[0.7rem] leading-relaxed text-muted-foreground">
-          {measure.reason}
-        </p>
-      )}
-      {measure.evidence.length > 0 && (
-        <ul className="mt-1 space-y-0.5">
-          {measure.evidence.map((e) => (
-            <li key={e.idx} className="flex gap-2 text-[0.7rem] leading-relaxed">
-              <button
-                type="button"
-                onClick={() => onSeek(e.atMs)}
-                className="shrink-0 font-mono text-muted-foreground tabular-nums hover:text-foreground"
-              >
-                {msToClock(e.atMs)}
-                {clock(e.atMs) ? ` · ${clock(e.atMs)}` : ""}
-              </button>
-              <span className="truncate text-muted-foreground" title={e.text}>
-                “{displayLine(e, true)}”
-              </span>
-            </li>
-          ))}
-        </ul>
-      )}
-    </div>
-  );
-}
-
-function signedMinutes(min: number, late: string, early: string): string {
-  if (Math.abs(min) < 0.5) return "on the bell";
-  const v = Math.abs(Math.round(min * 10) / 10);
-  return `${v} min ${min > 0 ? late : early}`;
-}
-
 /**
- * Groups B and C — the lesson's start and end, and how it ended — with R18
- * and R19 beside them. Every row carries its state and the sentence it rests
- * on; a click on the time seeks the video to it, which is how a provisional
- * number gets checked.
+ * The lesson itself — when teaching started and ended, how it ended, and how
+ * the class was managed — as one card of plain-language stats. Every number
+ * carries its state; the sentences each rests on sit behind one toggle so the
+ * numbers can be read first and checked second (a time seeks the video).
  */
 export function LessonArcCard({
   arc,
@@ -116,172 +40,230 @@ export function LessonArcCard({
   timezone: string;
   onSeek: (ms: number) => void;
 }) {
-  const clock = (ms: number): string | null =>
-    recordingStartedAt
-      ? new Date(new Date(recordingStartedAt).getTime() + ms).toLocaleTimeString("en-GB", {
-          timeZone: timezone,
-          hour: "2-digit",
-          minute: "2-digit",
-        })
-      : null;
-  const at = (ms: number | null) =>
-    ms === null ? "—" : `${clock(ms) ?? msToClock(ms)}${clock(ms) ? ` (${msToClock(ms)} in)` : ""}`;
+  const [showEvidence, setShowEvidence] = useState(false);
+  const measures = [
+    arc.start,
+    arc.startDelayMin,
+    arc.end,
+    arc.durationMin,
+    arc.fitsPeriod,
+    arc.overrunMin,
+    arc.closure,
+    arc.continuation,
+    arc.homework,
+    arc.attentionRequests,
+    arc.drift,
+  ];
+  const allProvisional = measures.every((m) => m.state === "provisional");
+  // When the whole card is provisional, say it once in the header instead of
+  // on every number; a stat still shows its own chip when it differs.
+  const chip = (state: string): MeasureState | undefined =>
+    allProvisional && state === "provisional" ? undefined : (state as MeasureState);
+  const at = (ms: number | null) => {
+    if (ms === null) return "—";
+    return clockAt(recordingStartedAt, ms, timezone) ?? msToClock(ms);
+  };
+  const st = chip;
+
+  const startSub =
+    arc.start.value === null
+      ? ""
+      : arc.start.corroborated
+        ? "her words and the board agree"
+        : arc.start.actionMs !== null && arc.start.voiceMs === null
+          ? "from writing or pointing at the board"
+          : "from her words";
+  const endSub =
+    arc.end.value === null
+      ? ""
+      : arc.end.corroboratedByBoard
+        ? "leaving the board confirms it"
+        : "from her last teaching sentence";
+
+  const evidence: { title: string; items: Evidence[] }[] = [
+    { title: "Teaching started", items: arc.start.evidence },
+    { title: "Teaching ended", items: arc.end.evidence },
+    { title: "How it ended", items: arc.closure.evidence },
+    { title: "Continues next time", items: arc.continuation.evidence },
+    { title: "Homework", items: arc.homework.evidence },
+    { title: "Attention requests", items: arc.attentionRequests.evidence },
+    { title: "Off-lesson talk", items: arc.drift.evidence },
+  ].filter((g) => g.items.length > 0);
 
   return (
-    <div className="grid gap-6 lg:grid-cols-2">
-      <Card className="p-5">
-        <h2 className="font-display text-base font-semibold tracking-tight">The lesson</h2>
-        <p className="text-xs text-muted-foreground">
-          Start from her first task-setting sentence or her first writing or pointing at the board,
-          whichever comes first — both together make it observed; end from the last teaching
-          sentence or the last time she left the board.
-        </p>
-        <div className="mt-2 divide-y divide-border/60">
-          <Row
-            id="R7"
-            label="Lesson start"
-            value={
-              at(arc.start.value) +
-              (arc.start.corroborated
-                ? " · voice and board agree"
-                : arc.start.actionMs !== null && arc.start.voiceMs === null
-                  ? " · from writing/pointing at the board"
-                  : arc.start.voiceMs !== null && arc.start.actionMs === null
-                    ? " · from her words alone"
-                    : "")
-            }
-            measure={arc.start}
-            onSeek={onSeek}
-            clock={clock}
-          />
-          <Row
-            id="R8"
-            label="Start delay"
-            value={
-              arc.startDelayMin.value !== null
-                ? signedMinutes(arc.startDelayMin.value, "after the bell", "before the bell")
-                : "—"
-            }
-            measure={{ ...arc.startDelayMin, reason: null, evidence: [] }}
-            onSeek={onSeek}
-            clock={clock}
-          />
-          <Row
-            id="R9"
-            label="Lesson end"
-            value={
-              at(arc.end.value) + (arc.end.corroboratedByBoard ? " · board or exit confirms" : "")
-            }
-            measure={arc.end}
-            onSeek={onSeek}
-            clock={clock}
-          />
-          <Row
-            id="R10"
-            label="Lesson duration"
-            value={arc.durationMin.value !== null ? `${arc.durationMin.value} min` : "—"}
-            measure={arc.durationMin}
-            onSeek={onSeek}
-            clock={clock}
-          />
-          <Row
-            id="R11"
-            label="Did the lesson fit the period?"
-            value={arc.fitsPeriod.value === null ? "—" : arc.fitsPeriod.value ? "Yes" : "No"}
-            measure={arc.fitsPeriod}
-            onSeek={onSeek}
-            clock={clock}
-          />
-          <Row
-            id="R12"
-            label="Overrun or underrun"
-            value={
-              arc.overrunMin.value !== null
-                ? signedMinutes(arc.overrunMin.value, "past the end bell", "of the period unused")
-                : "—"
-            }
-            measure={{ ...arc.overrunMin, evidence: [] }}
-            onSeek={onSeek}
-            clock={clock}
-          />
+    <Card className="p-5">
+      <div className="flex flex-wrap items-baseline justify-between gap-2">
+        <div>
+          <h2 className="flex items-center gap-2 font-display text-base font-semibold tracking-tight">
+            The lesson
+            {allProvisional && (
+              <StateChip
+                state="provisional"
+                title="Read from phrase patterns until the labelling pass exists; the sentences are behind the toggle."
+              />
+            )}
+          </h2>
+          <p className="text-xs text-muted-foreground">
+            Start from her first task-setting words or her first writing or pointing at the board;
+            end from her last teaching words or the last time she left the board.
+            {allProvisional && " Provisional: read by phrase until the labelling pass exists."}
+          </p>
         </div>
-      </Card>
+        {evidence.length > 0 && (
+          <button
+            type="button"
+            onClick={() => setShowEvidence((v) => !v)}
+            className="text-xs text-muted-foreground underline-offset-2 hover:underline"
+          >
+            {showEvidence ? "Hide the sentences" : "Show the sentences behind these"}
+          </button>
+        )}
+      </div>
 
-      <Card className="p-5">
-        <h2 className="font-display text-base font-semibold tracking-tight">
-          How the lesson ended
-        </h2>
-        <p className="text-xs text-muted-foreground">
-          From the teacher's sentences, by phrase until the labelling pass exists.
-        </p>
-        <div className="mt-2 divide-y divide-border/60">
-          <Row
-            id="R13"
-            label="Closure, and its type"
-            value={
-              arc.closure.value ? (CLOSURE_LABEL[arc.closure.value] ?? arc.closure.value) : "—"
-            }
-            measure={arc.closure}
-            onSeek={onSeek}
-            clock={clock}
-          />
-          <Row
-            id="R14"
-            label="Continuation"
-            value={
-              arc.continuation.value === null
-                ? "—"
-                : arc.continuation.value
-                  ? "Said the topic continues"
-                  : "Not said"
-            }
-            measure={arc.continuation}
-            onSeek={onSeek}
-            clock={clock}
-          />
-          <Row
-            id="R15"
-            label="Homework set"
-            value={
-              arc.homework.value === null
-                ? "—"
-                : arc.homework.value
-                  ? `Yes${arc.homework.atMs !== null ? `, at ${at(arc.homework.atMs)}` : ""}`
-                  : "No"
-            }
-            measure={arc.homework}
-            onSeek={onSeek}
-            clock={clock}
-          />
-          <Row
-            id="R18"
-            label="Attention requests"
-            value={
-              arc.attentionRequests.value !== null
-                ? `${arc.attentionRequests.value}` +
-                  (arc.attentionRequests.perTenMinutes !== null
-                    ? ` · ${arc.attentionRequests.perTenMinutes} per 10 min`
-                    : "")
-                : "—"
-            }
-            measure={arc.attentionRequests}
-            onSeek={onSeek}
-            clock={clock}
-          />
-          <Row
-            id="R19"
-            label="Off-lesson drift"
-            value={
-              arc.drift.value
-                ? `${arc.drift.value.episodes} episode${arc.drift.value.episodes === 1 ? "" : "s"}, ${msToClock(arc.drift.value.totalMs)}`
-                : "—"
-            }
-            measure={arc.drift}
-            onSeek={onSeek}
-            clock={clock}
-          />
+      <div className="mt-4 grid gap-x-6 gap-y-5 sm:grid-cols-2 lg:grid-cols-3">
+        <Stat
+          id="R7"
+          label="Teaching started"
+          value={at(arc.start.value)}
+          sub={startSub}
+          state={st(arc.start.state)}
+          reason={arc.start.reason}
+        />
+        <Stat
+          id="R8"
+          label="Start delay"
+          value={againstBell(arc.startDelayMin.value, "after the bell", "before the bell")}
+          state={st(arc.startDelayMin.state)}
+          reason={arc.startDelayMin.reason}
+        />
+        <Stat
+          id="R9"
+          label="Teaching ended"
+          value={at(arc.end.value)}
+          sub={endSub}
+          state={st(arc.end.state)}
+          reason={arc.end.reason}
+        />
+        <Stat
+          id="R10"
+          label="Taught for"
+          value={arc.durationMin.value !== null ? `${arc.durationMin.value} min` : "—"}
+          state={st(arc.durationMin.state)}
+          reason={arc.durationMin.reason}
+        />
+        <Stat
+          id="R11"
+          label="Fit the period"
+          value={arc.fitsPeriod.value === null ? "—" : arc.fitsPeriod.value ? "Yes" : "No"}
+          state={st(arc.fitsPeriod.state)}
+          reason={arc.fitsPeriod.reason}
+        />
+        <Stat
+          id="R12"
+          label="Over- or under-run"
+          value={againstBell(
+            arc.overrunMin.value,
+            "past the end bell",
+            "of the period unused",
+            "on the bell",
+          )}
+          state={st(arc.overrunMin.state)}
+          reason={arc.overrunMin.reason}
+        />
+      </div>
+
+      <div className="mt-6 grid gap-x-6 gap-y-5 sm:grid-cols-2 lg:grid-cols-3">
+        <Stat
+          id="R13"
+          label="How it ended"
+          value={arc.closure.value ? (CLOSURE_LABEL[arc.closure.value] ?? arc.closure.value) : "—"}
+          sub={
+            arc.closure.value === "none" ? "no review, reflection, exit question or summary" : null
+          }
+          state={st(arc.closure.state)}
+          reason={arc.closure.reason}
+        />
+        <Stat
+          id="R14"
+          label="Continues next time"
+          value={
+            arc.continuation.value === null
+              ? "—"
+              : arc.continuation.value
+                ? "Yes, she said so"
+                : "Not said"
+          }
+          state={st(arc.continuation.state)}
+          reason={arc.continuation.reason}
+        />
+        <Stat
+          id="R15"
+          label="Homework set"
+          value={
+            arc.homework.value === null
+              ? "—"
+              : arc.homework.value
+                ? `Yes, at ${at(arc.homework.atMs)}`
+                : "No"
+          }
+          state={st(arc.homework.state)}
+          reason={arc.homework.reason}
+        />
+        <Stat
+          id="R18"
+          label="Attention requests"
+          value={arc.attentionRequests.value !== null ? `${arc.attentionRequests.value}` : "—"}
+          sub={
+            arc.attentionRequests.perTenMinutes !== null
+              ? `${arc.attentionRequests.perTenMinutes} per 10 min`
+              : null
+          }
+          state={st(arc.attentionRequests.state)}
+          reason={arc.attentionRequests.reason}
+        />
+        <Stat
+          id="R19"
+          label="Off-lesson talk"
+          value={
+            arc.drift.value
+              ? `${arc.drift.value.episodes} episode${arc.drift.value.episodes === 1 ? "" : "s"}`
+              : "—"
+          }
+          sub={
+            arc.drift.value
+              ? `${msToClock(arc.drift.value.totalMs)} in total · admin talk stands in`
+              : null
+          }
+          state={st(arc.drift.state)}
+          reason={arc.drift.reason}
+        />
+      </div>
+
+      {showEvidence && (
+        <div className="mt-5 space-y-3 border-t border-border/60 pt-4">
+          {evidence.map((g) => (
+            <div key={g.title}>
+              <p className="text-xs font-medium text-muted-foreground">{g.title}</p>
+              <ul className="mt-1 space-y-0.5">
+                {g.items.map((e) => (
+                  <li key={e.idx} className="flex gap-2 text-xs leading-relaxed">
+                    <button
+                      type="button"
+                      onClick={() => onSeek(e.atMs)}
+                      className="shrink-0 font-mono text-muted-foreground tabular-nums hover:text-foreground"
+                    >
+                      {msToClock(e.atMs)}
+                    </button>
+                    <span className="text-muted-foreground" title={e.text}>
+                      “{displayLine(e, true)}”
+                    </span>
+                  </li>
+                ))}
+              </ul>
+            </div>
+          ))}
         </div>
-      </Card>
-    </div>
+      )}
+    </Card>
   );
 }

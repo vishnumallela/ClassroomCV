@@ -117,11 +117,14 @@ export function LessonDetailsCard({
   lesson,
   punctuality,
   previousTeacher,
+  absences,
 }: {
   videoId: string;
   lesson: LessonDetails;
   punctuality: Punctuality;
   previousTeacher?: PreviousTeacher;
+  /** Mid-lesson absences (R6): how many exits, and how each was decided. */
+  absences?: { exits: number; seenAtDoor: number; inferred: number } | null;
 }) {
   const queryClient = useQueryClient();
   const [open, setOpen] = useState(false);
@@ -177,7 +180,7 @@ export function LessonDetailsCard({
     <Card className="p-5">
       <div className="flex items-start justify-between gap-4">
         <div className="space-y-1">
-          <h2 className="font-display text-base font-semibold tracking-tight">Lesson details</h2>
+          <h2 className="font-display text-base font-semibold tracking-tight">Attendance</h2>
           <p className="text-xs text-muted-foreground">
             {schedule.subject || schedule.period ? (
               <>
@@ -198,19 +201,6 @@ export function LessonDetailsCard({
       {!open && (
         <div className="mt-4 divide-y divide-border/60">
           <Row
-            label="Recording started"
-            value={
-              punctuality.arrivalAt && lesson.recordingStartedAt
-                ? `${new Date(lesson.recordingStartedAt).toLocaleTimeString("en-GB", {
-                    timeZone: punctuality.timezone,
-                    hour: "2-digit",
-                    minute: "2-digit",
-                  })} (${punctuality.timezone})`
-                : "Unknown — enter it to measure punctuality"
-            }
-            muted={!lesson.recordingStartedAt}
-          />
-          <Row
             label="Scheduled"
             value={
               hasSchedule
@@ -221,40 +211,74 @@ export function LessonDetailsCard({
             muted={!hasSchedule}
           />
           <Row
-            label="Teacher arrived"
-            value={refused ? "Not Observed" : (punctuality.arrivalAt ?? "—")}
-            muted={!anchored}
-          />
-          <Row
-            label="Against the bell"
+            label="Recording started"
             value={
-              hasSchedule && !refused ? againstBell(punctuality.arrivalMinutesLate) : "Not Observed"
+              lesson.recordingStartedAt
+                ? `${new Date(lesson.recordingStartedAt).toLocaleTimeString("en-GB", {
+                    timeZone: punctuality.timezone,
+                    hour: "2-digit",
+                    minute: "2-digit",
+                  })}`
+                : "Unknown — enter it to measure punctuality"
             }
-            muted={!hasSchedule || refused}
+            muted={!lesson.recordingStartedAt}
           />
           <Row
-            label="Teacher left"
-            value={refused ? "Not Observed" : (punctuality.departureAt ?? "—")}
-            muted={!anchored}
-          />
-          <Row
-            label="Against the bell"
+            label="Arrived"
             value={
-              hasSchedule && !refused
-                ? againstBell(punctuality.departureMinutesLate)
-                : "Not Observed"
+              refused
+                ? "Not observed"
+                : punctuality.arrivalAt
+                  ? `${punctuality.arrivalAt}${hasSchedule ? ` · ${againstBell(punctuality.arrivalMinutesLate)}` : ""}`
+                  : "—"
             }
-            muted={!hasSchedule || refused}
+            muted={!anchored || refused}
           />
           <Row
-            label="Present, of the period"
+            label="Left"
+            value={
+              refused
+                ? "Not observed"
+                : punctuality.departureAt
+                  ? `${punctuality.departureAt}${hasSchedule ? ` · ${againstBell(punctuality.departureMinutesLate)}` : ""}`
+                  : "—"
+            }
+            muted={!anchored || refused}
+          />
+          <Row
+            label="In the room"
             value={
               punctuality.presenceShareOfPeriod !== null
-                ? `${Math.round(punctuality.presenceShareOfPeriod * 100)}%`
-                : "Not Observed"
+                ? `${Math.round(punctuality.presenceShareOfPeriod * 100)}% of the period`
+                : "Not observed"
             }
             muted={punctuality.presenceShareOfPeriod === null}
           />
+          {absences && (
+            <Row
+              label="Left and came back"
+              value={
+                refused
+                  ? "Not observed"
+                  : absences.exits === 0
+                    ? "Never"
+                    : `${absences.exits} time${absences.exits === 1 ? "" : "s"}` +
+                      (absences.seenAtDoor > 0 || absences.inferred > 0
+                        ? ` (${[
+                            absences.seenAtDoor > 0
+                              ? `${absences.seenAtDoor} seen at the door`
+                              : "",
+                            absences.inferred > 0
+                              ? `${absences.inferred} inferred from a long absence`
+                              : "",
+                          ]
+                            .filter(Boolean)
+                            .join(", ")})`
+                        : "")
+              }
+              muted={refused}
+            />
+          )}
         </div>
       )}
 
@@ -265,7 +289,7 @@ export function LessonDetailsCard({
       {!open && previousTeacher && previousTeacher.state === "observed" && (
         <div className="mt-4 border-t border-border/60 pt-3">
           <p className="mb-1 text-xs font-medium text-muted-foreground">
-            Previous period&rsquo;s teacher
+            Previous period&rsquo;s teacher, seen in this recording
           </p>
           <div className="divide-y divide-border/60">
             <Row label="Left the room" value={previousTeacher.departureAt ?? "—"} />

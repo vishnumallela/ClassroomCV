@@ -1,7 +1,7 @@
 import type { RouterOutputs } from "@classroom/api-contracts";
 import type { CSSProperties } from "react";
-import { Badge } from "@/components/ui/badge";
 import { Card } from "@/components/ui/card";
+import { Stat } from "@/components/ui/stat";
 import { msToClock, percentOf } from "@/lib/format";
 
 type Analytics = NonNullable<RouterOutputs["videos"]["get"]["analytics"]>;
@@ -28,18 +28,6 @@ export function KpiCards({
   const badge = confidenceBadge(teacherConfidence);
 
   /**
-   * R6 refuses on the same evidence Group A does.
-   *
-   * Entries and exits are counted from breaks in the presence timeline, so when
-   * that timeline blends two adults the count is of the blend's gaps, not of
-   * anyone's door crossings. `=== true` because absence of the field means the
-   * lesson predates the check, not that one adult was measured.
-   */
-  const blended =
-    analytics.dataQuality?.multiple_adults_detected === true &&
-    analytics.dataQuality?.attribution?.confidence !== "high";
-
-  /**
    * A duration KPI that can be genuinely unknown.
    *
    * null is not zero and must never render as "0:00": board time is null until
@@ -50,12 +38,11 @@ export function KpiCards({
   const duration = (label: string, ms: number | null | undefined, absent: string) => ({
     label,
     value: ms === null || ms === undefined ? "n/a" : msToClock(ms),
-    sub: ms === null || ms === undefined ? absent : `${percentOf(ms, durationMs)} of lesson`,
+    sub: ms === null || ms === undefined ? absent : `${percentOf(ms, durationMs)} of the lesson`,
     badge: null as Confidence | null,
   });
 
-  // Durations first, then the two counts, so the grid breaks between the two
-  // kinds of number rather than mid-group.
+  // Board time and the two actions; entries and exits live on the Attendance card.
   const tiles = [
     {
       ...duration("Time at board", analytics.teacherBoardMs, "no board zone"),
@@ -63,44 +50,19 @@ export function KpiCards({
     },
     duration("Pointing", analytics.teacherPointingMs, "not scored"),
     duration("Writing", analytics.teacherWritingMs, "not scored"),
-    {
-      label: "Teacher entries",
-      value: blended ? "n/a" : String(analytics.entries),
-      sub: blended ? "more than one adult" : "into the room",
-      badge: null,
-    },
-    {
-      label: "Teacher exits",
-      value: blended ? "n/a" : String(analytics.exits),
-      sub: blended ? "more than one adult" : "out of the room",
-      badge: null,
-    },
   ];
 
   return (
-    <div className="stagger grid grid-cols-3 gap-3">
+    <div className="stagger grid gap-3 sm:grid-cols-3">
       {tiles.map((t, i) => (
-        <Card
-          key={t.label}
-          className="p-4 transition-colors hover:border-primary/40"
-          style={{ "--i": i } as CSSProperties}
-        >
-          <div className="flex items-start justify-between gap-1">
-            <div className="micro-label">{t.label}</div>
-            {t.badge && (
-              <Badge
-                variant={t.badge.tone}
-                className="px-1.5 py-0.5 text-[10px]"
-                title="How confident the classifier is that this identity is the teacher"
-              >
-                {t.badge.label}
-              </Badge>
-            )}
-          </div>
-          <div className="mt-2 font-mono text-2xl font-semibold tabular-nums tracking-tight">
-            {t.value}
-          </div>
-          <div className="mt-0.5 text-xs text-muted-foreground">{t.sub}</div>
+        <Card key={t.label} className="p-4" style={{ "--i": i } as CSSProperties}>
+          <Stat
+            label={t.label}
+            value={t.value}
+            sub={t.badge ? `${t.sub} · ${t.badge.label} it is her` : t.sub}
+            state={t.value === "n/a" ? "not_observed" : "observed"}
+            reason={t.value === "n/a" ? t.sub : null}
+          />
         </Card>
       ))}
     </div>

@@ -1,5 +1,6 @@
 import type { RouterOutputs } from "@classroom/api-contracts";
 import { ShieldCheck } from "lucide-react";
+import { useState } from "react";
 import { Card } from "@/components/ui/card";
 
 type Trust = RouterOutputs["videos"]["get"]["trust"];
@@ -23,16 +24,17 @@ const STATE_CLASS = {
  * nothing is silently missing from it.
  */
 export function TrustCard({ trust }: { trust: Trust }) {
+  const [open, setOpen] = useState(false);
   return (
     <Card className="p-5">
       <div className="flex items-start justify-between gap-4">
         <div className="space-y-1">
           <h2 className="flex items-center gap-2 font-display text-base font-semibold tracking-tight">
             <ShieldCheck className="size-4 text-muted-foreground" />
-            Trust
+            Reliability
           </h2>
           <p className="text-xs text-muted-foreground">
-            R22 and R23: what could be seen and heard, and what is withheld rather than guessed.
+            What could be seen and heard, and what is withheld rather than guessed.
           </p>
         </div>
         <div className="flex gap-1.5 text-[0.65rem]">
@@ -47,7 +49,14 @@ export function TrustCard({ trust }: { trust: Trust }) {
           </span>
         </div>
       </div>
-      <ul className="mt-3 grid gap-x-6 gap-y-1 text-xs sm:grid-cols-2">
+      <button
+        type="button"
+        onClick={() => setOpen((v) => !v)}
+        className="mt-3 text-xs text-muted-foreground underline-offset-2 hover:underline"
+      >
+        {open ? "Hide the full list" : "Show all 23 measurements"}
+      </button>
+      <ul className={`mt-3 grid gap-x-6 gap-y-1 text-xs sm:grid-cols-2 ${open ? "" : "hidden"}`}>
         {trust.items.map((item) => (
           <li key={item.id} className="flex items-baseline gap-2 py-0.5">
             <span className="w-8 shrink-0 font-mono text-[0.65rem] text-muted-foreground">
