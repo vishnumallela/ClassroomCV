@@ -5,6 +5,7 @@ import {
   minutesAgainstSchedule,
   offsetToInstant,
 } from "@api/lib/school-time";
+import type { AttributionCandidate } from "@api/db/schema";
 
 type Detail = NonNullable<Awaited<ReturnType<typeof getVideoDetail>>>;
 
@@ -176,9 +177,17 @@ function toPreviousTeacher(v: Detail["video"], analytics: Analytics, timezone: s
   // Several handed-over adults at the bell is usually one person tracked in
   // pieces (a seated teacher's head-only lane); the last to leave is the one
   // whose departure is the lesson's. Say how many, so a reader can judge.
-  const previous = atBell.reduce((a, b) => (b.last_ms > a.last_ms ? b : a));
-  const departureAt = offsetToInstant(clock.recordingStartedAt, previous.last_ms);
-  const minutesAfterBell = Math.round(((previous.last_ms - bellMs) / 60_000) * 10) / 10;
+  //
+  // "Left" is the end of her presence run containing the bell (left_ms), not
+  // her last sighting: on the full handover recording a colleague in a white
+  // shirt who came in 34 minutes later linked to the cream-striped period-2
+  // teacher by appearance, and her last sighting would have put the period-2
+  // teacher's departure at 10:32 instead of 09:55. Rows analysed before
+  // left_ms existed fall back to the last sighting.
+  const leftMs = (c: AttributionCandidate) => c.left_ms ?? c.last_ms;
+  const previous = atBell.reduce((a, b) => (leftMs(b) > leftMs(a) ? b : a));
+  const departureAt = offsetToInstant(clock.recordingStartedAt, leftMs(previous));
+  const minutesAfterBell = Math.round(((leftMs(previous) - bellMs) / 60_000) * 10) / 10;
   return {
     state: "observed" as const,
     reason:

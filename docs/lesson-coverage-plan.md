@@ -267,6 +267,14 @@ answerable from **this one file, at read time**:
   the last to leave, and the count is reported so a reader can judge.
 - `lesson-details-card.tsx` renders it under "Previous period's teacher".
 
+**Her departure is `left_ms`, not her last sighting (2026-09-04).** On the
+full recording a colleague who came in 34 minutes later linked to her by
+appearance (two light outfits), so her "last sighting" became 10:32.
+Attribution now reports, per adult present at the bell, the end of the
+presence run containing the bell (absences under 5 minutes bridged), and
+`toPreviousTeacher` uses that. Verified on the full file: *left 09:55 —
+5.6 min into the period*, the same answer the trim gave.
+
 On the real handover clip: *left the room 09:55 — 5.6 min into the period.*
 That is the period-2 teacher's R3 read off the period-3 file, with no
 re-analysis. Her R4 (against 09:25) needs Phase D; it would read **+30 min**,

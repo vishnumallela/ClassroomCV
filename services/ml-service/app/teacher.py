@@ -41,7 +41,10 @@ Three things the segments do NOT fix, stated so nobody assumes they do:
   and re-swaps the first, and splits the 37-minute baseline, because a
   two-frame false box then seeds a lane whose stale prediction later steals
   hers. Rejected on that evidence (tools/ab_tracker.py). What resolves an
-  occluded crossing is appearance, which is Phase 3.
+  occluded crossing is appearance: attribution.resolve_swaps compares both
+  lanes' windows on either side of the encounter and gives each lane back its
+  own body. The full 45-minute recording had two such swaps (306 s and
+  2381 s); both are undone there, and this module stays motion-only.
 
 - A student the detector calls "teacher" for a few frames is a short segment
   and is dropped as noise, which is right. A student who stands still at the

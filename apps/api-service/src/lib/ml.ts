@@ -66,6 +66,7 @@ export interface DataQuality {
     chosen_track_no: number | null;
     period_known: boolean;
     splits: number;
+    swaps?: number;
     candidates: {
       track_no: number;
       first_ms: number;
@@ -74,6 +75,7 @@ export interface DataQuality {
       in_period_ms: number;
       handed_over: boolean;
       segments: number;
+      left_ms?: number | null;
     }[];
   } | null;
   notes: string[];

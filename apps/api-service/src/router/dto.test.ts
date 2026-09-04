@@ -217,6 +217,44 @@ describe("previousTeacher: the other lesson in this file", () => {
       },
     } as Partial<DataQuality>);
 
+  test("her departure is when she LEFT, not her last sighting after a re-link", () => {
+    // Full recording: a colleague in white came in at 2373 s and linked to the
+    // cream-striped period-2 teacher by appearance, so that person's last
+    // sighting is 2540 s. left_ms carries the end of her run at the bell.
+    const p = toDetailDto(
+      detail(
+        handover({
+          candidates: [
+            {
+              track_no: 1,
+              first_ms: 246_728,
+              last_ms: 2_700_802,
+              present_ms: 2_354_000,
+              in_period_ms: 2_354_000,
+              handed_over: false,
+              segments: 2,
+              left_ms: null,
+            },
+            {
+              track_no: 2,
+              first_ms: 7_804,
+              last_ms: 2_540_519,
+              present_ms: 407_600,
+              in_period_ms: 407_600,
+              handed_over: true,
+              segments: 6,
+              left_ms: 335_574,
+            },
+          ],
+        }),
+      ),
+      IST,
+    ).previousTeacher;
+    expect(p.state).toBe("observed");
+    expect(p.departureAt).toBe("09:55");
+    expect(p.departureMinutesIntoPeriod).toBe(5.6);
+  });
+
   test("her departure is observed, measured into THIS period", () => {
     const p = toDetailDto(detail(handover()), IST).previousTeacher;
     expect(p.state).toBe("observed");

@@ -1,8 +1,8 @@
 # Multi-teacher handover — diagnosis and fix plan
 
-**Status:** Phases 0-3 built and committed. Phases 4-5 not started.
-**Date:** diagnosed 2026-09-03; phases 0-1 landed 2026-09-03
-**Branch:** `feat/rfdetr-pipeline` (not pushed)
+**Status:** Phases 0-3 built and committed; **verified on the full 45-minute recording 2026-09-04** (see the end of Phase 3 — it took one more rule, `resolve_swaps`). Phases 4-5 not started.
+**Date:** diagnosed 2026-09-03; phases 0-1 landed 2026-09-03; full-recording run 2026-09-04
+**Branch:** `feat/rfdetr-pipeline`
 
 Phase 0 stops the wrong numbers reaching anyone: sustained co-presence is
 measured, surfaced as a fourth `attribution` tier on the data-quality report,
@@ -419,6 +419,90 @@ API passes `period_start_ms/period_end_ms` on both `/analyze` and `/rederive`.
 **Rows analysed before Phase 3 have no descriptors**; attribution then links by
 continuity alone and its reason says so. The two lessons here were backfilled
 locally from the videos. New GPU runs compute descriptors natively.
+
+#### Verified on the full 45-minute recording — 2026-09-04
+
+The complete period-3 file (`760713c7`, 2700.9 s, 13,690 teacher-class boxes
+with descriptors, RTX A4000 in EUR-IS-1 at $0.25/hr, 17 min detection —
+decode-bound at 100-280% CPU, GPU at 2-7%) was the first real test of Phase 3
+beyond the 6-minute trim, and Phase 3 as committed got it **wrong**: it chose
+a 10.8-minute chimera (the cream teacher's first 5.5 minutes plus the black
+teacher's last 5.5) at *medium*, and reported the black teacher — present for
+35 minutes — as having handed over. Nothing wrong reached the dashboard (the
+refusal held), but the answer was not there either.
+
+What actually happened, read off the stored rows (`tools/ab_tracker.py`-style
+replay, frames with boxes drawn at the instants in question):
+
+1. **A third adult.** A colleague in a white shirt walked in at 2373.6 s
+   (10:29:31), passed *behind* the black teacher at 2381 s while she was
+   briefly undetected, and sat at the left desk until the end. The motion
+   model did exactly what §5 Phase 2 says it does at an occluded crossing: the
+   teacher's 35-minute lane followed the colleague to the desk, and the
+   teacher's remaining five minutes became a new lane.
+2. **The change-point split could not cut it.** Black against white scores
+   0.33 under the HSV descriptor (two of its three parts are near-identical
+   for unsaturated clothing, so the distance saturates around 0.4), and the
+   37-minute single-teacher baseline reaches 0.36 on its own through an
+   ordinary occlusion. No threshold separates them. Where the *other* lane did
+   split (0.49 — white torso then black), the adjacent link re-joined the two
+   pieces on position alone.
+3. **So the black teacher's tail could not rejoin her**: her own lane was
+   still alive on the colleague's body and overlapped it by 68 s.
+
+**The fix is `attribution.resolve_swaps`** — step 0, before the split. At any
+instant two substantial lanes are within reach of each other, compare both
+lanes' appearance windows (6 s) on either side of the instant, as tracked and
+re-paired: `d(Xb,Xa)+d(Yb,Ya)` against `d(Xb,Ya)+d(Yb,Xa)`. Measured at the
+2381 s swap: 0.77 as tracked against 0.36 re-paired; swap when the re-pairing
+wins by `SWAP_MARGIN = 0.25`. The same test at the *clean* crossing (velocity
+carried the walker through) reads cream|cream + black|black against the cross
+terms, so it leaves that alone; a lane with no second substantial lane beside
+it is never examined, so the baseline is untouched by construction; a student
+recolouring one lane's window raises one cross term, not both. The 306 s
+crossing on both real lessons is now also resolved as a swap (score ≈ 0.7)
+instead of by split-and-relink, with the same outcome. Two swaps on the full
+recording, one on the trim, none on the baseline.
+
+Two smaller rules came out of the same run:
+
+- **Confidence by lead.** The colleague stopped being detected 12 s before the
+  end, so "held the room alone" read 12 s and the call was capped at medium.
+  A candidate present `LEAD_HIGH` (2×) longer than anyone who left is now also
+  *high*; the trim (113 s against 336 s) stays medium, as it should.
+- **`Candidate.left_ms`.** The colleague's pieces linked to the cream teacher's
+  by appearance across a 34-minute gap (cream stripes vs a white shirt: 0.16
+  — same-person pieces sit at 0.10-0.25, so no threshold separates these
+  either), which would have put the period-2 teacher's departure at 10:32
+  instead of 09:55. An adult's *departure* is now the end of her presence run
+  containing the bell (absences under `LEFT_BRIDGE_MS` = 5 min bridged), and
+  `dto.ts` reports that rather than her last sighting.
+
+Result through the app (`analysis.rederive`, no GPU):
+
+| | Before | After |
+| --- | --- | --- |
+| Attributed | chimera, 7.8 → 2700.8 s, 647 s present | black teacher, 246.7 → 2700.8 s, 2354 s present |
+| Confidence | medium (withheld) | **high** |
+| Coverage | 22% | 91% |
+| R1 arrival | withheld | **09:54, 4.1 min late** |
+| R3 departure | withheld | 10:34, at the bell |
+| Presence share of period | withheld | 87.6% |
+| Previous teacher | "left 09:50, 0.5 min in" (the head-only lane) | **left 09:55, 5.6 min into the period** |
+
+Still true and still documented: the seated teacher's head-only lane (0-33 s)
+is a phantom second adult at the bell (`adultsAtBell: 2`); the colleague's
+seated minutes are three descriptor-less pieces, each "an adult who left".
+Neither moves a number.
+
+The descriptor's ceiling is the finding to carry forward: black vs white and
+cream vs white are both inside the same-person range. `resolve_swaps` needs
+only the *pair's* consistency, so it survives that; anything that needs an
+absolute appearance threshold (the split, long-gap links) does not, and a
+better descriptor (a value-weighted or joint histogram, or a torso band that
+does not move with box height — torso-only boxes score 0.33 against
+full-body boxes of the same person) is the next lever if a third real lesson
+breaks either.
 
 ### Phase 4 — Review queue (small)
 

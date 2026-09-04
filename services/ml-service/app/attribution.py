@@ -37,6 +37,7 @@ from app.teacher import (
     SEGMENT_MIN_MS,
     Segment,
     _center,
+    _plausible,
 )
 
 # --- descriptors worth trusting ---------------------------------------------
@@ -51,6 +52,31 @@ CLEAN_MIN_CONF = 0.5
 # the other teacher's doorway piece: linked, and her "arrival" became t=0.
 CLEAN_MIN_COUNT = 8
 CLEAN_MIN_SHARE = 0.5
+
+# --- swap: did the tracker hand two bodies each other's future? ------------
+# At an OCCLUDED crossing one body goes undetected for a moment and the motion
+# model gives its next box to whichever lane is nearest, which is the other
+# body's. From then on each lane carries the other person. On the full 45-minute
+# handover recording a colleague in white walked in past the period's teacher
+# (black) at 2381 s: the teacher's 35-minute lane followed the colleague to a
+# desk, and the teacher's remaining five minutes became a new lane — which then
+# could not rejoin her, because her own lane was still "alive" on the wrong
+# body. The change-point statistic cannot cut that lane: black against white
+# scores 0.33 under this descriptor, below the 0.36 a single teacher reaches on
+# the baseline through an ordinary occlusion.
+#
+# What does settle it is the PAIR. At the instant of the swap, the two lanes'
+# before/after windows read black|white and white|black; re-paired, they read
+# black|black and white|white. Measured there: 0.33 + 0.44 as tracked against
+# 0.11 + 0.25 re-paired — a margin of 0.4. The same test at the clean crossing
+# (velocity carried the walker through) reads cream|cream and black|black
+# against 0.3-0.48 crossed, so it leaves that alone, and a lane with no second
+# substantial lane beside it is never examined, so a one-adult lesson is
+# untouched by construction. A false swap would need BOTH cross terms small:
+# a student recolouring one lane's window pushes one of them up, not down.
+SWAP_WINDOW_MS = 6_000
+SWAP_MARGIN = 0.25
+SWAP_MIN_CLEAN = 5
 
 # --- change-point: did this segment change person? -------------------------
 # Mean descriptor of the W boxes before an instant against the W after. On
@@ -96,11 +122,25 @@ HANDOVER_MIN_MS = 10_000
 # for the handover to be called with high confidence. The 6-minute trim of the
 # real handover leaves 24 s after the outgoing teacher exits — enough to name
 # the right adult, not enough to grade her on; the full recording leaves 39
-# minutes.
+# minutes. "Alone" is not the only way to be sure, though: on the full
+# recording a colleague sat at a desk for the last five minutes and stopped
+# being detected 12 s before the end, which read as "held the room alone for
+# 12 s". A candidate with LEAD_HIGH times the presence of anyone who left is
+# also called with high confidence.
 HANDOVER_HIGH_MS = 60_000
-# Presence margin between the top two candidates when nobody handed over.
+# Presence margin between the top two candidates when nobody handed over, and
+# between the one who stayed and the ones who left.
 LEAD_HIGH = 2.0
 LEAD_MEDIUM = 1.3
+# When did an adult who was in the room at the bell LEAVE? Not her last
+# sighting: pieces of two light-dressed adults can link across a long gap
+# (cream stripes against a white shirt sit at 0.16 under this descriptor), and
+# then the period-2 teacher's departure would read as the colleague's. Her
+# departure is the end of the presence run that contains the bell, bridging
+# absences shorter than this — a teacher who steps out for a minute has not
+# left; one gone for five has.
+LEFT_BRIDGE_MS = 300_000
+AT_BELL_TOL_MS = 10_000
 
 
 @dataclass
@@ -139,6 +179,10 @@ class Candidate:
     in_period_ms: int
     handed_over: bool
     segments: int
+    # When an adult who was in the room at the start of the window left it:
+    # the end of her presence run containing the bell (see LEFT_BRIDGE_MS).
+    # None when she was not there at the bell.
+    left_ms: Optional[int] = None
 
 
 @dataclass
@@ -150,6 +194,7 @@ class Attribution:
     candidates: list[Candidate] = field(default_factory=list)
     period_known: bool = False
     splits: int = 0
+    swaps: int = 0
 
     def as_report(self) -> dict:
         return {
@@ -158,6 +203,7 @@ class Attribution:
             "chosen_track_no": self.chosen.track_no if self.chosen else None,
             "period_known": self.period_known,
             "splits": self.splits,
+            "swaps": self.swaps,
             "candidates": [c.__dict__ for c in self.candidates],
         }
 
@@ -187,6 +233,98 @@ def _robust_end(dets: list[Detection], first: bool, k: int = 5) -> tuple[float, 
     xs = [_center(d)[0] for d in sel]
     ys = [_center(d)[1] for d in sel]
     return median(xs), median(ys)
+
+
+# --------------------------------------------------------------------------- #
+# 0. undo the tracker's swaps at occluded crossings
+# --------------------------------------------------------------------------- #
+
+
+def _window_app(dets: list[Detection]) -> Optional[list[float]]:
+    """Mean clean descriptor of a short window, or None if too few speak."""
+    clean = _clean(dets)
+    if len(clean) < SWAP_MIN_CLEAN or len(clean) < CLEAN_MIN_SHARE * len(dets):
+        return None
+    return app_mod.mean_descriptor(clean)
+
+
+def _swap_score(x: Segment, y: Segment, t: int) -> Optional[float]:
+    """How much cheaper it is to give `x` and `y` each other's boxes from `t`
+    on: (as tracked) minus (re-paired), in appearance distance. None when a
+    side has too few clean boxes to speak."""
+    lo, hi = t - SWAP_WINDOW_MS, t + SWAP_WINDOW_MS
+    xb = _window_app([d for d in x.detections if lo <= d.video_ts_ms < t])
+    xa = _window_app([d for d in x.detections if t <= d.video_ts_ms <= hi])
+    yb = _window_app([d for d in y.detections if lo <= d.video_ts_ms < t])
+    ya = _window_app([d for d in y.detections if t <= d.video_ts_ms <= hi])
+    if not (xb and xa and yb and ya):
+        return None
+    as_tracked = app_mod.distance(xb, xa) + app_mod.distance(yb, ya)
+    re_paired = app_mod.distance(xb, ya) + app_mod.distance(yb, xa)
+    return as_tracked - re_paired
+
+
+def _find_swap(x: Segment, y: Segment) -> Optional[int]:
+    """The instant at which `x` most clearly took over `y`'s body, or None.
+
+    Only instants where the two lanes were within reach of each other are
+    examined — the box `x` took could have been `y`'s next box — because that
+    is the only moment a motion model can confuse two bodies.
+    """
+    y_dets = y.detections
+    best_t, best_score = None, SWAP_MARGIN
+    j = 0
+    for d in x.detections:
+        t = d.video_ts_ms
+        if t <= y.first_ms or t > y.last_ms:
+            continue
+        while j + 1 < len(y_dets) and y_dets[j + 1].video_ts_ms < t:
+            j += 1
+        y_prev = y_dets[j]
+        if y_prev.video_ts_ms >= t or t - y_prev.video_ts_ms >= FREE_GAP_MS:
+            continue
+        if not _plausible(y_prev, d):
+            continue
+        score = _swap_score(x, y, t)
+        if score is not None and score > best_score:
+            best_t, best_score = t, score
+    return best_t
+
+
+def _swap_tails(x: Segment, y: Segment, t: int) -> None:
+    x_before = [d for d in x.detections if d.video_ts_ms < t]
+    x_after = [d for d in x.detections if d.video_ts_ms >= t]
+    y_before = [d for d in y.detections if d.video_ts_ms < t]
+    y_after = [d for d in y.detections if d.video_ts_ms >= t]
+    x.detections = x_before + y_after
+    y.detections = y_before + x_after
+
+
+def resolve_swaps(segments: list[Segment]) -> tuple[list[Segment], int]:
+    """Give each lane back its own body wherever the tracker swapped two.
+
+    Rescans after every swap because a swap changes both lanes; bounded, and
+    a corrected pair scores below the margin, so it cannot oscillate.
+    """
+    subs = [s for s in segments if s.substantial]
+    swaps = 0
+    for _ in range(len(subs) * len(subs) + 1):
+        found = None
+        for x in subs:
+            for y in subs:
+                if x is y:
+                    continue
+                t = _find_swap(x, y)
+                if t is not None:
+                    found = (x, y, t)
+                    break
+            if found:
+                break
+        if not found:
+            break
+        _swap_tails(*found)
+        swaps += 1
+    return [s for s in segments if s.detections], swaps
 
 
 # --------------------------------------------------------------------------- #
@@ -374,12 +512,28 @@ def _presence_ms(dets: list[Detection], lo: int, hi: int, gap_ms: int = FREE_GAP
     return total + (prev - start)
 
 
+def _left_ms(dets: list[Detection], lo: int) -> Optional[int]:
+    """When an adult who was in the room at `lo` left it: the end of the
+    presence run containing `lo`, bridging absences under LEFT_BRIDGE_MS.
+    None when she was not there at `lo`."""
+    ts = sorted(d.video_ts_ms for d in dets)
+    if not ts or ts[0] > lo + AT_BELL_TOL_MS:
+        return None
+    end = ts[0]
+    for t in ts[1:]:
+        if t - end >= LEFT_BRIDGE_MS:
+            break
+        end = t
+    return end
+
+
 def attribute(
     segments: list[Segment],
     duration_ms: int,
     period_ms: Optional[tuple[int, int]] = None,
 ) -> Attribution:
     """Decide which person the lesson assesses, and say why."""
+    segments, swaps = resolve_swaps(list(segments))
     pieces, splits = split_at_changes([s for s in segments if s.substantial])
     people = [p for p in link_people(pieces) if p.substantial]
     people.sort(key=lambda p: p.first_ms)
@@ -391,7 +545,7 @@ def attribute(
 
     if not people:
         return Attribution([], None, "low", "No adult was tracked for long enough to assess.",
-                           period_known=period_known, splits=splits)
+                           period_known=period_known, splits=splits, swaps=swaps)
 
     cands: list[Candidate] = []
     for i, p in enumerate(people, start=1):
@@ -412,12 +566,13 @@ def attribute(
             # after this person's last sighting AND somebody else fills it.
             handed_over=others_after >= HANDOVER_MIN_MS and hi - last >= HANDOVER_MIN_MS,
             segments=len(p.segments),
+            left_ms=_left_ms(dets, lo),
         ))
 
     if len(people) == 1:
         people[0].track_no = 1
         return Attribution(people, people[0], "high", "One adult was tracked; the lesson is hers.",
-                           cands, period_known, splits)
+                           cands, period_known, splits, swaps)
 
     staying = [c for c in cands if not c.handed_over]
     pool = staying if staying else cands
@@ -430,11 +585,19 @@ def attribute(
         # The handover signature: everyone else left while this one remained.
         left_desc = ", ".join(f"one at {c.last_ms / 1000:.0f}s" for c in handed)
         remaining = min(hi, top.last_ms) - max(h.last_ms for h in handed)
-        conf = "high" if (remaining >= HANDOVER_HIGH_MS and top.in_period_ms >= HANDOVER_HIGH_MS) else "medium"
+        lead = top.in_period_ms / max(max(h.in_period_ms for h in handed), 1)
+        enough = top.in_period_ms >= HANDOVER_HIGH_MS
+        alone = remaining >= HANDOVER_HIGH_MS
+        conf = "high" if enough and (alone or lead >= LEAD_HIGH) else "medium"
         reason = (f"{len(handed)} other adult(s) left while this one remained ({left_desc}); "
                   f"the adult who stayed is attributed. She then held the room alone for "
-                  f"{remaining / 1000:.0f}s" + ("" if conf == "high" else
-                  " — too little to grade her on; the full recording would settle it") + ".")
+                  f"{remaining / 1000:.0f}s")
+        if conf == "medium":
+            reason += " — too little to grade her on; the full recording would settle it."
+        elif alone:
+            reason += "."
+        else:
+            reason += f", and was present {lead:.0f}× longer than anyone who left."
     elif runner is None or runner.in_period_ms == 0:
         conf = "high" if period_known else "medium"
         reason = "Only one adult was present during the scheduled period."
@@ -462,4 +625,4 @@ def attribute(
     cands.sort(key=lambda c: c.track_no)
     if chosen is None:
         reason = reason + " Reported as Not Observed."
-    return Attribution(people, chosen, conf, reason, cands, period_known, splits)
+    return Attribution(people, chosen, conf, reason, cands, period_known, splits, swaps)

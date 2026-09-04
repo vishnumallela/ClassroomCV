@@ -253,6 +253,9 @@ class AttributionCandidateOut(BaseModel):
     in_period_ms: int
     handed_over: bool
     segments: int
+    # The end of her presence run containing the bell, when she was there at
+    # the bell (see app/attribution.py LEFT_BRIDGE_MS); else None.
+    left_ms: Optional[int] = None
 
 
 class AttributionOut(BaseModel):
@@ -268,6 +271,7 @@ class AttributionOut(BaseModel):
     chosen_track_no: Optional[int]
     period_known: bool
     splits: int
+    swaps: int = 0
     candidates: list[AttributionCandidateOut]
 
 

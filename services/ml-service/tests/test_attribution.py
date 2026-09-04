@@ -193,3 +193,125 @@ class TestAttribute:
         assert [p.track_no for p in sorted(att.persons, key=lambda p: p.track_no)] == [1, 2]
         assert att.chosen.track_no == 1
         assert att.as_report()["chosen_track_no"] == 1
+
+
+WHITE = _colour("white-shirt")
+
+
+def _swapped_crossing(gap_ms=0):
+    """What the tracker hands over after an OCCLUDED crossing, as on the full
+    handover recording at 2381 s: lane X carries the standing teacher (black)
+    and then the walker (white); lane Y carries the walker and then the
+    teacher. The walker passes within reach of the teacher at the swap."""
+    t = 40_000
+    x = Segment(
+        [_det(ts, x=0.50, app=BLACK) for ts in range(0, t, 200)]
+        + [_det(ts, x=0.50 - 0.002 * (ts - t) / 200, app=WHITE) for ts in range(t, 80_001, 200)]
+    )
+    y = Segment(
+        [_det(ts, x=0.62 - 0.003 * ts / 200, app=WHITE) for ts in range(20_000, t - gap_ms, 200)]
+        + [_det(ts, x=0.51, app=BLACK) for ts in range(t + gap_ms, 80_001, 200)]
+    )
+    return x, y, t
+
+
+class TestSwaps:
+    def test_an_occluded_crossing_the_tracker_swapped_is_undone(self):
+        x, y, t = _swapped_crossing(gap_ms=1_000)
+        segs, swaps = X.resolve_swaps([x, y])
+        assert swaps == 1
+        black = next(s for s in segs if s.detections[0].bbox["x"] == 0.50)
+        white = next(s for s in segs if s is not black)
+        # each lane is one person again: the descriptors on either side of the
+        # swap now agree
+        for s in (black, white):
+            before = A.mean_descriptor([d.app for d in s.detections if d.video_ts_ms < t])
+            after = A.mean_descriptor([d.app for d in s.detections if d.video_ts_ms >= t])
+            assert A.distance(before, after) < 0.1
+        assert black.first_ms == 0 and black.last_ms == 80_000
+
+    def test_a_clean_crossing_is_left_to_the_motion_model(self):
+        """Velocity carried the walker through; each lane is one colour
+        throughout, so re-pairing would only make things worse."""
+        walker = Segment([_det(ts, x=0.8 - 0.003 * ts / 200, app=WHITE) for ts in range(0, 40_001, 200)])
+        still = Segment([_det(ts, x=0.5, app=BLACK) for ts in range(0, 40_001, 200)])
+        before = [list(walker.detections), list(still.detections)]
+        _, swaps = X.resolve_swaps([walker, still])
+        assert swaps == 0
+        assert [walker.detections, still.detections] == before
+
+    def test_one_lane_is_never_examined(self):
+        seg = _seg(0, 60_000, app=BLACK)
+        _, swaps = X.resolve_swaps([seg])
+        assert swaps == 0
+
+    def test_a_student_recolouring_one_lane_is_not_a_swap(self):
+        """A student in front of the teacher muddies HER window towards the
+        other adult's colour. One cross term drops, the other does not, so the
+        pairing as tracked still wins."""
+        teacher = Segment(
+            [_det(ts, x=0.50, app=BLACK) for ts in range(0, 40_000, 200)]
+            + [_det(ts, x=0.50, app=WHITE) for ts in range(40_000, 60_001, 200)]  # muddied
+        )
+        other = Segment([_det(ts, x=0.56, app=WHITE) for ts in range(20_000, 60_001, 200)])
+        _, swaps = X.resolve_swaps([teacher, other])
+        assert swaps == 0
+
+    def test_attribution_names_the_teacher_across_a_swapped_crossing(self):
+        """End to end: the swapped lanes would have left the teacher's last
+        forty seconds on the walker's person; resolved, she is one person from
+        start to finish and the walker is the one who leaves."""
+        x, y, t = _swapped_crossing(gap_ms=1_000)
+        # the walker leaves at 80 s; the teacher stays to 200 s
+        y.detections += [_det(ts, x=0.51, app=BLACK) for ts in range(80_200, 200_001, 200)]
+        att = X.attribute([x, y], 200_000, period_ms=(0, 200_000))
+        assert att.swaps == 1 and att.chosen is not None
+        assert att.chosen.first_ms == 0 and att.chosen.last_ms == 200_000
+        assert att.confidence == "high"
+
+
+class TestLateVisitor:
+    def test_a_colleague_who_sits_in_for_the_last_minutes_does_not_cap_confidence(self):
+        """Full recording: a colleague sat at a desk for the last five minutes
+        and was last detected 12 s before the end. The teacher did not 'hold
+        the room alone' for a minute — but she was present many times longer
+        than anyone who left, which is the same certainty."""
+        out = _seg(0, 200_000, x=0.4, app=CREAM)
+        teacher = _seg(150_000, 2_000_000, x=0.6, app=BLACK)
+        visitor = _seg(1_700_000, 1_988_000, x=0.2, app=WHITE)
+        att = X.attribute([out, teacher, visitor], 2_000_000, period_ms=(0, 2_000_000))
+        assert att.chosen is not None and att.chosen.first_ms == 150_000
+        assert att.confidence == "high"
+        assert "longer than anyone who left" in att.reason
+
+    def test_a_short_lead_over_the_one_who_left_stays_medium(self):
+        out = _seg(0, 200_000, x=0.4, app=CREAM)
+        teacher = _seg(150_000, 400_000, x=0.6, app=BLACK)  # 250 s vs 200 s: no lead
+        visitor = _seg(300_000, 388_000, x=0.2, app=WHITE)
+        att = X.attribute([out, teacher, visitor], 400_000, period_ms=(0, 400_000))
+        assert att.chosen is not None and att.confidence == "medium"
+
+
+class TestLeftAt:
+    def test_departure_is_the_end_of_the_run_containing_the_bell(self):
+        """Two light-dressed adults can link across a long gap; the previous
+        teacher's departure must still be when SHE left, not the colleague's
+        last sighting."""
+        out = Segment(
+            [_det(ts, x=0.4, app=CREAM) for ts in range(0, 300_001, 200)]
+            + [_det(ts, x=0.3, app=CREAM) for ts in range(2_000_000, 2_100_001, 200)]
+        )
+        teacher = _seg(250_000, 2_500_000, x=0.6, app=BLACK)
+        att = X.attribute([out, teacher], 2_500_000, period_ms=(2_000, 2_500_000))
+        c = next(c for c in att.candidates if c.first_ms == 0)
+        assert c.handed_over and c.last_ms == 2_100_000 and c.left_ms == 300_000
+        assert next(c for c in att.candidates if c.first_ms == 250_000).left_ms is None
+
+    def test_a_short_absence_does_not_count_as_leaving(self):
+        dets = [_det(ts, x=0.4, app=CREAM) for ts in range(0, 100_001, 200)]
+        dets += [_det(ts, x=0.4, app=CREAM) for ts in range(160_000, 300_001, 200)]  # out for a minute
+        assert X._left_ms(dets, 0) == 300_000
+
+    def test_not_there_at_the_bell_means_no_departure(self):
+        dets = [_det(ts, x=0.4, app=CREAM) for ts in range(60_000, 100_001, 200)]
+        assert X._left_ms(dets, 0) is None

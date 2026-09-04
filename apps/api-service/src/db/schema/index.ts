@@ -34,6 +34,9 @@ export type AttributionCandidate = {
   in_period_ms: number;
   handed_over: boolean;
   segments: number;
+  /** When she left, if she was there at the bell: the end of her presence run
+   *  containing it (ml attribution.LEFT_BRIDGE_MS). Absent on older rows. */
+  left_ms?: number | null;
 };
 
 export type DataQuality = {
@@ -57,6 +60,8 @@ export type DataQuality = {
     chosen_track_no: number | null;
     period_known: boolean;
     splits: number;
+    /** Occluded crossings where the tracker had swapped two bodies; undone by appearance. */
+    swaps?: number;
     candidates: AttributionCandidate[];
   } | null;
   confidence: {
