@@ -9,6 +9,7 @@ import {
 } from "@api/lib/school-time";
 import type { AttributionCandidate } from "@api/db/schema";
 import { type ResolvedSchedule, clockInput, resolveSchedule } from "@api/lib/timetable";
+import { voiceReport } from "@api/lib/voice";
 
 type Detail = NonNullable<Awaited<ReturnType<typeof getVideoDetail>>>;
 
@@ -252,6 +253,28 @@ export function toDetailDto(d: Detail, timezone: string) {
   // The lesson placed in its classroom's week: the video's own bells win,
   // else the timetable's row for its period (lib/timetable.ts).
   const schedule = resolveSchedule(v, d.timetable ?? [], timezone);
+  // Group D. The teacher's voice is the one that carries the speech while the
+  // video says she was in the room, so a blended or missing presence timeline
+  // withholds the split rather than guessing (lib/voice.ts).
+  const dq = d.analytics?.dataQuality;
+  const blended = dq?.multiple_adults_detected === true && dq?.attribution?.confidence !== "high";
+  const utterances = d.utterances ?? [];
+  const voice = voiceReport({
+    utterances: utterances.map((u) => ({
+      idx: u.idx,
+      speaker: u.speaker,
+      startMs: u.startMs,
+      endMs: u.endMs,
+      text: u.text,
+      confidence: u.confidence,
+      language: u.language,
+    })),
+    durationMs: v.durationMs,
+    presenceIntervals:
+      d.analytics && !blended ? (d.analytics.presenceIntervals as [number, number][]) : null,
+    audioStatus: v.audioStatus,
+    audioError: v.audioError,
+  });
   return {
     classroom: d.classroom ? { id: d.classroom.id, name: d.classroom.name } : null,
     video: {
@@ -268,6 +291,8 @@ export function toDetailDto(d: Detail, timezone: string) {
       error: v.error,
       thumbnailUrl: v.thumbnailPath ? `/videos/${v.id}/thumbnail` : null,
       uploadedAt: v.uploadedAt.toISOString(),
+      audioStatus: v.audioStatus,
+      audioError: v.audioError,
     },
     lesson: {
       recordingStartedAt: v.recordingStartedAt?.toISOString() ?? null,
@@ -293,6 +318,20 @@ export function toDetailDto(d: Detail, timezone: string) {
         source: schedule.source,
       },
     },
+    voice,
+    transcript: utterances.map((u) => ({
+      idx: u.idx,
+      speaker: u.speaker,
+      isTeacher: voice.teacher.speaker ? u.speaker === voice.teacher.speaker : null,
+      startMs: u.startMs,
+      endMs: u.endMs,
+      text: u.text,
+      confidence: u.confidence,
+      language: u.language,
+      intent: u.intent,
+      attentionCue: u.attentionCue,
+      setsTask: u.setsTask,
+    })),
     punctuality: toPunctuality(v, d.analytics, timezone, schedule),
     previousTeacher: toPreviousTeacher(v, d.analytics, timezone, schedule),
     zones: d.zones.map((z) => ({

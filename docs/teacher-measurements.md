@@ -109,8 +109,8 @@ stop. All three are different outcomes and the report should name which.
 | **R17** | **Raised-voice events** — count, and rate per ten minutes | Mic | Loudness of the teacher's own speech against her own rolling baseline, sustained past a minimum duration | Not built |
 | **R18** | **Attention requests** — how many times she called for the class's attention | Mic | Teacher utterances flagged as an attention cue | Not built |
 | **R19** | **Off-lesson drift** — how many episodes, and total minutes | Mic | Runs of teacher speech labelled as unrelated to the lesson | Not built |
-| **R20** | **Questions asked** — count and rate, split into questions put to the class and rhetorical check-ins | Mic | Teacher utterances labelled as asking | Not built |
-| **R21** | **Languages used** — which, how many, the share of speech in each, and switches per minute | Mic | Per-utterance language, normalised before counting | Not built |
+| **R20** | **Questions asked** — count and rate, split into questions put to the class and rhetorical check-ins | Mic | Teacher utterances labelled as asking | **Provisional** (2026-09-04): question marks on the teacher's sentences, with check-ins set aside by a word list incl. tagged-on "…, ओके?"; reported as provisional until the labelling pass |
+| **R21** | **Languages used** — which, how many, the share of speech in each, and switches per minute | Mic | Per-utterance language, normalised before counting | **Built** (2026-09-04) from each sentence's script — an upper bound on Hindi, since the transcriber writes some English in Devanagari |
 
 Three notes that decide whether these numbers are worth anything:
 
@@ -124,13 +124,29 @@ Three notes that decide whether these numbers are worth anything:
   classroom that code-switches. Report the set of languages, the share of each,
   and the switch rate — the last is the interesting one.
 
+**What the first real lesson taught (2026-09-04, `760713c7`, 45 min).** The
+transcript is stored as SENTENCES cut from the words (`lib/segment.ts`), not
+as diarizer turns — a turn ran 6.5 minutes and hid 98 pauses. The teacher's
+voice is the diarized speaker that carries the speech while the video says
+she is in the room (`lib/voice.ts`): speaker B, 88% of in-presence speech,
+which is also what separates her from the period-2 teacher's opening minutes.
+Read off that lesson: teacher talk 59%, others 14%, silence 27%; longest
+stretch 3:21; 133 words/min; 70 teacher turns; ~50 questions to the class
+(provisional); Hindi script 72% / English 26% / mixed 3%, 1.6 switches a
+minute; 73% of the recording transcribed at 0.89 confidence. Two limits
+found there: the transcriber renders some English in Devanagari ("आई विल साइन
+एंड देन रिटर्न"), so script is an upper bound on Hindi; and question marks
+alone overstate R20 by roughly a third even after tag questions are set aside.
+R7-R16 and R17-R19 need the labelling pass (an LLM key) and the loudness
+pass; the card names them as pending rather than showing zeros.
+
 ---
 
 ## Group E — Trust
 
 | ID | The number | Sensor | How | Status |
 | --- | --- | --- | --- | --- |
-| **R22** | **Observation coverage** — how much of the lesson the system could see and hear, and how confident it is | Camera + Mic | Coverage, continuity and detection confidence, per sensor | **Built** for video |
+| **R22** | **Observation coverage** — how much of the lesson the system could see and hear, and how confident it is | Camera + Mic | Coverage, continuity and detection confidence, per sensor | **Built** for video and audio (transcribed share, transcription confidence) |
 | **R23** | **Not Observed** — the system says so rather than guessing | — | Any requirement below its evidence threshold reports Not Observed | Partly built |
 
 ---

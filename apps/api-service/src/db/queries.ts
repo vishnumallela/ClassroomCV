@@ -435,14 +435,16 @@ export async function listVideos(classroomId?: string): Promise<VideoListItem[]>
 export async function getVideoDetail(id: string) {
   const video = await getVideo(id);
   if (!video) return undefined;
-  const [zoneRows, trackRows, eventRows, analyticsRows, classroom, timetable] = await Promise.all([
-    db.select().from(zones).where(eq(zones.videoId, id)).orderBy(zones.createdAt),
-    db.select().from(tracks).where(eq(tracks.videoId, id)).orderBy(tracks.trackNo),
-    db.select().from(events).where(eq(events.videoId, id)).orderBy(events.videoTsMs),
-    db.select().from(videoAnalytics).where(eq(videoAnalytics.videoId, id)),
-    video.classroomId ? getClassroom(video.classroomId) : Promise.resolve(undefined),
-    video.classroomId ? getTimetable(video.classroomId) : Promise.resolve([]),
-  ]);
+  const [zoneRows, trackRows, eventRows, analyticsRows, classroom, timetable, utteranceRows] =
+    await Promise.all([
+      db.select().from(zones).where(eq(zones.videoId, id)).orderBy(zones.createdAt),
+      db.select().from(tracks).where(eq(tracks.videoId, id)).orderBy(tracks.trackNo),
+      db.select().from(events).where(eq(events.videoId, id)).orderBy(events.videoTsMs),
+      db.select().from(videoAnalytics).where(eq(videoAnalytics.videoId, id)),
+      video.classroomId ? getClassroom(video.classroomId) : Promise.resolve(undefined),
+      video.classroomId ? getTimetable(video.classroomId) : Promise.resolve([]),
+      getUtterances(id),
+    ]);
   return {
     video,
     classroom: classroom ?? null,
@@ -452,6 +454,8 @@ export async function getVideoDetail(id: string) {
     analytics: analyticsRows[0] ?? null,
     // The classroom's week, so the DTO can place this lesson in it.
     timetable,
+    // The transcript, as sentences; every voice number is arithmetic over these.
+    utterances: utteranceRows,
   };
 }
 

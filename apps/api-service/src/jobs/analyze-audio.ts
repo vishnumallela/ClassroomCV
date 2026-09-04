@@ -4,6 +4,7 @@ import { getVideo, replaceUtterances, setAudioStatus, type UtteranceInput } from
 import { isS3 } from "@api/lib/storage";
 import { audioQualityNote, extractAudio, probeAudio } from "@api/lib/audio";
 import { logger } from "@api/lib/logger";
+import { languageOf, segmentSentences } from "@api/lib/segment";
 import { mediaSource } from "@api/jobs/analyze-video";
 import type { AudioJobData } from "@api/lib/queue";
 import {
@@ -103,18 +104,33 @@ export async function processAudioJob(job: Job<AudioJobData>): Promise<void> {
 
     const result = await pollTranscript(transcriptId, videoId);
 
-    const rows: UtteranceInput[] = result.utterances.map((u, idx) => ({
+    // Sentences, not diarizer turns: a turn runs until somebody else speaks,
+    // which on a real lesson was 6.5 minutes and 3,650 characters in one row.
+    // Cut from the words (lib/segment.ts) when the provider returned them;
+    // the turns stand in only when it did not.
+    const sentences =
+      result.words.length > 0
+        ? segmentSentences(result.words)
+        : result.utterances.map((u) => ({
+            speaker: u.speaker,
+            start: u.start,
+            end: u.end,
+            text: u.text,
+            confidence: u.confidence,
+            language: languageOf(u.text),
+          }));
+    const rows: UtteranceInput[] = sentences.map((u, idx) => ({
       idx,
       speaker: u.speaker,
-      // Left null on purpose. The diarizer's role guess is one opinion; the
-      // video's presence intervals are another, and reconciling them is a
-      // separate pass that runs once both halves have landed.
+      // Left null on purpose. The diarizer's label is one opinion; the video's
+      // presence intervals are another, and which voice is hers is decided at
+      // read time from both (lib/voice.ts), so there is no second copy to drift.
       isTeacher: null,
       startMs: u.start,
       endMs: u.end,
       text: u.text,
       confidence: u.confidence ?? null,
-      language: null,
+      language: u.language,
     }));
     await replaceUtterances(videoId, rows);
 

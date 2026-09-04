@@ -10,6 +10,8 @@ import { getAppSettings } from "@api/lib/app-settings";
  * the audio-analysis queue.
  */
 
+import type { Word } from "@api/lib/segment";
+
 const API = "https://api.assemblyai.com/v2";
 
 /**
@@ -49,6 +51,9 @@ export interface TranscriptResult {
   status: "queued" | "processing" | "completed" | "error";
   error: string | null;
   utterances: Utterance[];
+  /** Every word with its own timestamps and speaker — what lib/segment.ts
+   *  cuts sentences from, since a diarizer turn can run for minutes. */
+  words: Word[];
   audioDurationMs: number | null;
   /**
    * Which languages this run covered, when the response says so.
@@ -68,6 +73,9 @@ interface RawTranscript {
   error?: string | null;
   audio_duration?: number | null;
   utterances?: Utterance[] | null;
+  words?:
+    | { text: string; start: number; end: number; confidence: number; speaker?: string | null }[]
+    | null;
   /** Single dominant language. Present when the file was not code-switched. */
   language_code?: string | null;
   /** Echo of the code-switching request — the languages this run allowed. */
@@ -237,6 +245,13 @@ export async function getTranscript(id: string): Promise<TranscriptResult> {
       status === "completed" || status === "queued" || status === "processing" ? status : "error",
     error: body.error ?? null,
     utterances: body.utterances ?? [],
+    words: (body.words ?? []).map((w) => ({
+      text: w.text,
+      start: w.start,
+      end: w.end,
+      confidence: w.confidence,
+      speaker: w.speaker ?? null,
+    })),
     audioDurationMs: body.audio_duration ? Math.round(body.audio_duration * 1000) : null,
     detectedLanguages: [...languages],
   };
