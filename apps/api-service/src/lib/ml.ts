@@ -95,7 +95,7 @@ export interface AnalysisResultAnalytics {
   board_intervals: [number, number][];
   pointing_intervals?: [number, number][];
   writing_intervals?: [number, number][];
-  entry_exit: { kind: string; ts_ms: number }[];
+  entry_exit: { kind: string; ts_ms: number; method?: "door" | "buffer" | "start" | null }[];
   heatmap: { grid_w: number; grid_h: number; teacher: number[] };
   data_quality?: DataQuality | null;
 }

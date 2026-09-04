@@ -556,3 +556,89 @@ def test_rederive_does_not_invent_zones():
         teacher, [], actions_available=False,
     )
     assert out["proposed_zones"] == []
+
+
+# --------------------------------------------------------------------------- #
+# Entry/exit: through the door by DIRECTION, or by absence beyond the buffer
+# (DOOR above sits on the LEFT edge of the frame, x 0.0-0.1)
+# --------------------------------------------------------------------------- #
+
+from app.heuristics import OUT_OF_FRAME_BUFFER_MS, classify_presence
+
+
+def _walk(t0, t1, x0, x1, y=0.35, step=200):
+    """Detections walking from x0 to x1 between t0 and t1 (foot at the box bottom)."""
+    n = max(1, (t1 - t0) // step)
+    return [
+        _det(t0 + i * step, 1, x=x0 + (x1 - x0) * i / n, y=y, w=0.08, h=0.25)
+        for i in range(n + 1)
+    ]
+
+
+def _still(t0, t1, x, step=200):
+    return [_det(t, 1, x=x, y=0.35, w=0.08, h=0.25) for t in range(t0, t1 + 1, step)]
+
+
+def test_exit_is_the_teacher_moving_toward_the_door_as_she_vanishes():
+    # she walks to the door on the left and vanishes; 6 s later she is back, walking away from it
+    dets = _walk(0, 10_000, 0.4, 0.06) + _walk(16_000, 30_000, 0.06, 0.4)
+    ivs = presence_intervals([d.video_ts_ms for d in dets])
+    presence, events = classify_presence(ivs, dets, [DOOR], duration_ms=60_000)
+    assert presence == [[0, 10_000], [16_000, 30_000]]
+    assert [(e["kind"], e["ts_ms"], e["method"]) for e in events] == [
+        ("enter", 0, "start"),
+        ("exit", 10_000, "door"),
+        ("enter", 16_000, "door"),
+        ("exit", 30_000, "buffer"),
+    ]
+
+
+def test_standing_at_the_door_and_dropping_out_is_an_occlusion_not_an_exit():
+    # she stands still just inside the door zone, vanishes 4 s, reappears on the spot
+    dets = _still(0, 10_000, 0.16) + _still(14_000, 58_000, 0.16)
+    ivs = presence_intervals([d.video_ts_ms for d in dets])
+    presence, events = classify_presence(ivs, dets, [DOOR], duration_ms=60_000)
+    assert presence == [[0, 58_000]]
+    assert [e["kind"] for e in events] == ["enter"]
+
+
+def test_long_absence_away_from_the_door_is_inferred_from_the_buffer():
+    dets = _still(0, 10_000, 0.5) + _still(10_000 + OUT_OF_FRAME_BUFFER_MS, 58_000, 0.5)
+    ivs = presence_intervals([d.video_ts_ms for d in dets])
+    presence, events = classify_presence(ivs, dets, [DOOR], duration_ms=60_000)
+    assert len(presence) == 2
+    assert [(e["kind"], e["method"]) for e in events] == [
+        ("enter", "start"),
+        ("exit", "buffer"),
+        ("enter", "buffer"),
+    ]
+
+
+def test_no_door_short_gap_is_bridged_and_long_gap_is_an_absence():
+    short = _still(0, 10_000, 0.5) + _still(18_000, 58_000, 0.5)
+    ivs = presence_intervals([d.video_ts_ms for d in short])
+    presence, events = classify_presence(ivs, short, [], duration_ms=60_000)
+    assert presence == [[0, 58_000]] and [e["kind"] for e in events] == ["enter"]
+    long = _still(0, 10_000, 0.5) + _still(40_000, 58_000, 0.5)
+    ivs = presence_intervals([d.video_ts_ms for d in long])
+    presence, events = classify_presence(ivs, long, [], duration_ms=60_000)
+    assert presence == [[0, 10_000], [40_000, 58_000]]
+    assert [(e["kind"], e["method"]) for e in events] == [
+        ("enter", "start"),
+        ("exit", "buffer"),
+        ("enter", "buffer"),
+    ]
+
+
+def test_vanishing_seconds_before_the_end_without_a_crossing_is_not_leaving():
+    dets = _still(0, 48_000, 0.5)  # gone for the last 12 s, away from the door
+    ivs = presence_intervals([d.video_ts_ms for d in dets])
+    _, events = classify_presence(ivs, dets, [DOOR], duration_ms=60_000)
+    assert [e["kind"] for e in events] == ["enter"]
+
+
+def test_arriving_through_the_door_after_the_start_is_a_door_entry():
+    dets = _walk(30_000, 40_000, 0.06, 0.4)
+    ivs = presence_intervals([d.video_ts_ms for d in dets])
+    _, events = classify_presence(ivs, dets, [DOOR], duration_ms=60_000)
+    assert events[0] == {"kind": "enter", "ts_ms": 30_000, "method": "door"}

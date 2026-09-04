@@ -65,7 +65,7 @@ machine learning, and four punctuality numbers appear immediately.
 | **R3** | **Departure time** — the last moment she is in the room | Camera | End of the last presence interval, or the final door exit | **Built** |
 | **R4** | **Departure against the bell** — minutes early or late | Camera + P2 | R3 − P2 | Needs timetable |
 | **R5** | **Time in the room** — total present, and as a share of the scheduled period | Camera + P1/P2 | Sum of presence intervals | **Built**; the share needs the timetable |
-| **R6** | **Mid-lesson absences** — how many times she left and for how long | Camera | Gaps between presence intervals, matched to door crossings | **Built** |
+| **R6** | **Mid-lesson absences** — how many times she left and for how long | Camera | Gaps between presence intervals, matched to door crossings | **Built**; rule set 2026-09-05: with a door zone, an exit is her moving TOWARD the door (or standing in the doorway) as she vanishes and an entry her moving AWAY from it as she reappears — not merely vanishing near it; with no door, or when no crossing was seen, an absence of ≥ 20 s is an exit/entry and anything shorter is bridged as occlusion. Each event says whether it was seen at the door or inferred (`heuristics.classify_presence`) |
 
 ---
 

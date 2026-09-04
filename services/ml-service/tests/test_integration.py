@@ -125,7 +125,7 @@ def test_full_pipeline_shape_and_semantics(monkeypatch):
     assert a.presence_intervals == [[0, DURATION_MS]]
     assert a.teacher_present_ms == DURATION_MS
     assert a.entries == 1 and a.exits == 0
-    assert [e.model_dump() for e in a.entry_exit] == [{"kind": "enter", "ts_ms": 0}]
+    assert [e.model_dump() for e in a.entry_exit] == [{"kind": "enter", "ts_ms": 0, "method": "start"}]
 
     # Heatmap: every teacher detection lands one dwell sample.
     assert sum(a.heatmap.teacher) > 0

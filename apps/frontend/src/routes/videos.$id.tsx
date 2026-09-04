@@ -208,7 +208,7 @@ function VideoDetail() {
           <BoardSessions boardIntervals={analytics.boardIntervals} onSeek={seek} />
           <div>
             <h2 className="mb-3 text-sm font-medium text-muted-foreground">Teacher events</h2>
-            <EventsTable events={events} onSeek={seek} />
+            <EventsTable events={events} entryExit={analytics.entryExit} onSeek={seek} />
           </div>
         </div>
       ) : (

@@ -20,6 +20,7 @@ from app.heuristics import (
     board_condition,
     bridge_offscreen_gaps,
     bridge_short_gaps,
+    classify_presence,
     door_entry_exit,
     entry_exit_from_intervals,
     intervals_from_samples,
@@ -63,18 +64,15 @@ def derive(
         teacher_dets = sorted(
             dets_by_track[teacher_no], key=lambda d: d.video_ts_ms
         )
-        presence = presence_intervals([d.video_ts_ms for d in teacher_dets])
-        if door_polygons:
-            presence = bridge_offscreen_gaps(presence, teacher_dets, door_polygons)
-            entry_exit = door_entry_exit(
-                teacher_dets, presence, door_polygons, duration_ms
-            )
-        else:
-            # No door to distinguish a crossing from a blind spot: bridge brief
-            # gaps so a tracking dropout is not reported as leaving and
-            # re-entering the room.
-            presence = bridge_short_gaps(presence)
-            entry_exit = entry_exit_from_intervals(presence, duration_ms)
+        # One pass decides both: gaps she crossed the door through (direction
+        # from her movement relative to it) or stayed away beyond the buffer
+        # are exits and entries; the rest are occlusions, bridged into presence.
+        presence, entry_exit = classify_presence(
+            presence_intervals([d.video_ts_ms for d in teacher_dets]),
+            teacher_dets,
+            door_polygons,
+            duration_ms,
+        )
         events.extend(
             {"kind": e["kind"], "video_ts_ms": e["ts_ms"], "track_no": teacher_no}
             for e in entry_exit

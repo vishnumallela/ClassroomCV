@@ -26,13 +26,26 @@ export const KIND_LABEL: Record<string, string> = {
   writing_end: "Stopped writing",
 };
 
+const METHOD_LABEL: Record<string, string> = {
+  door: "seen at the door",
+  buffer: "inferred: out of frame beyond the buffer",
+  start: "first sighting",
+};
+
 export function EventsTable({
   events,
+  entryExit = [],
   onSeek,
 }: {
   events: VideoEvent[];
+  /** How each enter/exit was decided (analytics.entryExit), matched by time. */
+  entryExit?: { kind: string; ts_ms: number; method?: string | null }[];
   onSeek: (ms: number) => void;
 }) {
+  const methodAt = (kind: string, ms: number): string | null => {
+    const hit = entryExit.find((e) => e.kind === kind && e.ts_ms === ms);
+    return hit?.method ? (METHOD_LABEL[hit.method] ?? hit.method) : null;
+  };
   if (events.length === 0) {
     return <Card className="p-6 text-sm text-muted-foreground">No teacher events detected.</Card>;
   }
@@ -52,7 +65,14 @@ export function EventsTable({
         <TableBody>
           {events.map((e) => (
             <TableRow key={`${e.kind}-${e.videoTsMs}-${e.trackNo}`}>
-              <TableCell className="font-medium">{KIND_LABEL[e.kind] ?? e.kind}</TableCell>
+              <TableCell className="font-medium">
+                {KIND_LABEL[e.kind] ?? e.kind}
+                {methodAt(e.kind, e.videoTsMs) && (
+                  <span className="ml-1.5 text-xs text-muted-foreground">
+                    ({methodAt(e.kind, e.videoTsMs)})
+                  </span>
+                )}
+              </TableCell>
               <TableCell className="tabular-nums text-muted-foreground">
                 {e.trackNo !== null ? `#${e.trackNo}` : "n/a"}
               </TableCell>

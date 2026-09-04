@@ -54,6 +54,19 @@ END_MARGIN_MS = 5_000
 # a crossing.
 OFFSCREEN_BRIDGE_MS = 12_000
 
+# --- entry / exit: through the door, or by absence beyond a buffer ----------
+# The door decides DIRECTION when there is one: an exit is the teacher moving
+# TOWARD the door (or standing in the doorway) as she vanishes, an entry is her
+# moving AWAY from it after she appears — not merely vanishing near it, which
+# on real footage is as often the door frame occluding her as it is a crossing.
+# Without a door, or when no crossing was seen, an absence longer than
+# OUT_OF_FRAME_BUFFER_MS is an exit and the return after it an entry; anything
+# shorter is a blind spot or an occlusion and is bridged into presence.
+OUT_OF_FRAME_BUFFER_MS = 20_000
+# The foot point must close on (or open from) the door by this much of the
+# frame across the trajectory window for the movement to count as a crossing.
+DOOR_APPROACH_MIN = 0.03
+
 # Door test window anchoring the check at the presence edge (the
 # vanish/appear samples). 4s reached back far enough to catch the teacher
 # merely WALKING PAST the door on her way out of frame (pixel-verified false
@@ -234,6 +247,119 @@ def bridge_offscreen_gaps(
         else:
             merged.append([start, end])
     return merged
+
+
+def _foot(det: Detection) -> tuple[float, float]:
+    b = det.bbox
+    return b["x"] + b["w"] / 2.0, b["y"] + b["h"]
+
+
+def _door_distance(det: Detection, polygon: list[list[float]]) -> float:
+    x0, y0, x1, y1 = polygon_bbox(polygon)
+    fx, fy = _foot(det)
+    cx, cy = (x0 + x1) / 2.0, (y0 + y1) / 2.0
+    return ((fx - cx) ** 2 + (fy - cy) ** 2) ** 0.5
+
+
+def in_doorway(det: Detection, polygon: list[list[float]]) -> bool:
+    """Centre inside the door polygon's own box: she is IN the doorway."""
+    return near_zone(det, polygon, expand=0.0)
+
+
+def door_direction(
+    window: list[Detection], polygon: list[list[float]], min_change: float = DOOR_APPROACH_MIN
+) -> Optional[str]:
+    """"toward" / "away" / None from how the foot point's distance to the door
+    changed across the window (first sample to last)."""
+    if len(window) < 2:
+        return None
+    delta = _door_distance(window[-1], polygon) - _door_distance(window[0], polygon)
+    if delta <= -min_change:
+        return "toward"
+    if delta >= min_change:
+        return "away"
+    return None
+
+
+def classify_presence(
+    intervals: list[list[int]],
+    teacher_dets: list[Detection],
+    door_polygons: list[list[list[float]]],
+    duration_ms: int,
+    buffer_ms: int = OUT_OF_FRAME_BUFFER_MS,
+    window_ms: int = DOOR_WINDOW_MS,
+    end_margin_ms: int = END_MARGIN_MS,
+) -> tuple[list[list[int]], list[dict]]:
+    """Presence with occlusions bridged, and the entry/exit events, in one pass.
+
+    Each gap between two presence intervals is one of three things:
+      "door"   — a crossing was SEEN: she moved toward the door (or stood in
+                 the doorway) as she vanished, or moved away from it as she
+                 reappeared. An exit and an entry, whatever the gap's length.
+      "buffer" — no crossing seen, but she was gone for at least buffer_ms:
+                 an exit and an entry, inferred from the absence.
+      bridged  — neither: a blind spot or an occlusion, and presence continues.
+    The first sighting is always an entry ("start", or "door" when she came in
+    through the door after the video began). The last interval ends with an
+    exit only if a crossing was seen, or if the video still had at least
+    buffer_ms to run — vanishing seconds before the end is not leaving.
+    Every event carries its `method`, so a count can say how many exits were
+    seen at the door and how many were inferred.
+    """
+    if not intervals:
+        return [], []
+    dets = sorted(teacher_dets, key=lambda d: d.video_ts_ms)
+
+    def window(lo: int, hi: int) -> list[Detection]:
+        return [d for d in dets if lo <= d.video_ts_ms <= hi]
+
+    def near_any(w: list[Detection]) -> bool:
+        return any(near_zone(d, p, DOOR_EXPAND) for d in w for p in door_polygons)
+
+    def exit_seen(end: int) -> bool:
+        w = window(end - window_ms, end)
+        if not w or not door_polygons or not near_any(w):
+            return False
+        return any(in_doorway(w[-1], p) or door_direction(w, p) == "toward" for p in door_polygons)
+
+    def enter_seen(start: int) -> bool:
+        w = window(start, start + window_ms)
+        if not w or not door_polygons or not near_any(w):
+            return False
+        return any(in_doorway(w[0], p) or door_direction(w, p) == "away" for p in door_polygons)
+
+    out: list[list[int]] = []
+    events: list[dict] = []
+    cur = list(intervals[0])
+    first = cur[0]
+    events.append(
+        {
+            "kind": "enter",
+            "ts_ms": first,
+            "method": "door" if first > end_margin_ms and enter_seen(first) else "start",
+        }
+    )
+    for start, end in intervals[1:]:
+        gap = start - cur[1]
+        if exit_seen(cur[1]) or enter_seen(start):
+            method = "door"
+        elif gap >= buffer_ms:
+            method = "buffer"
+        else:
+            cur[1] = max(cur[1], end)
+            continue
+        events.append({"kind": "exit", "ts_ms": cur[1], "method": method})
+        events.append({"kind": "enter", "ts_ms": start, "method": method})
+        out.append(cur)
+        cur = [start, end]
+    out.append(cur)
+    remaining = duration_ms - cur[1]
+    if remaining >= end_margin_ms:
+        if exit_seen(cur[1]):
+            events.append({"kind": "exit", "ts_ms": cur[1], "method": "door"})
+        elif remaining >= buffer_ms:
+            events.append({"kind": "exit", "ts_ms": cur[1], "method": "buffer"})
+    return out, events
 
 
 def bridge_short_gaps(

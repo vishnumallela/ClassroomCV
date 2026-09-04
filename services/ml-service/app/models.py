@@ -228,6 +228,10 @@ class EventOut(BaseModel):
 class EntryExitOut(BaseModel):
     kind: Literal["enter", "exit"]
     ts_ms: int
+    # How the crossing was decided: seen at the door ("door"), inferred from an
+    # absence beyond the out-of-frame buffer ("buffer"), or the first sighting
+    # ("start"). Null on rows derived before this existed.
+    method: Optional[Literal["door", "buffer", "start"]] = None
 
 
 class HeatmapOut(BaseModel):

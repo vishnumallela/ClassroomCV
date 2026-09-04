@@ -533,12 +533,9 @@ def _person_analytics(dets: list[Detection], zones: list[dict]) -> dict:
     if not dets:
         return {}
     sdets = sorted(dets, key=lambda d: d.video_ts_ms)
-    presence = heuristics_mod.presence_intervals([d.video_ts_ms for d in sdets])
     doors = [z["polygon"] for z in zones if z.get("kind") == "door"]
-    presence = (
-        heuristics_mod.bridge_offscreen_gaps(presence, sdets, doors)
-        if doors
-        else heuristics_mod.bridge_short_gaps(presence)
+    presence, _ = heuristics_mod.classify_presence(
+        heuristics_mod.presence_intervals([d.video_ts_ms for d in sdets]), sdets, doors, 0
     )
     board = next((z["polygon"] for z in zones if z.get("kind") == "board"), None)
     board_iv = (

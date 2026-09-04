@@ -17,7 +17,13 @@ import {
 export type Bbox = { x: number; y: number; w: number; h: number };
 export type Polygon = [number, number][];
 export type ZoneMeta = { auto?: boolean; confidence?: number; method?: string };
-export type EntryExitItem = { kind: string; ts_ms: number };
+export type EntryExitItem = {
+  kind: string;
+  ts_ms: number;
+  /** "door": crossing seen by her movement relative to the door; "buffer": inferred
+   *  from an absence beyond the out-of-frame buffer; "start": first sighting. */
+  method?: "door" | "buffer" | "start" | null;
+};
 export type Interval = [number, number];
 // Teacher dwell histogram (row-major grid_h x grid_w per-cell sample counts).
 // Teacher-only since the 2026-08 KPI slimming (entry/exit, board time, heatmap).
