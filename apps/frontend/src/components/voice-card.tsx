@@ -1,5 +1,6 @@
 import type { RouterOutputs } from "@classroom/api-contracts";
 import { useMutation, useQueryClient } from "@tanstack/react-query";
+import { ChevronDown } from "lucide-react";
 import { useState } from "react";
 import { Button } from "@/components/ui/button";
 import { Card } from "@/components/ui/card";
@@ -8,6 +9,7 @@ import { msToClock } from "@/lib/format";
 import { percent } from "@/lib/measures";
 import { orpcClient } from "@/lib/orpc";
 import { displayLine } from "@/lib/transcript";
+import { cn } from "@/lib/utils";
 
 type Voice = RouterOutputs["videos"]["get"]["voice"];
 
@@ -17,7 +19,8 @@ const LANGUAGE_LABEL: Record<string, string> = { hi: "Hindi", en: "English" };
  * What the microphone heard: who spoke how much, how she spoke, and what
  * she asked. Every number is arithmetic over the stored sentences; the one
  * judgement — whose voice is hers — comes from the video and is stated with
- * its confidence. The sentences sit behind toggles so the numbers read first.
+ * its confidence. Her questions open from the tile that counts them, so the
+ * number and the sentences behind it are one control.
  */
 export function VoiceCard({
   videoId,
@@ -113,18 +116,75 @@ export function VoiceCard({
               sub="words per minute of her speech"
               state="observed"
             />
-            <Stat
-              id="R20"
-              label="Questions to the class"
-              value={voice.questions ? `${voice.questions.toClass}` : "—"}
-              sub={
-                voice.questions
-                  ? `${voice.questions.perTenMinutes} per 10 min · ${voice.questions.checkIns} check-ins like “ठीक है?” set aside`
-                  : null
-              }
-              state="provisional"
-              reason="Counted from question marks until the labelling pass exists."
-            />
+            <div className="min-w-0">
+              <Stat
+                id="R20"
+                label="Questions to the class"
+                value={voice.questions ? `${voice.questions.toClass}` : "—"}
+                sub={
+                  voice.questions
+                    ? `${voice.questions.perTenMinutes} per 10 min · ${voice.questions.checkIns} check-ins like “ठीक है?” set aside`
+                    : null
+                }
+                state="provisional"
+                reason="Counted from question marks until the labelling pass exists."
+              />
+              {voice.questions && voice.questions.list.length > 0 && (
+                <button
+                  type="button"
+                  aria-expanded={showQuestions}
+                  aria-controls="teacher-questions"
+                  onClick={() => setShowQuestions((v) => !v)}
+                  className="mt-1.5 inline-flex items-center gap-1 rounded-md border border-border bg-background px-2 py-1 text-xs text-muted-foreground transition-colors hover:bg-muted hover:text-foreground"
+                >
+                  {showQuestions ? "Hide the questions" : "See what she asked"}
+                  <ChevronDown
+                    className={cn("h-3 w-3 transition-transform", showQuestions && "rotate-180")}
+                    aria-hidden
+                  />
+                </button>
+              )}
+            </div>
+
+            {showQuestions && voice.questions && (
+              <div
+                id="teacher-questions"
+                className="col-span-full overflow-hidden rounded-lg border border-border/60 bg-muted/20"
+              >
+                <div className="flex flex-wrap items-baseline justify-between gap-x-3 gap-y-1 border-b border-border/60 px-3 py-2">
+                  <p className="text-xs font-medium">
+                    The {voice.questions.toClass} questions she asked the class
+                  </p>
+                  <p className="text-[0.7rem] text-muted-foreground">
+                    {voice.questions.checkIns} check-in
+                    {voice.questions.checkIns === 1 ? "" : "s"} like “ठीक है?” are not listed
+                    {voice.questions.list.length < voice.questions.toClass
+                      ? ` · first ${voice.questions.list.length} shown`
+                      : ""}{" "}
+                    · click a time to jump there
+                  </p>
+                </div>
+                <ol className="max-h-72 divide-y divide-border/40 overflow-y-auto text-xs">
+                  {voice.questions.list.map((q, i) => (
+                    <li key={q.idx} className="flex gap-2 px-3 py-1.5">
+                      <span className="w-6 shrink-0 text-right tabular-nums text-muted-foreground">
+                        {i + 1}.
+                      </span>
+                      <button
+                        type="button"
+                        onClick={() => onSeek(q.atMs)}
+                        className="shrink-0 font-mono tabular-nums text-muted-foreground hover:text-foreground hover:underline"
+                      >
+                        {msToClock(q.atMs)}
+                      </button>
+                      <span className="leading-snug" title={q.text}>
+                        {displayLine(q, true)}
+                      </span>
+                    </li>
+                  ))}
+                </ol>
+              </div>
+            )}
             <Stat id="R21" label="Languages" value={languages} sub={languageSub} state="observed" />
             <Stat
               id="R17"
@@ -152,17 +212,6 @@ export function VoiceCard({
           </div>
 
           <div className="mt-4 flex flex-wrap gap-4 text-xs">
-            {voice.questions && voice.questions.list.length > 0 && (
-              <button
-                type="button"
-                onClick={() => setShowQuestions((v) => !v)}
-                className="text-muted-foreground underline-offset-2 hover:underline"
-              >
-                {showQuestions
-                  ? "Hide her questions"
-                  : `Show her ${voice.questions.list.length} questions`}
-              </button>
-            )}
             <button
               type="button"
               onClick={() => setShowMethod((v) => !v)}
@@ -171,25 +220,6 @@ export function VoiceCard({
               {showMethod ? "Hide how these are measured" : "How these are measured"}
             </button>
           </div>
-
-          {showQuestions && voice.questions && (
-            <ol className="mt-3 max-h-64 space-y-1 overflow-y-auto rounded-lg border border-border/60 bg-muted/20 p-3 text-xs">
-              {voice.questions.list.map((q) => (
-                <li key={q.idx} className="flex gap-2">
-                  <button
-                    type="button"
-                    onClick={() => onSeek(q.atMs)}
-                    className="shrink-0 font-mono text-muted-foreground tabular-nums hover:text-foreground"
-                  >
-                    {msToClock(q.atMs)}
-                  </button>
-                  <span className="leading-snug" title={q.text}>
-                    {displayLine(q, true)}
-                  </span>
-                </li>
-              ))}
-            </ol>
-          )}
         </>
       )}
 
