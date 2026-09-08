@@ -158,8 +158,13 @@ async function serveVideo(c: Context, headOnly: boolean): Promise<Response> {
   const contentType = contentTypeFor(video.filePath);
   const range = c.req.header("range");
 
+  // The body is the BunFile itself, never file.stream(): a stream body makes
+  // Bun answer chunked, drop the content-length we set, and — for a sliced
+  // file — never send the terminating chunk, so the player receives every byte
+  // and then waits on the connection for ever. A BunFile body is sent with a
+  // real content-length and closes.
   const full = (): Response =>
-    new Response(headOnly ? null : file.stream(), {
+    new Response(headOnly ? null : file, {
       status: 200,
       headers: {
         "content-type": contentType,
@@ -193,7 +198,7 @@ async function serveVideo(c: Context, headOnly: boolean): Promise<Response> {
     return unsatisfiable();
   }
 
-  return new Response(headOnly ? null : file.slice(start, end + 1).stream(), {
+  return new Response(headOnly ? null : file.slice(start, end + 1), {
     status: 206,
     headers: {
       "content-type": contentType,
@@ -210,7 +215,7 @@ async function serveThumbnail(c: Context, headOnly: boolean): Promise<Response> 
   await ensureLocal(video.thumbnailPath).catch(() => undefined);
   const file = Bun.file(video.thumbnailPath);
   if (!(await file.exists())) return c.notFound();
-  return new Response(headOnly ? null : file.stream(), {
+  return new Response(headOnly ? null : file, {
     headers: { "content-type": "image/jpeg", "cache-control": "public, max-age=60" },
   });
 }
